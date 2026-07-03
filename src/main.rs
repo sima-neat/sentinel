@@ -24,7 +24,7 @@ fn main() {
 fn run() -> Result<()> {
     let mut args: Vec<String> = env::args().skip(1).collect();
     let mut cache = default_cache_path().to_string();
-    let mut interval = 0.5f64;
+    let mut interval = None::<f64>;
     let mut once = false;
     let mut history = 240usize;
 
@@ -36,7 +36,7 @@ fn run() -> Result<()> {
                 continue;
             }
             "--interval" => {
-                interval = take_value(&mut args, i, "--interval")?.parse()?;
+                interval = Some(take_value(&mut args, i, "--interval")?.parse()?);
                 continue;
             }
             "--history" => {
@@ -58,10 +58,25 @@ fn run() -> Result<()> {
 
     let command = args.first().map(String::as_str).unwrap_or("ops");
     match command {
-        "daemon" => daemon::run(&cache, Duration::from_secs_f64(interval.max(0.2)), history),
-        "table" => ui::run_table(&cache, Duration::from_secs_f64(interval.max(0.2)), once),
-        "ops" if once => ui::run_ops(&cache, Duration::from_secs_f64(interval.max(0.2)), true),
-        "ops" => tui::run_ops(&cache, Duration::from_secs_f64(interval.max(0.5))),
+        "daemon" => daemon::run(
+            &cache,
+            Duration::from_secs_f64(interval.unwrap_or(2.0).max(0.5)),
+            history,
+        ),
+        "table" => ui::run_table(
+            &cache,
+            Duration::from_secs_f64(interval.unwrap_or(0.5).max(0.2)),
+            once,
+        ),
+        "ops" if once => ui::run_ops(
+            &cache,
+            Duration::from_secs_f64(interval.unwrap_or(0.5).max(0.2)),
+            true,
+        ),
+        "ops" => tui::run_ops(
+            &cache,
+            Duration::from_secs_f64(interval.unwrap_or(0.5).max(0.5)),
+        ),
         "export" => ui::export_json(&cache),
         "sensors" | "metrics" => ui::print_sensors(&cache),
         "status" => ui::print_status(&cache),
