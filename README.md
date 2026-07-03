@@ -29,9 +29,25 @@ aarch64 binary and does not require a Rust toolchain on the DevKit.
 simaai-sentinel                 # open the terminal operations view
 simaai-sentinel table           # continuously redraw a color-coded table
 simaai-sentinel table --once    # print one table snapshot
+simaai-sentinel export          # print the daemon cache as JSON
 simaai-sentinel sensors         # explain each collected metric
 simaai-sentinel status          # daemon/cache status
 ```
+
+## JSON export
+
+Use `simaai-sentinel export` when another script or application needs the
+latest sensor data. The command reads the daemon cache and prints JSON to
+stdout:
+
+```bash
+simaai-sentinel export > sentinel-cache.json
+```
+
+The exported document includes metric definitions, the latest sample, recent
+sample history, process summaries, and daemon error messages. Temperature
+sensor values are included in `latest.values` using the metric keys described
+by the `metrics` array.
 
 Temperature coloring:
 

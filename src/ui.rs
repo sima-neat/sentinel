@@ -1,3 +1,4 @@
+use std::io;
 use std::thread;
 use std::time::Duration;
 
@@ -70,6 +71,13 @@ pub fn print_status(cache_path: &str) -> Result<()> {
     if !cache.errors.is_empty() {
         println!("Errors:           {}", cache.errors.join("; "));
     }
+    Ok(())
+}
+
+pub fn export_json(cache_path: &str) -> Result<()> {
+    let cache = read_cache(cache_path)?;
+    serde_json::to_writer_pretty(io::stdout(), &cache)?;
+    println!();
     Ok(())
 }
 
