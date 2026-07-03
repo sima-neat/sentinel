@@ -70,6 +70,7 @@ jobs:
       - name: Validate package
         run: |
           set -euo pipefail
+          rustup component add rustfmt
           cargo fmt --check
           cargo check --locked
 
