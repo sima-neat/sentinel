@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::model::{MetricDefinition, ProcessInfo};
+
+const PROCESS_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn system_metric_definitions() -> Vec<MetricDefinition> {
     let mut out = vec![
@@ -159,8 +161,10 @@ pub struct SystemCollector {
     last_cpu_cores: Vec<(u64, u64)>,
     last_diskstats: BTreeMap<String, (u64, u64)>,
     last_netdev: BTreeMap<String, (u64, u64)>,
+    last_process_time: Option<Instant>,
     last_proc_times: BTreeMap<u32, u64>,
     processes: Vec<ProcessInfo>,
+    process_interval: Duration,
     clock_ticks: f64,
     page_size: f64,
 }
@@ -173,8 +177,10 @@ impl SystemCollector {
             last_cpu_cores: Vec::new(),
             last_diskstats: BTreeMap::new(),
             last_netdev: BTreeMap::new(),
+            last_process_time: None,
             last_proc_times: BTreeMap::new(),
             processes: Vec::new(),
+            process_interval: PROCESS_SAMPLE_INTERVAL,
             clock_ticks: clock_ticks_per_second(),
             page_size: page_size_bytes(),
         }
@@ -194,7 +200,12 @@ impl SystemCollector {
         values.insert("mla_mem_allocated_mb".into(), read_mla_memory_mb());
         values.extend(self.sample_disks(dt));
         values.extend(self.sample_network(dt));
-        self.processes = self.sample_processes(dt);
+        if self
+            .last_process_time
+            .is_none_or(|last| now.duration_since(last) >= self.process_interval)
+        {
+            self.processes = self.sample_processes(now);
+        }
         values
     }
 
@@ -296,7 +307,12 @@ impl SystemCollector {
         ])
     }
 
-    fn sample_processes(&mut self, dt: f64) -> Vec<ProcessInfo> {
+    fn sample_processes(&mut self, now: Instant) -> Vec<ProcessInfo> {
+        let dt = self
+            .last_process_time
+            .map(|last| now.duration_since(last).as_secs_f64().max(0.001))
+            .unwrap_or_else(|| self.process_interval.as_secs_f64().max(0.001));
+        self.last_process_time = Some(now);
         let snapshots = read_process_stats();
         let mut next_times = BTreeMap::new();
         let mut processes = Vec::new();
