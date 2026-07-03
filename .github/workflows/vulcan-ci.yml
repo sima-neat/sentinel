@@ -120,7 +120,6 @@ jobs:
 
   update-latest:
     name: Update Vulcan Latest Tag
-    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag'
     needs:
       - resolve-vulcan-config
       - publish
