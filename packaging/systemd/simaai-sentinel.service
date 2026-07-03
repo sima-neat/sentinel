@@ -1,0 +1,16 @@
+[Unit]
+Description=SiMa.ai Sentinel sensor monitoring daemon
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/simaai-sentinel daemon --cache /run/simaai-sentinel/cache.json --interval 0.5 --history 240
+Restart=always
+RestartSec=5
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
