@@ -62,6 +62,7 @@ fn run() -> Result<()> {
         "table" => ui::run_table(&cache, Duration::from_secs_f64(interval.max(0.2)), once),
         "ops" if once => ui::run_ops(&cache, Duration::from_secs_f64(interval.max(0.2)), true),
         "ops" => tui::run_ops(&cache, Duration::from_secs_f64(interval.max(0.5))),
+        "export" => ui::export_json(&cache),
         "sensors" | "metrics" => ui::print_sensors(&cache),
         "status" => ui::print_status(&cache),
         other => bail!("unknown command '{other}'"),
@@ -80,7 +81,7 @@ fn take_value(args: &mut Vec<String>, index: usize, flag: &str) -> Result<String
 fn print_help() {
     println!(
         "simaai-sentinel [--cache PATH] [--interval SEC] [--once] [command]\n\n\
-Commands:\n  ops        Continuous terminal operations view (default)\n  table      Continuous color-coded table view\n  sensors    Explain collected metrics and thresholds\n  status     Show daemon/cache status\n  daemon     Run the background collector daemon\n\n\
+Commands:\n  ops        Continuous terminal operations view (default)\n  table      Continuous color-coded table view\n  export     Print daemon cache as JSON\n  sensors    Explain collected metrics and thresholds\n  status     Show daemon/cache status\n  daemon     Run the background collector daemon\n\n\
 Daemon options:\n  --history N    Number of samples to keep in cache\n"
     );
 }
