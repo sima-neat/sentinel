@@ -56,6 +56,64 @@ Temperature coloring:
 - Red: 70 C or higher
 - Bold red: 85 C or higher
 
+## Hardware temperature sensors
+
+Sentinel reports 17 thermal readings in three distinct classes:
+
+- 14 on-die RTSN/PVT readings from inside the Modalix SoC
+  (`MLA-*`, `APU-*`, `CVU-*`, `TOP-*`),
+- 2 SOM board-temperature readings from the LM96063 hardware-monitoring IC
+  (`LM96-1`, `LM96-2`),
+- 1 Ethernet/MDIO reading (`ETH-1`).
+
+None of these is an ambient (air) temperature.
+
+### On-die RTSN sensors (`MLA-*`, `APU-*`, `CVU-*`, `TOP-*`)
+
+The SoC has 7 thermal sensor sites across 4 subsystems: the MLA (four
+quadrants, Q0-Q3), the APU, the CVU, and TOP (near the PCIE/ETH area). Each
+site needs two distinct thresholds — a low "Thermal Alert" and a high
+"Thermal Trip" — and a design rule prevents connecting one RTSN to more than
+one DTS Hub channel, so the Remote Temperature Sensor (RTSN) is duplicated at
+each site, giving 14 RTSNs total:
+
+- Channels 0-6 feed each site's Alert channel, which fires the early "Alert"
+  interrupt.
+- Channels 7-13 feed each site's Trip channel, which fires the hard "Trip".
+
+Sentinel names each reading `<subsystem>-<channel>`, so a sensor pair such as
+`MLA-0`/`MLA-7` is one Alert/Trip duplicate pair sitting at the same physical
+spot (the RTSN is only 20 um x 18 um). Each reading is a local on-die point
+measurement at its site, not an average over a logical region; the paired
+readings measure the same location and differ only in which threshold channel
+they drive.
+
+| Subsystem | Sensor site / location | Alert sensor (ch 0-6) | Trip sensor (ch 7-13) |
+| --- | --- | --- | --- |
+| MLA | Q0 quadrant | `MLA-0` | `MLA-7` |
+| MLA | Q1 quadrant | `MLA-1` | `MLA-8` |
+| MLA | Q2 quadrant | `MLA-2` | `MLA-9` |
+| MLA | Q3 quadrant | `MLA-3` | `MLA-10` |
+| APU | APU | `APU-4` | `APU-11` |
+| CVU | CVU | `CVU-5` | `CVU-12` |
+| TOP | Near the PCIE/ETH area | `TOP-6` | `TOP-13` |
+
+The daemon acquires these by sampling the SoC PVT controller registers
+through `/dev/mem`.
+
+### Board and Ethernet sensors (Linux hwmon)
+
+| Sentinel sensor | Physical measurement location | Measurement method / path |
+| --- | --- | --- |
+| `LM96-1` | Top side of the SOM | SOM top-side board temperature, reported by the LM96063 hardware-monitoring IC (Linux `lm96163` hwmon driver, `temp1_input`, e.g. `/sys/class/hwmon/hwmon2/temp1_input`). This is a board-temperature measurement, not ambient or processor-junction temperature. |
+| `LM96-2` | Bottom side of the SOM | SOM bottom-side board temperature. A diode physically located on the bottom side of the SOM senses the temperature; the diode is electrically connected to, read by, and reported through the LM96063 IC (`temp2_input`, e.g. `/sys/class/hwmon/hwmon2/temp2_input`). |
+| `ETH-1` | Ethernet/MDIO device | `ETH/MDIO temp1` Linux hwmon reading (`temp1_input`, e.g. `/sys/class/hwmon/hwmon0/temp1_input`). The exact Ethernet component and its board location are not yet confirmed from hardware documentation; this is tracked in [issue #5](https://github.com/sima-neat/sentinel/issues/5). |
+
+For hwmon entries, the daemon reads `temp*_input` values from sysfs
+(millidegrees Celsius, converted to C) and resolves the LM96063 by its
+`lm96163` driver name rather than relying on a fixed `hwmonN` number; the
+paths above are examples.
+
 ## Service
 
 ```bash
