@@ -19,7 +19,17 @@ const RTSN_GROUPS: [&str; 14] = [
     "TOP",
 ];
 
-const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str); 3] = [
+const RTSN_SITES: [&str; 7] = [
+    "MLA Q0",
+    "MLA Q1",
+    "MLA Q2",
+    "MLA Q3",
+    "APU",
+    "CVU",
+    "TOP (near PCIE/ETH area)",
+];
+
+const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str, &str); 3] = [
     (
         "lm96163_temp1",
         "LM96163 temp1",
@@ -28,6 +38,7 @@ const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str); 3] = [
         Some("lm96163"),
         "temp1_input",
         "/sys/class/hwmon/hwmon2/temp1_input",
+        "SOM top-side board temperature from the LM96063 hardware-monitoring IC's internal sensor.",
     ),
     (
         "lm96163_temp2",
@@ -37,6 +48,7 @@ const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str); 3] = [
         Some("lm96163"),
         "temp2_input",
         "/sys/class/hwmon/hwmon2/temp2_input",
+        "SOM bottom-side board temperature from a diode on the bottom side of the SOM, read through the LM96063 IC.",
     ),
     (
         "eth_mdio_temp1",
@@ -46,31 +58,34 @@ const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str); 3] = [
         None,
         "temp1_input",
         "/sys/class/hwmon/hwmon0/temp1_input",
+        "Ethernet/MDIO temperature reported through the ETH hwmon device.",
     ),
 ];
 
 pub fn thermal_metric_definitions() -> Vec<MetricDefinition> {
     let mut out = Vec::new();
     for (idx, group) in RTSN_GROUPS.iter().enumerate() {
+        let site = RTSN_SITES[idx % 7];
+        let role = if idx < 7 { "Alert" } else { "Trip" };
         out.push(MetricDefinition::new(
             &format!("rtsn_{idx}"),
             &format!("{group} RTSN-{idx}"),
             &format!("{group}-{idx}"),
             group,
             "C",
-            &format!("{group} RTSN thermal sensor {idx}."),
+            &format!("On-die RTSN at the {site} site; feeds DTS Hub {role} channel {idx}."),
             Some(70.0),
             Some(85.0),
         ));
     }
-    for (key, label, short, group, _chip, _input, _fallback) in HWMON {
+    for (key, label, short, group, _chip, _input, _fallback, description) in HWMON {
         out.push(MetricDefinition::new(
             key,
             label,
             short,
             group,
             "C",
-            "Board-level Linux hwmon temperature sensor.",
+            description,
             Some(70.0),
             Some(85.0),
         ));
@@ -111,7 +126,7 @@ impl ThermalCollector {
 
 fn resolve_hwmon_paths() -> BTreeMap<String, String> {
     let mut paths = BTreeMap::new();
-    for (key, _label, _short, _group, chip, input, fallback) in HWMON {
+    for (key, _label, _short, _group, chip, input, fallback, _description) in HWMON {
         let resolved = chip
             .and_then(find_hwmon_by_name)
             .map(|dir| format!("{dir}/{input}"))
