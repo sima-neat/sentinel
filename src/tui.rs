@@ -34,17 +34,25 @@ const RED: Color = Color::Red;
 enum Tab {
     Overview,
     Thermal,
+    Power,
     System,
     Storage,
 }
 
-const TABS: [Tab; 4] = [Tab::Overview, Tab::Thermal, Tab::System, Tab::Storage];
+const TABS: [Tab; 5] = [
+    Tab::Overview,
+    Tab::Thermal,
+    Tab::Power,
+    Tab::System,
+    Tab::Storage,
+];
 
 impl Tab {
     fn title(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Thermal => "Thermal",
+            Tab::Power => "Power",
             Tab::System => "System",
             Tab::Storage => "Storage/Net",
         }
@@ -134,6 +142,11 @@ pub fn run_ops(cache_path: &str, interval: Duration) -> Result<()> {
                             dirty = true;
                             clear_body = true;
                         }
+                        (KeyCode::Char('5'), _) => {
+                            active = 4;
+                            dirty = true;
+                            clear_body = true;
+                        }
                         (KeyCode::Up, _) if TABS[active] == Tab::System => {
                             selected_core = selected_core.saturating_sub(1);
                             dirty = true;
@@ -199,6 +212,7 @@ fn draw(
     match active {
         Tab::Overview => draw_overview(f, layout[2], cache),
         Tab::Thermal => draw_thermal(f, layout[2], cache, thermal_group),
+        Tab::Power => draw_power(f, layout[2], cache),
         Tab::System => draw_system(f, layout[2], cache, selected_core),
         Tab::Storage => draw_storage(f, layout[2], cache),
     }
@@ -271,7 +285,7 @@ fn draw_footer(f: &mut Frame, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " 1-4",
+                " 1-5",
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ),
             Span::styled(":Tab  ", Style::default().fg(DIM)),
@@ -520,6 +534,189 @@ fn draw_thermal_sensor_chart_column(
                 cache,
             );
         }
+    }
+}
+
+fn draw_power(f: &mut Frame, area: Rect, cache: &CachePayload) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(12), Constraint::Min(0)])
+        .split(area);
+    let kpis = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(rows[0]);
+
+    let scale_max = max_or(series(cache, "power_peak_watts"), 1.0) * 1.2;
+    draw_kpi_chart(
+        f,
+        kpis[0],
+        "Current",
+        value(cache, "power_current_watts"),
+        "W",
+        0.0,
+        scale_max,
+        series(cache, "power_current_watts"),
+        cache,
+    );
+    draw_kpi_chart(
+        f,
+        kpis[1],
+        "Session average",
+        value(cache, "power_average_watts"),
+        "W",
+        0.0,
+        scale_max,
+        series(cache, "power_average_watts"),
+        cache,
+    );
+    draw_kpi_chart(
+        f,
+        kpis[2],
+        "Session peak",
+        value(cache, "power_peak_watts"),
+        "W",
+        0.0,
+        scale_max,
+        series(cache, "power_peak_watts"),
+        cache,
+    );
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(rows[1]);
+    draw_line_chart(
+        f,
+        columns[0],
+        "Current board power",
+        series(cache, "power_current_watts"),
+        0.0,
+        scale_max,
+        "W",
+        cache,
+    );
+
+    let details = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(0)])
+        .split(columns[1]);
+    draw_power_status(f, details[0], cache);
+    draw_power_rails(f, details[1], cache);
+}
+
+fn draw_power_status(f: &mut Frame, area: Rect, cache: &CachePayload) {
+    let Some(power) = cache.power.as_ref() else {
+        f.render_widget(
+            Paragraph::new(
+                "Power status is unavailable. The cache may have been produced by an older Sentinel daemon.",
+            )
+            .block(panel("Collector status"))
+            .style(Style::default().fg(DIM).bg(BG))
+            .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    };
+
+    let state = if power.valid_samples == 0 {
+        Span::styled(
+            "UNAVAILABLE",
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        )
+    } else if !power.last_sample_valid || power.last_error.is_some() {
+        Span::styled(
+            "DEGRADED",
+            Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            "ACTIVE",
+            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+        )
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("State ", Style::default().fg(DIM)),
+            state,
+            Span::styled("  Profile ", Style::default().fg(DIM)),
+            Span::styled(power.profile.clone(), Style::default().fg(FG)),
+        ]),
+        Line::from(format!(
+            "100 ms-compatible sampling: {} ms  ·  duration {}",
+            power.sample_interval_ms,
+            format_duration(power.duration_seconds)
+        )),
+        Line::from(format!(
+            "valid samples {}  ·  failed samples {}",
+            power.valid_samples, power.failed_samples
+        )),
+    ];
+    if let Some(error) = &power.last_error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(YELLOW),
+        )));
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(panel("Collector status"))
+            .style(Style::default().fg(FG).bg(BG))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn draw_power_rails(f: &mut Frame, area: Rect, cache: &CachePayload) {
+    let rails = cache
+        .power
+        .as_ref()
+        .map(|power| power.rails.as_slice())
+        .unwrap_or_default();
+    let rows = rails.iter().map(|rail| {
+        let color = if rail.current_watts.is_some() {
+            GREEN
+        } else {
+            DIM
+        };
+        Row::new(vec![
+            Cell::from(rail.label.clone()),
+            Cell::from(Span::styled(
+                format_value(rail.current_watts, "W"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(rail.samples.to_string()),
+            Cell::from(rail.errors.to_string()),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Min(20),
+            Constraint::Length(10),
+            Constraint::Length(9),
+            Constraint::Length(7),
+        ],
+    )
+    .header(
+        Row::new(vec!["Rail", "Power", "Samples", "Errors"])
+            .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
+    )
+    .block(panel("PMBus rails"))
+    .style(Style::default().bg(BG).fg(FG));
+    f.render_widget(table, area);
+}
+
+fn format_duration(seconds: f64) -> String {
+    let seconds = seconds.max(0.0) as u64;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
     }
 }
 
@@ -1311,4 +1508,80 @@ fn max_or(samples: Vec<f64>, fallback: f64) -> f64 {
         .into_iter()
         .filter(|value| value.is_finite())
         .fold(fallback, f64::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use ratatui::backend::TestBackend;
+
+    use crate::model::{PowerRailStatus, PowerStatus, Sample};
+
+    #[test]
+    fn power_tab_renders_totals_status_and_rails() {
+        let values = BTreeMap::from([
+            ("power_current_watts".into(), Some(8.0)),
+            ("power_average_watts".into(), Some(7.5)),
+            ("power_peak_watts".into(), Some(9.0)),
+        ]);
+        let sample = Sample {
+            timestamp: Utc::now(),
+            values,
+        };
+        let metrics = [
+            ("power_current_watts", "Current"),
+            ("power_average_watts", "Average"),
+            ("power_peak_watts", "Peak"),
+        ]
+        .into_iter()
+        .map(|(key, label)| {
+            MetricDefinition::new(key, label, label, "Power", "W", label, None, None)
+        })
+        .collect();
+        let cache = CachePayload {
+            schema: 1,
+            version: "0.1.0".into(),
+            updated_at: Utc::now(),
+            metrics,
+            latest: Some(sample.clone()),
+            samples: vec![sample],
+            processes: Vec::new(),
+            power: Some(PowerStatus {
+                profile: "modalix_som".into(),
+                sample_interval_ms: 100,
+                duration_seconds: 12.0,
+                valid_samples: 120,
+                failed_samples: 0,
+                last_sample_valid: true,
+                last_error: None,
+                rails: vec![PowerRailStatus {
+                    key: "power_rail_mla_watts".into(),
+                    label: "MLA 0.68V".into(),
+                    current_watts: Some(1.25),
+                    samples: 120,
+                    errors: 0,
+                }],
+            }),
+            errors: Vec::new(),
+        };
+
+        let backend = TestBackend::new(140, 42);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, &cache, Tab::Power, true, 0, 0))
+            .expect("draw power tab");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("Session average"));
+        assert!(rendered.contains("Session peak"));
+        assert!(rendered.contains("modalix_som"));
+        assert!(rendered.contains("MLA 0.68V"));
+    }
 }

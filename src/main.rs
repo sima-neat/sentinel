@@ -1,6 +1,7 @@
 mod cache;
 mod daemon;
 mod model;
+mod power;
 mod ring;
 mod system;
 mod thermal;

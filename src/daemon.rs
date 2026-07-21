@@ -8,7 +8,10 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::cache::write_cache;
-use crate::model::{CachePayload, MetricDefinition, ProcessInfo, Sample};
+use crate::model::{CachePayload, MetricDefinition, PowerStatus, ProcessInfo, Sample};
+use crate::power::{
+    power_metric_definitions, spawn_power_collector, PowerAccumulator, PowerConfig,
+};
 use crate::ring::Ring;
 use crate::system::{system_metric_definitions, SystemCollector};
 use crate::thermal::{thermal_metric_definitions, ThermalCollector};
@@ -20,11 +23,15 @@ pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
     let mut metrics = Vec::<MetricDefinition>::new();
     metrics.extend(thermal_metric_definitions());
     metrics.extend(system_metric_definitions());
+    let power_config = PowerConfig::auto(Duration::from_millis(100));
+    metrics.extend(power_metric_definitions(&power_config));
 
     let mut system = SystemCollector::new();
     let mut samples = Ring::new(history.max(1));
     let thermal_values = Arc::new(Mutex::new(BTreeMap::new()));
     spawn_thermal_collector(stopped.clone(), thermal_values.clone());
+    let power = Arc::new(Mutex::new(PowerAccumulator::new(power_config.clone())));
+    spawn_power_collector(stopped.clone(), power_config, power.clone());
 
     while !stopped.load(Ordering::Relaxed) {
         let loop_start = Instant::now();
@@ -33,12 +40,22 @@ pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
             values.extend(latest_thermal.clone());
         }
         values.extend(system.sample());
+        let power_status = power.lock().ok().map(|state| {
+            values.extend(state.metric_values());
+            state.status()
+        });
         samples.push(Sample {
             timestamp: Utc::now(),
             values: sanitize_values(&values),
         });
 
-        let payload = payload(&metrics, &samples, system.processes(), Vec::new());
+        let payload = payload(
+            &metrics,
+            &samples,
+            system.processes(),
+            power_status,
+            Vec::new(),
+        );
         write_cache(cache_path, &payload)?;
 
         let elapsed = loop_start.elapsed();
@@ -47,10 +64,12 @@ pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
         }
     }
 
+    let power_status = power.lock().ok().map(|state| state.status());
     let payload = payload(
         &metrics,
         &samples,
         system.processes(),
+        power_status,
         vec!["daemon stopped".into()],
     );
     write_cache(cache_path, &payload)?;
@@ -97,6 +116,7 @@ fn payload(
     metrics: &[MetricDefinition],
     samples: &Ring<Sample>,
     processes: Vec<ProcessInfo>,
+    power: Option<PowerStatus>,
     errors: Vec<String>,
 ) -> CachePayload {
     CachePayload {
@@ -107,6 +127,7 @@ fn payload(
         latest: samples.last().cloned(),
         samples: samples.to_vec(),
         processes,
+        power,
         errors,
     }
 }

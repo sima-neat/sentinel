@@ -10,8 +10,8 @@ The package installs:
   terminal line graphs, and sensor reference information.
 - `simaai-sentinel daemon`: a systemd-managed sampling daemon that reads board
   thermal sensors, CPU load, Linux memory, MLA allocator memory, disk usage,
-  disk IO, and network IO. It keeps a timestamped cache under
-  `/run/simaai-sentinel`.
+  disk IO, network IO, and Modalix PMBus power. It keeps a timestamped cache
+  under `/run/simaai-sentinel`.
 
 ## Install with sima-cli
 
@@ -20,8 +20,9 @@ sima-cli neat install sentinel
 ```
 
 The installer must run on a Modalix DevKit because the daemon reads hardware
-sensors through `/dev/mem` and Linux `hwmon`. The package installs a prebuilt
-aarch64 binary and does not require a Rust toolchain on the DevKit.
+sensors through `/dev/mem`, Linux `hwmon`, and `/dev/i2c-*`. The package
+installs a prebuilt aarch64 binary and does not require a Rust toolchain on the
+DevKit.
 
 ## Usage
 
@@ -48,6 +49,23 @@ The exported document includes metric definitions, the latest sample, recent
 sample history, process summaries, and daemon error messages. Temperature
 sensor values are included in `latest.values` using the metric keys described
 by the `metrics` array.
+
+## Power monitoring
+
+The **Power** tab shows current board power together with average and peak power
+since the daemon started. Sentinel samples PMBus POUT registers every 100 ms so
+short peaks are retained, then publishes aggregate values through its normal
+cache interval. The recent-current chart uses the cache history.
+
+Sentinel implements the same PMBus protocol and Modalix SOM/DVT rail profiles
+as Neat Core's power telemetry without linking to the Core library. Individual
+rail failures produce a degraded status while successfully read rails continue
+to contribute to the total. If no rail can be read, the UI reports power as
+unavailable instead of displaying zero.
+
+Power statistics reset when the daemon restarts. The JSON export includes the
+three total metrics, per-rail metrics, and a `power` status object containing
+the detected profile, sample counts, read failures, and latest rail values.
 
 Temperature coloring:
 
@@ -133,3 +151,5 @@ Collected system metrics include:
 - eMMC disk usage and IO rate
 - NVMe disk usage and IO rate when `/media/nvme` is mounted
 - Aggregate non-loopback network RX/TX rate
+- Current, session-average, and session-peak board power
+- Per-rail PMBus POUT readings and read-error counts
