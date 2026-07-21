@@ -9,12 +9,13 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table, Tabs, Wrap,
+    Axis, Block, Borders, Cell, Chart, Clear, Dataset, Gauge, GraphType, Paragraph, Row, Table,
+    Tabs, Wrap,
 };
 use ratatui::{Frame, Terminal};
 
@@ -574,17 +575,7 @@ fn draw_power(f: &mut Frame, area: Rect, cache: &CachePayload) {
         series(cache, "power_average_watts"),
         cache,
     );
-    draw_kpi_chart(
-        f,
-        kpis[2],
-        "Session peak",
-        value(cache, "power_peak_watts"),
-        "W",
-        0.0,
-        scale_max,
-        series(cache, "power_peak_watts"),
-        cache,
-    );
+    draw_power_peak(f, kpis[2], value(cache, "power_peak_watts"), scale_max);
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -607,6 +598,48 @@ fn draw_power(f: &mut Frame, area: Rect, cache: &CachePayload) {
         .split(columns[1]);
     draw_power_status(f, details[0], cache);
     draw_power_rails(f, details[1], cache);
+}
+
+fn draw_power_peak(f: &mut Frame, area: Rect, peak: Option<f64>, scale_max: f64) {
+    let block = panel("Session peak");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+    f.render_widget(
+        Paragraph::new(format_value(peak, "W"))
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(GREEN)
+                    .bg(BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        rows[0],
+    );
+    let ratio = peak
+        .map(|value| value / scale_max.max(0.001))
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    f.render_widget(
+        Gauge::default()
+            .ratio(ratio)
+            .gauge_style(Style::default().fg(GREEN).bg(FAINT))
+            .label(format!("{:.0}% of {:.1} W scale", ratio * 100.0, scale_max)),
+        rows[1],
+    );
+    f.render_widget(
+        Paragraph::new("Maximum valid total since daemon start")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(DIM).bg(BG)),
+        rows[2],
+    );
 }
 
 fn draw_power_status(f: &mut Frame, area: Rect, cache: &CachePayload) {
@@ -1581,6 +1614,7 @@ mod tests {
 
         assert!(rendered.contains("Session average"));
         assert!(rendered.contains("Session peak"));
+        assert!(rendered.contains("Maximum valid total"));
         assert!(rendered.contains("modalix_som"));
         assert!(rendered.contains("MLA 0.68V"));
     }
