@@ -55,6 +55,27 @@ pub struct ProcessInfo {
     pub cpu_core: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PowerRailStatus {
+    pub key: String,
+    pub label: String,
+    pub current_watts: Option<f64>,
+    pub samples: u64,
+    pub errors: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PowerStatus {
+    pub profile: String,
+    pub sample_interval_ms: u64,
+    pub duration_seconds: f64,
+    pub valid_samples: u64,
+    pub failed_samples: u64,
+    pub last_sample_valid: bool,
+    pub last_error: Option<String>,
+    pub rails: Vec<PowerRailStatus>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachePayload {
     pub schema: u32,
@@ -65,5 +86,29 @@ pub struct CachePayload {
     pub samples: Vec<Sample>,
     #[serde(default)]
     pub processes: Vec<ProcessInfo>,
+    #[serde(default)]
+    pub power: Option<PowerStatus>,
     pub errors: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_without_power_field_remains_readable() {
+        let cache: CachePayload = serde_json::from_value(serde_json::json!({
+            "schema": 1,
+            "version": "0.1.0",
+            "updated_at": "2026-07-21T00:00:00Z",
+            "metrics": [],
+            "latest": null,
+            "samples": [],
+            "errors": []
+        }))
+        .expect("legacy cache should deserialize");
+
+        assert!(cache.processes.is_empty());
+        assert!(cache.power.is_none());
+    }
 }
