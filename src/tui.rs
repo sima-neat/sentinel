@@ -304,9 +304,13 @@ fn draw_footer(f: &mut Frame, area: Rect) {
 }
 
 fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
+    // Keep the status and notes panels visible on standard 24-row terminals.
+    // The full-size overview uses 22 rows for charts, but yields space as the
+    // available body shrinks.
+    let kpi_height = area.height.saturating_sub(6).min(22);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(22), Constraint::Min(0)])
+        .constraints([Constraint::Length(kpi_height), Constraint::Min(0)])
         .split(area);
     let kpi_rows = Layout::default()
         .direction(Direction::Vertical)
@@ -1652,5 +1656,37 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(overview.contains("Current Power"));
+    }
+
+    #[test]
+    fn overview_preserves_status_panels_on_standard_height_terminal() {
+        let cache = CachePayload {
+            schema: 1,
+            version: "0.1.0".into(),
+            updated_at: Utc::now(),
+            metrics: Vec::new(),
+            latest: None,
+            samples: Vec::new(),
+            processes: Vec::new(),
+            power: None,
+            errors: Vec::new(),
+        };
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &cache, Tab::Overview, true, 0, 0))
+            .expect("draw overview tab");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("Current Power"));
+        assert!(rendered.contains("Current status"));
+        assert!(rendered.contains("Notes"));
     }
 }
