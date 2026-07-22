@@ -304,24 +304,38 @@ fn draw_footer(f: &mut Frame, area: Rect) {
 }
 
 fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
+    // Keep the status and notes panels visible on standard 24-row terminals.
+    // The full-size overview uses 22 rows for charts, but yields space as the
+    // available body shrinks.
+    let kpi_height = area.height.saturating_sub(6).min(22);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(12), Constraint::Min(0)])
+        .constraints([Constraint::Length(kpi_height), Constraint::Min(0)])
         .split(area);
-    let kpis = Layout::default()
+    let kpi_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+        .split(vertical[0]);
+    let top_kpis = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
-            Constraint::Ratio(1, 5),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
         ])
-        .split(vertical[0]);
+        .split(kpi_rows[0]);
+    let bottom_kpis = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(kpi_rows[1]);
 
     draw_kpi_chart(
         f,
-        kpis[0],
+        top_kpis[0],
         "Thermal Max",
         max_group(cache, |m| m.unit == "C"),
         "C",
@@ -330,9 +344,21 @@ fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
         thermal_max_series(cache),
         cache,
     );
+    let power_series = series(cache, "power_current_watts");
     draw_kpi_chart(
         f,
-        kpis[1],
+        top_kpis[1],
+        "Current Power",
+        value(cache, "power_current_watts"),
+        "W",
+        0.0,
+        max_or(power_series.clone(), 1.0) * 1.2,
+        power_series,
+        cache,
+    );
+    draw_kpi_chart(
+        f,
+        top_kpis[2],
         "CPU",
         value(cache, "cpu_usage_pct"),
         "%",
@@ -343,7 +369,7 @@ fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
     );
     draw_kpi_chart(
         f,
-        kpis[2],
+        bottom_kpis[0],
         "Memory",
         value(cache, "linux_mem_used_pct"),
         "%",
@@ -355,7 +381,7 @@ fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
     let mla_series = series(cache, "mla_mem_allocated_mb");
     draw_kpi_chart(
         f,
-        kpis[3],
+        bottom_kpis[1],
         "MLA Memory",
         value(cache, "mla_mem_allocated_mb"),
         "MB",
@@ -367,7 +393,7 @@ fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
     let network_series = sum_series(cache, &["net_rx_mbps", "net_tx_mbps"]);
     draw_kpi_chart(
         f,
-        kpis[4],
+        bottom_kpis[2],
         "Network",
         sum_values(cache, &["net_rx_mbps", "net_tx_mbps"]),
         "MB/s",
@@ -390,6 +416,7 @@ fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
             "cpu_load_1_pct",
             "linux_mem_used_mb",
             "mla_mem_allocated_mb",
+            "power_current_watts",
             "disk_emmc_used_pct",
             "disk_nvme_used_pct",
             "net_rx_mbps",
@@ -1075,7 +1102,7 @@ fn draw_metric_table_owned(
 
 fn draw_notes(f: &mut Frame, area: Rect, cache: &CachePayload) {
     let text = if cache.errors.is_empty() {
-        "Sentinel is reading the daemon cache. Use the Thermal tab for board temperatures, System for CPU/memory/MLA allocator use, and Storage/Net for eMMC, NVMe, and interface rates."
+        "Sentinel is reading the daemon cache. Use Thermal for board temperatures, Power for board power use, System for CPU/memory/MLA allocator use, and Storage/Net for eMMC, NVMe, and interface rates."
             .to_string()
     } else {
         format!("Daemon reported errors:\n{}", cache.errors.join("\n"))
@@ -1617,5 +1644,49 @@ mod tests {
         assert!(rendered.contains("Maximum valid total"));
         assert!(rendered.contains("modalix_som"));
         assert!(rendered.contains("MLA 0.68V"));
+
+        terminal
+            .draw(|frame| draw(frame, &cache, Tab::Overview, true, 0, 0))
+            .expect("draw overview tab");
+        let overview: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(overview.contains("Current Power"));
+    }
+
+    #[test]
+    fn overview_preserves_status_panels_on_standard_height_terminal() {
+        let cache = CachePayload {
+            schema: 1,
+            version: "0.1.0".into(),
+            updated_at: Utc::now(),
+            metrics: Vec::new(),
+            latest: None,
+            samples: Vec::new(),
+            processes: Vec::new(),
+            power: None,
+            errors: Vec::new(),
+        };
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| draw(frame, &cache, Tab::Overview, true, 0, 0))
+            .expect("draw overview tab");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("Current Power"));
+        assert!(rendered.contains("Current status"));
+        assert!(rendered.contains("Notes"));
     }
 }

@@ -67,6 +67,8 @@ Power statistics reset when the daemon restarts. The JSON export includes the
 three total metrics, per-rail metrics, and a `power` status object containing
 the detected profile, sample counts, read failures, and latest rail values.
 
+## Thermal Color Coding
+
 Temperature coloring:
 
 - Cyan: below 45 C
