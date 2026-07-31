@@ -61,9 +61,13 @@ therefore safe to inspect or stop through any supported interface.
 
 ## Agent skill
 
-Install the `use-sentinel` skill through the SiMa CLI playbook manager. It
-installs the skill for each supported agent and records it in the playbook
-registry:
+The Sentinel package bundles `use-sentinel`. During installation, its install
+script registers the bundled skill by running `sima-cli playbooks install`; it
+does not copy files directly into agent configuration. This installs the skill
+for each supported agent and records it in the playbook registry.
+
+If `sima-cli` was unavailable while installing Sentinel, install the skill
+later from GitHub:
 
 ```bash
 sima-cli playbooks install gh:sima-neat/sentinel/skills/use-sentinel
@@ -76,6 +80,4 @@ sima-cli playbooks install --force \
   gh:sima-neat/sentinel/skills/use-sentinel@feature/checkpoint-run-comparison
 ```
 
-The Sentinel runtime package deliberately does not write into agent
-configuration. Updating or removing the skill remains under `sima-cli
-playbooks` management.
+Updating or removing the skill remains under `sima-cli playbooks` management.

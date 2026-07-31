@@ -6,6 +6,7 @@ SERVICE_NAME="simaai-sentinel.service"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY_SRC="${SCRIPT_DIR}/simaai-sentinel"
 SERVICE_SRC="${SCRIPT_DIR}/${SERVICE_NAME}"
+SKILL_SRC="${SCRIPT_DIR}/skills/use-sentinel"
 
 if [[ "$(uname -m)" != "aarch64" ]]; then
   echo "Warning: Sentinel is intended for Modalix DevKit aarch64 targets." >&2
@@ -52,6 +53,26 @@ ${SUDO} install -m 0644 "${SERVICE_SRC}" "/etc/systemd/system/${SERVICE_NAME}"
 ${SUDO} systemctl daemon-reload
 ${SUDO} systemctl enable "${SERVICE_NAME}"
 ${SUDO} systemctl restart "${SERVICE_NAME}"
+
+# Keep agent-directory ownership and playbook registry management in sima-cli.
+# This command intentionally runs as the invoking user, not through sudo.
+if [[ -d "${SKILL_SRC}" ]]; then
+  SIMA_CLI_BIN="${SIMA_CLI:-}"
+  if [[ -z "${SIMA_CLI_BIN}" ]] && command -v sima-cli >/dev/null 2>&1; then
+    SIMA_CLI_BIN="$(command -v sima-cli)"
+  fi
+  if [[ -z "${SIMA_CLI_BIN}" && -x "${HOME}/.sima-cli/.venv/bin/sima-cli" ]]; then
+    SIMA_CLI_BIN="${HOME}/.sima-cli/.venv/bin/sima-cli"
+  fi
+
+  if [[ -n "${SIMA_CLI_BIN}" ]]; then
+    echo "Installing Sentinel agent skill through sima-cli playbooks..."
+    SIMA_CLI_CHECK_FOR_UPDATE=0 "${SIMA_CLI_BIN}" playbooks install --force "${SKILL_SRC}"
+  else
+    echo "Warning: sima-cli was not found; Sentinel is installed, but its agent skill was not registered." >&2
+    echo "Install it later with: sima-cli playbooks install gh:sima-neat/sentinel/skills/use-sentinel" >&2
+  fi
+fi
 
 echo "Sentinel installed."
 echo "Try: simaai-sentinel status"
