@@ -476,7 +476,10 @@ fn draw_header(f: &mut Frame, area: Rect, cache: &CachePayload, recording: Optio
             "Sentinel",
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" v{}", cache.version), Style::default().fg(DIM)),
+        Span::styled(
+            format!(" {}", display_version(&cache.version)),
+            Style::default().fg(DIM),
+        ),
         Span::styled("  │  ", Style::default().fg(FAINT)),
         Span::styled("cache ", Style::default().fg(DIM)),
         status,
@@ -512,6 +515,14 @@ fn format_elapsed_seconds(total_seconds: i64) -> String {
     let minutes = total_seconds % 3_600 / 60;
     let seconds = total_seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn display_version(version: &str) -> String {
+    if version.starts_with(|character: char| character.is_ascii_digit()) {
+        format!("v{version}")
+    } else {
+        version.to_string()
+    }
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, active: Tab) {
@@ -2310,6 +2321,15 @@ mod tests {
         assert_eq!(format_elapsed_seconds(-1), "00:00:00");
         assert_eq!(format_elapsed_seconds(3_661), "01:01:01");
         assert_eq!(format_elapsed_seconds(90_061), "25:01:01");
+    }
+
+    #[test]
+    fn tui_formats_release_and_branch_versions() {
+        assert_eq!(display_version("0.1.0"), "v0.1.0");
+        assert_eq!(
+            display_version("feature/checkpoints:0123456789ab"),
+            "feature/checkpoints:0123456789ab"
+        );
     }
 
     fn empty_compare() -> CompareState {

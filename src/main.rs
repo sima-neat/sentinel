@@ -8,6 +8,7 @@ mod system;
 mod thermal;
 mod tui;
 mod ui;
+mod version;
 
 use std::env;
 use std::fs;
@@ -64,6 +65,10 @@ fn run() -> Result<()> {
             }
             "-h" | "--help" => {
                 print_help();
+                return Ok(());
+            }
+            "-V" | "--version" => {
+                println!("simaai-sentinel {}", version::VERSION);
                 return Ok(());
             }
             _ => i += 1,
@@ -313,7 +318,7 @@ fn truncate(value: &str, width: usize) -> String {
 
 fn print_help() {
     println!(
-        "simaai-sentinel [--cache PATH] [--runs-dir PATH] [--api-socket PATH] [--interval SEC] [--once] [command]\n\n\
+        "simaai-sentinel [--version] [--cache PATH] [--runs-dir PATH] [--api-socket PATH] [--interval SEC] [--once] [command]\n\n\
 Commands:\n  ops        Continuous terminal operations view (default)\n  table      Continuous color-coded table view\n  checkpoint Start or stop a persistent named run capture\n  runs       List, show, or delete captured runs\n  export     Export runs as CSV/JSON; without arguments print live cache JSON\n  sensors    Explain collected metrics and thresholds\n  status     Show daemon/cache status\n  daemon     Run the background collector daemon\n\n\
 Daemon options:\n  --history N    Number of samples to keep in cache\n\n\
 Examples:\n  simaai-sentinel checkpoint --name baseline --note \"before optimization\"\n  simaai-sentinel checkpoint --stop\n  simaai-sentinel runs list\n  simaai-sentinel export baseline optimized --format csv --output comparison.csv\n"

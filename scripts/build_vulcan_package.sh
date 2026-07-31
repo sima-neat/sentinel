@@ -6,16 +6,32 @@ OUT_DIR="${1:-${ROOT_DIR}/dist/sentinel}"
 PACKAGE_VERSION="${SENTINEL_PACKAGE_VERSION:-}"
 RUST_TARGET="${SENTINEL_RUST_TARGET:-aarch64-unknown-linux-musl}"
 PLAYBOOK_REF="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+GIT_REF_NAME="${GITHUB_REF_NAME:-$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo detached)}"
+GIT_REF_TYPE="${GITHUB_REF_TYPE:-}"
+GIT_SHORT_SHA="${PLAYBOOK_REF:0:12}"
+BASE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+
+if [[ -z "${GIT_REF_TYPE}" ]]; then
+  EXACT_TAG="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+  if [[ -n "${EXACT_TAG}" ]]; then
+    GIT_REF_TYPE="tag"
+    GIT_REF_NAME="${EXACT_TAG}"
+  fi
+fi
 
 cd "${ROOT_DIR}"
 
-if [[ -z "${PACKAGE_VERSION}" ]]; then
-  if [[ -n "${GITHUB_SHA:-}" ]]; then
-    PACKAGE_VERSION="0.1.0+${GITHUB_SHA:0:12}"
-  else
-    PACKAGE_VERSION="0.1.0+$(git rev-parse --short=12 HEAD 2>/dev/null || echo local)"
-  fi
+if [[ "${GIT_REF_TYPE}" == "tag" ]]; then
+  SENTINEL_BUILD_VERSION="${GIT_REF_NAME#v}"
+  PACKAGE_VERSION="${PACKAGE_VERSION:-${SENTINEL_BUILD_VERSION}}"
+else
+  SENTINEL_BUILD_VERSION="${GIT_REF_NAME}:${GIT_SHORT_SHA}"
+  PACKAGE_VERSION="${PACKAGE_VERSION:-${BASE_VERSION}+${GIT_SHORT_SHA}}"
 fi
+export SENTINEL_BUILD_VERSION
+
+echo "Sentinel binary version: ${SENTINEL_BUILD_VERSION}"
+echo "Sentinel package version: ${PACKAGE_VERSION}"
 
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"

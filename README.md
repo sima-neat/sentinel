@@ -28,6 +28,7 @@ DevKit.
 
 ```bash
 simaai-sentinel                 # open the terminal operations view
+simaai-sentinel --version       # print release or branch build identity
 simaai-sentinel table           # continuously redraw a color-coded table
 simaai-sentinel table --once    # print one table snapshot
 simaai-sentinel export          # print the daemon cache as JSON

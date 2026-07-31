@@ -87,6 +87,13 @@ jobs:
           test -f dist/sentinel/simaai-sentinel
           test -f dist/sentinel/simaai-sentinel.service
           file dist/sentinel/simaai-sentinel
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            expected_version="${GITHUB_REF_NAME#v}"
+          else
+            expected_version="${GITHUB_REF_NAME}:${GITHUB_SHA:0:12}"
+          fi
+          test "$(dist/sentinel/simaai-sentinel --version)" = \
+            "simaai-sentinel ${expected_version}"
           python3 -m json.tool dist/sentinel/metadata.json >/dev/null
           grep -q "simaai-sentinel" dist/sentinel/simaai-sentinel.service
           grep -Fq "PLAYBOOK_REF=\"${GITHUB_SHA}\"" dist/sentinel/install.sh

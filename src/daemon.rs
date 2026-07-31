@@ -38,7 +38,7 @@ pub fn run(
     let sample_capacity = history.max(1);
     let mut payload = CachePayload {
         schema: 1,
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: crate::version::VERSION.into(),
         updated_at: Utc::now(),
         metrics,
         latest: None,
