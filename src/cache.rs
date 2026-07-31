@@ -18,13 +18,15 @@ pub fn write_cache(path: &str, payload: &CachePayload) -> Result<()> {
         .unwrap_or_else(|| Path::new(DEFAULT_CACHE_DIR));
     fs::create_dir_all(parent).with_context(|| format!("create cache dir {}", parent.display()))?;
     let tmp = tmp_path(path);
-    let data = serde_json::to_vec_pretty(payload).context("serialize cache")?;
+    // The live cache is rewritten on every daemon interval and is consumed by
+    // machines, not people. Compact JSON materially reduces serialization and
+    // tmpfs write traffic as the history fills.
+    let data = serde_json::to_vec(payload).context("serialize cache")?;
     {
         let mut file =
             fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         file.write_all(&data).context("write cache data")?;
         file.write_all(b"\n").context("write cache newline")?;
-        file.sync_all().ok();
     }
     fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
     Ok(())
