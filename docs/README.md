@@ -22,6 +22,8 @@ calculated, and what its limitations are.
   reset behavior.
 - [Reports and JSON export](reports.md) documents the cache schema and the
   `table`, `export`, `sensors`, and `status` commands.
+- [Local agent API](api.md) documents live reads and trace control over the
+  daemon's Unix socket.
 - [Capturing and comparing runs](run-comparison.md) documents persistent
   checkpoints, the Compare Runs tab, retention, and CSV/JSON exports.
 

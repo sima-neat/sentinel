@@ -1,3 +1,4 @@
+mod api;
 mod cache;
 mod daemon;
 mod model;
@@ -32,6 +33,7 @@ fn run() -> Result<()> {
     let mut once = false;
     let mut history = 240usize;
     let mut runs_dir = PathBuf::from(runs::DEFAULT_RUNS_DIR);
+    let mut api_socket = PathBuf::from(api::DEFAULT_API_SOCKET);
 
     let mut i = 0;
     while i < args.len() {
@@ -50,6 +52,10 @@ fn run() -> Result<()> {
             }
             "--runs-dir" => {
                 runs_dir = take_value(&mut args, i, "--runs-dir")?.into();
+                continue;
+            }
+            "--api-socket" => {
+                api_socket = take_value(&mut args, i, "--api-socket")?.into();
                 continue;
             }
             "--once" => {
@@ -72,6 +78,7 @@ fn run() -> Result<()> {
             Duration::from_secs_f64(interval.unwrap_or(2.0).max(0.5)),
             history,
             &runs_dir,
+            &api_socket,
         ),
         "table" => ui::run_table(
             &cache,
@@ -307,7 +314,7 @@ fn truncate(value: &str, width: usize) -> String {
 
 fn print_help() {
     println!(
-        "simaai-sentinel [--cache PATH] [--runs-dir PATH] [--interval SEC] [--once] [command]\n\n\
+        "simaai-sentinel [--cache PATH] [--runs-dir PATH] [--api-socket PATH] [--interval SEC] [--once] [command]\n\n\
 Commands:\n  ops        Continuous terminal operations view (default)\n  table      Continuous color-coded table view\n  checkpoint Start or stop a persistent named run capture\n  runs       List, show, or delete captured runs\n  export     Export runs as CSV/JSON; without arguments print live cache JSON\n  sensors    Explain collected metrics and thresholds\n  status     Show daemon/cache status\n  daemon     Run the background collector daemon\n\n\
 Daemon options:\n  --history N    Number of samples to keep in cache\n\n\
 Examples:\n  simaai-sentinel checkpoint --name baseline --note \"before optimization\"\n  simaai-sentinel checkpoint --stop\n  simaai-sentinel runs list\n  simaai-sentinel export baseline optimized --format csv --output comparison.csv\n"

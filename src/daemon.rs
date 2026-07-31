@@ -17,9 +17,17 @@ use crate::ring::Ring;
 use crate::system::{system_metric_definitions, SystemCollector};
 use crate::thermal::{thermal_metric_definitions, ThermalCollector};
 
-pub fn run(cache_path: &str, interval: Duration, history: usize, runs_dir: &Path) -> Result<()> {
+pub fn run(
+    cache_path: &str,
+    interval: Duration,
+    history: usize,
+    runs_dir: &Path,
+    api_socket: &Path,
+) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stopped.clone());
+    let api_thread =
+        crate::api::spawn(api_socket, Path::new(cache_path), runs_dir, stopped.clone())?;
 
     let mut metrics = Vec::<MetricDefinition>::new();
     metrics.extend(thermal_metric_definitions());
@@ -77,6 +85,7 @@ pub fn run(cache_path: &str, interval: Duration, history: usize, runs_dir: &Path
         vec!["daemon stopped".into()],
     );
     write_cache(cache_path, &payload)?;
+    let _ = api_thread.join();
     Ok(())
 }
 

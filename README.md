@@ -38,6 +38,9 @@ simaai-sentinel checkpoint --stop
 simaai-sentinel runs list
 ```
 
+Agents and local automation can use the daemon's Unix-socket JSON API for live
+telemetry and checkpoint control. See [Local agent API](docs/api.md).
+
 ## Documentation
 
 Detailed explanations of every operations-view panel and exported report field

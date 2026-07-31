@@ -4,7 +4,7 @@ After=multi-user.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/simaai-sentinel daemon --cache /run/simaai-sentinel/cache.json --interval 2.0 --history 240
+ExecStart=/usr/local/bin/simaai-sentinel daemon --cache /run/simaai-sentinel/cache.json --api-socket /run/simaai-sentinel/api.sock --interval 2.0 --history 240
 Restart=always
 RestartSec=5
 User=root
