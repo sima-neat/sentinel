@@ -1879,15 +1879,28 @@ fn draw_process_panel(f: &mut Frame, area: Rect, cache: &CachePayload, selected_
 }
 
 fn draw_system_bars(f: &mut Frame, area: Rect, cache: &CachePayload) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let show_details = area.height >= 48;
+    let constraints = if show_details {
+        vec![
+            Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Min(0),
-        ])
+        ]
+    } else {
+        vec![
+            Constraint::Ratio(1, 5),
+            Constraint::Ratio(1, 5),
+            Constraint::Ratio(1, 5),
+            Constraint::Ratio(1, 5),
+            Constraint::Ratio(1, 5),
+        ]
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
     draw_line_chart(
         f,
@@ -1930,10 +1943,24 @@ fn draw_system_bars(f: &mut Frame, area: Rect, cache: &CachePayload) {
         "MB",
         cache,
     );
+    let cma_series = series(cache, "ev74_cma_used_mb");
+    draw_line_chart(
+        f,
+        rows[4],
+        "EV74 CMA memory",
+        cma_series.clone(),
+        0.0,
+        max_or(cma_series, 1.0) * 1.2,
+        "MB",
+        cache,
+    );
+    if !show_details {
+        return;
+    }
     let lower_rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(7), Constraint::Length(7)])
-        .split(rows[4]);
+        .split(rows[5]);
     draw_metric_table(
         f,
         lower_rows[0],
@@ -1945,6 +1972,7 @@ fn draw_system_bars(f: &mut Frame, area: Rect, cache: &CachePayload) {
             "linux_mem_used_pct",
             "linux_mem_used_mb",
             "mla_mem_allocated_mb",
+            "ev74_cma_used_mb",
         ],
     );
     draw_cpu_help(f, lower_rows[1]);
@@ -2422,6 +2450,63 @@ mod tests {
         assert!(rendered.contains("Current Power"));
         assert!(rendered.contains("Current status"));
         assert!(rendered.contains("Notes"));
+    }
+
+    #[test]
+    fn system_tab_shows_ev74_cma_memory_on_standard_terminal() {
+        let sample = Sample {
+            timestamp: Utc::now(),
+            values: BTreeMap::from([("ev74_cma_used_mb".into(), Some(74.25))]),
+        };
+        let cache = CachePayload {
+            schema: 1,
+            version: "0.1.0".into(),
+            updated_at: Utc::now(),
+            metrics: vec![MetricDefinition::new(
+                "ev74_cma_used_mb",
+                "EV74 CMA used",
+                "CMAUsed",
+                "EV74",
+                "MB",
+                "CMA memory used",
+                None,
+                None,
+            )],
+            latest: Some(sample.clone()),
+            samples: vec![sample],
+            processes: Vec::new(),
+            power: None,
+            errors: Vec::new(),
+        };
+        let backend = TestBackend::new(140, 42);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let compare = empty_compare();
+
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &cache,
+                    Tab::System,
+                    true,
+                    0,
+                    0,
+                    &compare,
+                    None,
+                    &InputMode::Normal,
+                )
+            })
+            .expect("draw system tab");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(rendered.contains("EV74 CMA memory"));
+        assert!(rendered.contains("74.2 MB"));
     }
 
     #[test]
