@@ -1,7 +1,8 @@
 # System panel
 
 The System panel combines Linux CPU counters, load average, memory accounting,
-the SiMa MLA allocator report, and periodic process snapshots.
+the SiMa MLA allocator report, the EV74 contiguous-memory pool, and periodic
+process snapshots.
 
 ## CPU fields
 
@@ -66,3 +67,30 @@ This is MLA allocator memory currently allocated. It is not:
 
 If the device cannot be read or its text format is unrecognized, the value is
 unavailable rather than zero.
+
+## EV74 CMA memory
+
+Sentinel reads `CmaTotal` and `CmaFree` from `/proc/meminfo` on every normal
+daemon sample and reports:
+
+```text
+EV74 CMA used = CmaTotal - CmaFree
+```
+
+`CmaTotal` is the contiguous memory area reserved at boot. `CmaFree` is the
+currently unallocated portion of that reservation. The System tab displays the
+used value, while checkpoint recordings retain total, free, and used values.
+The Compare Runs tab can overlay `EV74 CMA memory` for selected runs.
+
+This is an EV74 consumption proxy when EV74 is the consumer of the reserved
+CMA pool. Linux CMA is a shared kernel facility, so allocations by another
+driver can also reduce `CmaFree`; Sentinel cannot attribute those pages to an
+individual process from `/proc/meminfo` alone. If either field is absent, the
+derived used value is reported as unavailable rather than zero; any field that
+is present remains available on its own.
+
+The boot reservation can be inspected separately with:
+
+```bash
+dmesg | grep -i cma
+```

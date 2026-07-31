@@ -70,6 +70,36 @@ pub fn system_metric_definitions() -> Vec<MetricDefinition> {
             None,
         ),
         MetricDefinition::new(
+            "ev74_cma_total_mb",
+            "EV74 CMA reserved",
+            "CMATotal",
+            "EV74",
+            "MB",
+            "Boot-time contiguous memory reservation reported by CmaTotal in /proc/meminfo.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
+            "ev74_cma_free_mb",
+            "EV74 CMA free",
+            "CMAFree",
+            "EV74",
+            "MB",
+            "Currently free contiguous memory reported by CmaFree in /proc/meminfo.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
+            "ev74_cma_used_mb",
+            "EV74 CMA used",
+            "CMAUsed",
+            "EV74",
+            "MB",
+            "CmaTotal minus CmaFree; a proxy for EV74 memory consumption when EV74 owns the CMA pool.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
             "net_rx_mbps",
             "Network RX",
             "NetRX",
@@ -472,6 +502,11 @@ fn sample_memory() -> BTreeMap<String, f64> {
     let total = *meminfo.get("MemTotal").unwrap_or(&0) as f64;
     let available = *meminfo.get("MemAvailable").unwrap_or(&0) as f64;
     let used = (total - available).max(0.0);
+    let cma_total = meminfo.get("CmaTotal").copied().map(|value| value as f64);
+    let cma_free = meminfo.get("CmaFree").copied().map(|value| value as f64);
+    let cma_used = cma_total
+        .zip(cma_free)
+        .map(|(total, free)| (total - free).max(0.0));
     BTreeMap::from([
         (
             "linux_mem_used_pct".into(),
@@ -482,22 +517,36 @@ fn sample_memory() -> BTreeMap<String, f64> {
             },
         ),
         ("linux_mem_used_mb".into(), used / 1024.0 / 1024.0),
+        (
+            "ev74_cma_total_mb".into(),
+            cma_total.unwrap_or(f64::NAN) / 1024.0 / 1024.0,
+        ),
+        (
+            "ev74_cma_free_mb".into(),
+            cma_free.unwrap_or(f64::NAN) / 1024.0 / 1024.0,
+        ),
+        (
+            "ev74_cma_used_mb".into(),
+            cma_used.unwrap_or(f64::NAN) / 1024.0 / 1024.0,
+        ),
     ])
 }
 
 fn read_meminfo() -> BTreeMap<String, u64> {
-    let mut out = BTreeMap::new();
-    if let Ok(raw) = fs::read_to_string("/proc/meminfo") {
-        for line in raw.lines() {
-            let parts: Vec<_> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(kib) = parts[1].parse::<u64>() {
-                    out.insert(parts[0].trim_end_matches(':').into(), kib * 1024);
-                }
-            }
-        }
-    }
-    out
+    fs::read_to_string("/proc/meminfo")
+        .map(|raw| parse_meminfo(&raw))
+        .unwrap_or_default()
+}
+
+fn parse_meminfo(raw: &str) -> BTreeMap<String, u64> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let key = parts.next()?.trim_end_matches(':');
+            let kib = parts.next()?.parse::<u64>().ok()?;
+            Some((key.into(), kib * 1024))
+        })
+        .collect()
 }
 
 fn read_mla_memory_mb() -> f64 {
@@ -653,5 +702,31 @@ impl MountCheck for Path {
         };
         use std::os::unix::fs::MetadataExt;
         meta.dev() != parent_meta.dev() || meta.ino() == parent_meta.ino()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_meminfo;
+
+    #[test]
+    fn parses_cma_meminfo_fields_as_bytes() {
+        let values = parse_meminfo(
+            "MemTotal:       8192000 kB\n\
+             MemAvailable:   4096000 kB\n\
+             CmaTotal:       1048576 kB\n\
+             CmaFree:         786432 kB\n",
+        );
+
+        assert_eq!(values["CmaTotal"], 1_073_741_824);
+        assert_eq!(values["CmaFree"], 805_306_368);
+    }
+
+    #[test]
+    fn ignores_malformed_meminfo_fields() {
+        let values = parse_meminfo("CmaTotal: unavailable kB\nMalformed\nCmaFree: 42 kB\n");
+
+        assert!(!values.contains_key("CmaTotal"));
+        assert_eq!(values["CmaFree"], 43_008);
     }
 }

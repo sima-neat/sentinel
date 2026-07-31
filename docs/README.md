@@ -12,7 +12,7 @@ calculated, and what its limitations are.
 | Overview | [Overview panel](panels/overview.md) | Headline thermal, power, CPU, memory, MLA-memory, storage, and network health. |
 | Thermal | [Thermal panel](panels/thermal.md) | On-die RTSN/PVT sites and board-level hardware-monitor readings. |
 | Power | [Power panel](panels/power.md) | PMBus rail power, totals, session average/peak, and collector health. |
-| System | [System panel](panels/system.md) | Aggregate/per-core CPU, load average, Linux memory, MLA allocations, and processes. |
+| System | [System panel](panels/system.md) | Aggregate/per-core CPU, load average, Linux memory, MLA allocations, EV74 CMA memory, and processes. |
 | Storage/Net | [Storage and network panel](panels/storage-network.md) | eMMC/NVMe capacity and I/O plus aggregate network traffic. |
 
 ## Reports and collection behavior

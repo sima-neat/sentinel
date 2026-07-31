@@ -715,6 +715,7 @@ fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
             "cpu_load_1_pct",
             "linux_mem_used_mb",
             "mla_mem_allocated_mb",
+            "ev74_cma_used_mb",
             "power_current_watts",
             "disk_emmc_used_pct",
             "disk_nvme_used_pct",
@@ -1150,13 +1151,14 @@ fn draw_storage(f: &mut Frame, area: Rect, cache: &CachePayload) {
         ],
     );
 }
-const COMPARE_METRICS: [(&str, &str, &str); 6] = [
+const COMPARE_METRICS: [(&str, &str, &str); 7] = [
     ("power_current_watts", "Total power", "W"),
     ("__thermal_max", "Thermal maximum", "C"),
     ("cpu_usage_pct", "CPU utilization", "%"),
     ("cpu_load_1_pct", "CPU load", "%"),
     ("linux_mem_used_mb", "RAM used", "MB"),
     ("mla_mem_allocated_mb", "MLA memory", "MB"),
+    ("ev74_cma_used_mb", "EV74 CMA memory", "MB"),
 ];
 const RUN_COLORS: [Color; 4] = [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta];
 
