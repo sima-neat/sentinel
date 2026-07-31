@@ -89,6 +89,8 @@ jobs:
           file dist/sentinel/simaai-sentinel
           python3 -m json.tool dist/sentinel/metadata.json >/dev/null
           grep -q "simaai-sentinel" dist/sentinel/simaai-sentinel.service
+          grep -q "gh:sima-neat/sentinel/skills/use-sentinel@${GITHUB_SHA}" dist/sentinel/install.sh
+          test ! -e dist/sentinel/skills
           ls -lh dist/sentinel
 
       - name: Upload Sentinel package

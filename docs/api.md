@@ -61,10 +61,12 @@ therefore safe to inspect or stop through any supported interface.
 
 ## Agent skill
 
-The Sentinel package bundles `use-sentinel`. During installation, its install
-script registers the bundled skill by running `sima-cli playbooks install`; it
-does not copy files directly into agent configuration. This installs the skill
-for each supported agent and records it in the playbook registry.
+During installation, the generated Sentinel install script runs `sima-cli
+playbooks install` using the exact Sentinel Git commit from which the package
+was built. This keeps the runtime and skill revisions aligned without adding
+nested skill resources to the Vulcan artifact. The playbook manager installs
+the skill for each supported agent and records its source commit in the local
+registry.
 
 If `sima-cli` was unavailable while installing Sentinel, install the skill
 later from GitHub:
