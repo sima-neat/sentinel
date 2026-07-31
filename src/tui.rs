@@ -404,7 +404,6 @@ pub fn run_ops(cache_path: &str, interval: Duration, runs_dir: &Path) -> Result<
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn draw(
     f: &mut Frame,
     cache: &CachePayload,
@@ -488,7 +487,16 @@ fn draw_header(f: &mut Frame, area: Rect, cache: &CachePayload, recording: Optio
     if let Some(run) = recording {
         spans.push(Span::styled("  │  ", Style::default().fg(FAINT)));
         spans.push(Span::styled(
-            format!("● RECORDING {}", run.metadata.name),
+            format!(
+                "● RECORDING {}  {}",
+                format_elapsed_seconds(
+                    chrono::Utc::now()
+                        .signed_duration_since(run.metadata.started_at)
+                        .num_seconds()
+                        .max(0)
+                ),
+                run.metadata.name
+            ),
             Style::default().fg(RED).add_modifier(Modifier::BOLD),
         ));
     }
@@ -496,6 +504,14 @@ fn draw_header(f: &mut Frame, area: Rect, cache: &CachePayload, recording: Optio
         Paragraph::new(Line::from(spans)).style(Style::default().bg(BG)),
         area,
     );
+}
+
+fn format_elapsed_seconds(total_seconds: i64) -> String {
+    let total_seconds = total_seconds.max(0);
+    let hours = total_seconds / 3_600;
+    let minutes = total_seconds % 3_600 / 60;
+    let seconds = total_seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, active: Tab) {
@@ -2288,6 +2304,13 @@ mod tests {
 
     use crate::model::{PowerRailStatus, PowerStatus, Sample};
     use crate::runs::{RunMetadata, RUN_SCHEMA};
+
+    #[test]
+    fn recording_elapsed_uses_unbounded_hh_mm_ss() {
+        assert_eq!(format_elapsed_seconds(-1), "00:00:00");
+        assert_eq!(format_elapsed_seconds(3_661), "01:01:01");
+        assert_eq!(format_elapsed_seconds(90_061), "25:01:01");
+    }
 
     fn empty_compare() -> CompareState {
         CompareState {
