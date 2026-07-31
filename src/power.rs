@@ -130,7 +130,7 @@ fn open_device(bus: i32, addr: u8) -> Result<fs::File, String> {
         .custom_flags(libc::O_CLOEXEC)
         .open(&path)
         .map_err(|error| format!("open {path} failed: {error}"))?;
-    let result = unsafe { libc::ioctl(device.as_raw_fd(), I2C_SLAVE, i32::from(addr)) };
+    let result = unsafe { libc::ioctl(device.as_raw_fd(), I2C_SLAVE as _, i32::from(addr)) };
     if result < 0 {
         return Err(format!(
             "I2C_SLAVE 0x{addr:x} on {path} failed: {}",
@@ -153,7 +153,7 @@ fn smbus_access(
         size,
         data,
     };
-    let result = unsafe { libc::ioctl(fd, I2C_SMBUS, &mut args) };
+    let result = unsafe { libc::ioctl(fd, I2C_SMBUS as _, &mut args) };
     if result < 0 {
         Err(std::io::Error::last_os_error())
     } else {

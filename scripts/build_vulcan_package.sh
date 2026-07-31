@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-${ROOT_DIR}/dist/sentinel}"
 PACKAGE_VERSION="${SENTINEL_PACKAGE_VERSION:-}"
+RUST_TARGET="${SENTINEL_RUST_TARGET:-aarch64-unknown-linux-musl}"
 
 cd "${ROOT_DIR}"
 
@@ -18,9 +19,16 @@ fi
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
 
-cargo build --release --locked
+if ! rustup target list --installed | grep -Fxq "${RUST_TARGET}"; then
+  rustup target add "${RUST_TARGET}"
+fi
 
-install -m 0755 target/release/simaai-sentinel "${OUT_DIR}/simaai-sentinel"
+# Keep the package independent of the Vulcan builder's glibc version so the
+# same binary runs on supported eLxr DevKit images.
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-rust-lld}"
+cargo build --release --locked --target "${RUST_TARGET}"
+
+install -m 0755 "target/${RUST_TARGET}/release/simaai-sentinel" "${OUT_DIR}/simaai-sentinel"
 install -m 0755 install.sh "${OUT_DIR}/install.sh"
 install -m 0644 packaging/systemd/simaai-sentinel.service "${OUT_DIR}/simaai-sentinel.service"
 

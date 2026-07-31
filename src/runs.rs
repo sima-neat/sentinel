@@ -662,15 +662,20 @@ fn completed_path(directory: &Path, id: &str) -> PathBuf {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
+        static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("sentinel-runs-{}-{suffix}", std::process::id()));
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "sentinel-runs-{}-{suffix}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).unwrap();
         path
     }
