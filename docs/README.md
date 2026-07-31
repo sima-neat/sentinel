@@ -22,6 +22,8 @@ calculated, and what its limitations are.
   reset behavior.
 - [Reports and JSON export](reports.md) documents the cache schema and the
   `table`, `export`, `sensors`, and `status` commands.
+- [Capturing and comparing runs](run-comparison.md) documents persistent
+  checkpoints, the Compare Runs tab, retention, and CSV/JSON exports.
 
 ## Documentation integration contract
 

@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -21,6 +22,7 @@ use ratatui::{Frame, Terminal};
 
 use crate::cache::read_cache;
 use crate::model::{CachePayload, MetricDefinition, ProcessInfo};
+use crate::runs::{self, SavedRun};
 
 const BG: Color = Color::Reset;
 const FG: Color = Color::White;
@@ -38,14 +40,16 @@ enum Tab {
     Power,
     System,
     Storage,
+    Compare,
 }
 
-const TABS: [Tab; 5] = [
+const TABS: [Tab; 6] = [
     Tab::Overview,
     Tab::Thermal,
     Tab::Power,
     Tab::System,
     Tab::Storage,
+    Tab::Compare,
 ];
 
 impl Tab {
@@ -56,11 +60,73 @@ impl Tab {
             Tab::Power => "Power",
             Tab::System => "System",
             Tab::Storage => "Storage/Net",
+            Tab::Compare => "Compare Runs",
         }
     }
 }
 
-pub fn run_ops(cache_path: &str, interval: Duration) -> Result<()> {
+struct CompareState {
+    runs: Vec<SavedRun>,
+    selected: usize,
+    visible: BTreeSet<String>,
+    baseline: Option<String>,
+    metric: usize,
+    overlap: bool,
+    message: Option<String>,
+}
+
+impl CompareState {
+    fn load(directory: &Path) -> Self {
+        let summaries = runs::list(directory).unwrap_or_default();
+        let selectors: Vec<String> = summaries
+            .into_iter()
+            .filter(|summary| summary.ended_at.is_some())
+            .map(|summary| summary.id)
+            .collect();
+        let runs = runs::load_many(directory, &selectors).unwrap_or_default();
+        let visible = runs
+            .iter()
+            .take(2)
+            .map(|run| run.metadata.id.clone())
+            .collect();
+        let baseline = runs.first().map(|run| run.metadata.id.clone());
+        Self {
+            runs,
+            selected: 0,
+            visible,
+            baseline,
+            metric: 0,
+            overlap: true,
+            message: None,
+        }
+    }
+
+    fn refresh(&mut self, directory: &Path) {
+        let next = Self::load(directory);
+        self.runs = next.runs;
+        self.selected = self.selected.min(self.runs.len().saturating_sub(1));
+        self.visible
+            .retain(|id| self.runs.iter().any(|run| &run.metadata.id == id));
+        if self.visible.is_empty() {
+            self.visible
+                .extend(self.runs.iter().take(2).map(|run| run.metadata.id.clone()));
+        }
+        if self
+            .baseline
+            .as_ref()
+            .is_none_or(|id| !self.runs.iter().any(|run| &run.metadata.id == id))
+        {
+            self.baseline = self.runs.first().map(|run| run.metadata.id.clone());
+        }
+    }
+}
+
+enum InputMode {
+    Normal,
+    CheckpointName(String),
+}
+
+pub fn run_ops(cache_path: &str, interval: Duration, runs_dir: &Path) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -76,12 +142,17 @@ pub fn run_ops(cache_path: &str, interval: Duration) -> Result<()> {
     let mut clear_body = true;
     let mut selected_core = 0usize;
     let mut thermal_group = 0usize;
+    let mut compare = CompareState::load(runs_dir);
+    let mut input_mode = InputMode::Normal;
+    let mut recording = runs::active(runs_dir).ok().flatten();
 
     let result = loop {
         if last_read.elapsed() >= cache_tick {
             if let Ok(next) = read_cache(cache_path) {
                 cache = next;
                 thermal_group = thermal_group.min(thermal_groups(&cache).len().saturating_sub(1));
+                compare.refresh(runs_dir);
+                recording = runs::active(runs_dir).ok().flatten();
                 dirty = true;
             }
             last_read = Instant::now();
@@ -96,6 +167,9 @@ pub fn run_ops(cache_path: &str, interval: Duration) -> Result<()> {
                     clear_body,
                     selected_core,
                     thermal_group,
+                    &compare,
+                    recording.as_ref(),
+                    &input_mode,
                 )
             })?;
             dirty = false;
@@ -107,6 +181,32 @@ pub fn run_ops(cache_path: &str, interval: Duration) -> Result<()> {
             match event::read()? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+                    if let InputMode::CheckpointName(name) = &mut input_mode {
+                        match key.code {
+                            KeyCode::Esc => input_mode = InputMode::Normal,
+                            KeyCode::Backspace => {
+                                name.pop();
+                            }
+                            KeyCode::Enter if !name.trim().is_empty() => {
+                                match runs::start(runs_dir, &cache, name.trim(), None, Vec::new()) {
+                                    Ok(run) => {
+                                        recording = Some(run);
+                                        input_mode = InputMode::Normal;
+                                    }
+                                    Err(error) => compare.message = Some(error.to_string()),
+                                }
+                            }
+                            KeyCode::Char(character)
+                                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && name.len() < 80 =>
+                            {
+                                name.push(character);
+                            }
+                            _ => {}
+                        }
+                        dirty = true;
                         continue;
                     }
                     match (key.code, key.modifiers) {
@@ -148,6 +248,92 @@ pub fn run_ops(cache_path: &str, interval: Duration) -> Result<()> {
                             dirty = true;
                             clear_body = true;
                         }
+                        (KeyCode::Char('6'), _) => {
+                            active = 5;
+                            dirty = true;
+                            clear_body = true;
+                        }
+                        (KeyCode::Char('r'), _) => {
+                            if recording.is_some() {
+                                match runs::stop(runs_dir) {
+                                    Ok(run) => {
+                                        compare.message =
+                                            Some(format!("Saved run '{}'.", run.metadata.name));
+                                        recording = None;
+                                        compare.refresh(runs_dir);
+                                    }
+                                    Err(error) => compare.message = Some(error.to_string()),
+                                }
+                            } else {
+                                input_mode = InputMode::CheckpointName(String::new());
+                            }
+                            dirty = true;
+                        }
+                        (KeyCode::Up, _) if TABS[active] == Tab::Compare => {
+                            compare.selected = compare.selected.saturating_sub(1);
+                            dirty = true;
+                        }
+                        (KeyCode::Down, _) if TABS[active] == Tab::Compare => {
+                            compare.selected =
+                                (compare.selected + 1).min(compare.runs.len().saturating_sub(1));
+                            dirty = true;
+                        }
+                        (KeyCode::Char(' '), _) if TABS[active] == Tab::Compare => {
+                            if let Some(run) = compare.runs.get(compare.selected) {
+                                if !compare.visible.remove(&run.metadata.id) {
+                                    if compare.visible.len() < 4 {
+                                        compare.visible.insert(run.metadata.id.clone());
+                                    } else {
+                                        compare.message =
+                                            Some("At most four runs can be visible.".into());
+                                    }
+                                }
+                            }
+                            dirty = true;
+                        }
+                        (KeyCode::Enter, _) if TABS[active] == Tab::Compare => {
+                            compare.baseline = compare
+                                .runs
+                                .get(compare.selected)
+                                .map(|run| run.metadata.id.clone());
+                            dirty = true;
+                        }
+                        (KeyCode::Left, _) if TABS[active] == Tab::Compare => {
+                            compare.metric = (compare.metric + COMPARE_METRICS.len() - 1)
+                                % COMPARE_METRICS.len();
+                            dirty = true;
+                        }
+                        (KeyCode::Right, _) if TABS[active] == Tab::Compare => {
+                            compare.metric = (compare.metric + 1) % COMPARE_METRICS.len();
+                            dirty = true;
+                        }
+                        (KeyCode::Char('w'), _) if TABS[active] == Tab::Compare => {
+                            compare.overlap = !compare.overlap;
+                            dirty = true;
+                        }
+                        (KeyCode::Char('x'), _) if TABS[active] == Tab::Compare => {
+                            let selected: Vec<SavedRun> = compare
+                                .runs
+                                .iter()
+                                .filter(|run| compare.visible.contains(&run.metadata.id))
+                                .cloned()
+                                .collect();
+                            let path = PathBuf::from(format!(
+                                "/tmp/sentinel-comparison-{}.json",
+                                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+                            ));
+                            match std::fs::write(
+                                &path,
+                                serde_json::to_vec_pretty(&runs::export_json(selected))
+                                    .unwrap_or_default(),
+                            ) {
+                                Ok(()) => {
+                                    compare.message = Some(format!("Exported {}", path.display()))
+                                }
+                                Err(error) => compare.message = Some(error.to_string()),
+                            }
+                            dirty = true;
+                        }
                         (KeyCode::Up, _) if TABS[active] == Tab::System => {
                             selected_core = selected_core.saturating_sub(1);
                             dirty = true;
@@ -183,6 +369,8 @@ pub fn run_ops(cache_path: &str, interval: Duration) -> Result<()> {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn draw(
     f: &mut Frame,
     cache: &CachePayload,
@@ -190,6 +378,9 @@ fn draw(
     clear_body: bool,
     selected_core: usize,
     thermal_group: usize,
+    compare: &CompareState,
+    recording: Option<&SavedRun>,
+    input_mode: &InputMode,
 ) {
     let area = f.area();
     f.buffer_mut()
@@ -205,7 +396,7 @@ fn draw(
         ])
         .split(area);
 
-    draw_header(f, layout[0], cache);
+    draw_header(f, layout[0], cache, recording);
     draw_tabs(f, layout[1], active);
     if clear_body {
         f.render_widget(Clear, layout[2]);
@@ -216,11 +407,15 @@ fn draw(
         Tab::Power => draw_power(f, layout[2], cache),
         Tab::System => draw_system(f, layout[2], cache, selected_core),
         Tab::Storage => draw_storage(f, layout[2], cache),
+        Tab::Compare => draw_compare(f, layout[2], compare),
     }
-    draw_footer(f, layout[3]);
+    draw_footer(f, layout[3], active);
+    if let InputMode::CheckpointName(name) = input_mode {
+        draw_checkpoint_prompt(f, area, name);
+    }
 }
 
-fn draw_header(f: &mut Frame, area: Rect, cache: &CachePayload) {
+fn draw_header(f: &mut Frame, area: Rect, cache: &CachePayload, recording: Option<&SavedRun>) {
     let sample_age = cache
         .latest
         .as_ref()
@@ -242,7 +437,7 @@ fn draw_header(f: &mut Frame, area: Rect, cache: &CachePayload) {
             Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
         )
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" ● ", Style::default().fg(GREEN)),
         Span::styled(
             "Sentinel",
@@ -255,8 +450,18 @@ fn draw_header(f: &mut Frame, area: Rect, cache: &CachePayload) {
         Span::styled(format!("  age {:.1}s", sample_age), Style::default().fg(FG)),
         Span::styled("  samples ", Style::default().fg(DIM)),
         Span::styled(cache.samples.len().to_string(), Style::default().fg(FG)),
-    ]);
-    f.render_widget(Paragraph::new(line).style(Style::default().bg(BG)), area);
+    ];
+    if let Some(run) = recording {
+        spans.push(Span::styled("  │  ", Style::default().fg(FAINT)));
+        spans.push(Span::styled(
+            format!("● RECORDING {}", run.metadata.name),
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(BG)),
+        area,
+    );
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, active: Tab) {
@@ -274,7 +479,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, active: Tab) {
     f.render_widget(tabs, area);
 }
 
-fn draw_footer(f: &mut Frame, area: Rect) {
+fn draw_footer(f: &mut Frame, area: Rect, active: Tab) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
@@ -284,22 +489,80 @@ fn draw_footer(f: &mut Frame, area: Rect) {
         chunks[0],
     );
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " 1-5",
-                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(":Tab  ", Style::default().fg(DIM)),
-            Span::styled(
-                "Tab",
-                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(":Next  ", Style::default().fg(DIM)),
-            Span::styled("q", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
-            Span::styled(":Quit", Style::default().fg(DIM)),
-        ]))
+        Paragraph::new(Line::from(if active == Tab::Compare {
+            vec![
+                Span::styled(
+                    " ↑↓",
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(":Select  ", Style::default().fg(DIM)),
+                Span::styled(
+                    "Space",
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(":Toggle  ", Style::default().fg(DIM)),
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(":Baseline  ", Style::default().fg(DIM)),
+                Span::styled("←→", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(":Metric  ", Style::default().fg(DIM)),
+                Span::styled("w", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(":Window  ", Style::default().fg(DIM)),
+                Span::styled("x", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(":Export  ", Style::default().fg(DIM)),
+                Span::styled("r", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(":Record", Style::default().fg(DIM)),
+            ]
+        } else {
+            vec![
+                Span::styled(
+                    " 1-6",
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(":Tab  ", Style::default().fg(DIM)),
+                Span::styled(
+                    "Tab",
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(":Next  ", Style::default().fg(DIM)),
+                Span::styled("q", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(":Quit  ", Style::default().fg(DIM)),
+                Span::styled("r", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(":Record", Style::default().fg(DIM)),
+            ]
+        }))
         .style(Style::default().bg(BG)),
         chunks[1],
+    );
+}
+
+fn draw_checkpoint_prompt(f: &mut Frame, area: Rect, name: &str) {
+    let width = area.width.min(72);
+    let height = 5;
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from("Enter a checkpoint name:"),
+            Line::from(Span::styled(
+                format!("{}_", name),
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Enter: start  Esc: cancel",
+                Style::default().fg(DIM),
+            )),
+        ])
+        .block(panel("Start recording"))
+        .style(Style::default().bg(BG).fg(FG)),
+        popup,
     );
 }
 
@@ -850,6 +1113,371 @@ fn draw_storage(f: &mut Frame, area: Rect, cache: &CachePayload) {
             "net_tx_mbps",
         ],
     );
+}
+const COMPARE_METRICS: [(&str, &str, &str); 4] = [
+    ("power_current_watts", "Total power", "W"),
+    ("__thermal_max", "Board temperature", "C"),
+    ("cpu_usage_pct", "CPU utilization", "%"),
+    ("linux_mem_used_pct", "Memory utilization", "%"),
+];
+const RUN_COLORS: [Color; 4] = [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta];
+const RUN_MARKERS: [symbols::Marker; 4] = [
+    symbols::Marker::Braille,
+    symbols::Marker::Dot,
+    symbols::Marker::Block,
+    symbols::Marker::Bar,
+];
+
+fn draw_compare(f: &mut Frame, area: Rect, state: &CompareState) {
+    if state.runs.is_empty() {
+        f.render_widget(
+            Paragraph::new(
+                "No completed runs yet.\n\nPress r to start a named checkpoint, run the workload, then press r again to stop and save it.",
+            )
+            .block(panel("Compare Runs"))
+            .style(Style::default().fg(DIM).bg(BG))
+            .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(34), Constraint::Min(0)])
+        .split(area);
+    draw_compare_run_list(f, columns[0], state);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(62), Constraint::Min(0)])
+        .split(columns[1]);
+    draw_compare_chart(f, right[0], state);
+    draw_compare_summary(f, right[1], state);
+}
+
+fn draw_compare_run_list(f: &mut Frame, area: Rect, state: &CompareState) {
+    let rows = state.runs.iter().enumerate().map(|(index, run)| {
+        let enabled = state.visible.contains(&run.metadata.id);
+        let baseline = state.baseline.as_deref() == Some(run.metadata.id.as_str());
+        let color = visible_run_index(state, &run.metadata.id)
+            .map(|index| RUN_COLORS[index])
+            .unwrap_or(DIM);
+        let marker = if baseline { "B" } else { " " };
+        Row::new(vec![
+            Cell::from(if enabled { "●" } else { "○" }).style(Style::default().fg(color)),
+            Cell::from(marker),
+            Cell::from(truncate_text(&run.metadata.name, 22)),
+        ])
+        .style(if index == state.selected {
+            Style::default().fg(FG).add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().fg(FG)
+        })
+    });
+    let message = state
+        .message
+        .as_deref()
+        .unwrap_or("Space toggles visibility; Enter sets baseline.");
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(4)])
+        .split(area);
+    f.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(2),
+                Constraint::Length(2),
+                Constraint::Min(8),
+            ],
+        )
+        .header(
+            Row::new(vec!["", "B", "Run"])
+                .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
+        )
+        .block(panel("Saved runs"))
+        .style(Style::default().bg(BG)),
+        split[0],
+    );
+    f.render_widget(
+        Paragraph::new(message)
+            .block(panel("Status"))
+            .style(Style::default().fg(DIM).bg(BG))
+            .wrap(Wrap { trim: true }),
+        split[1],
+    );
+}
+
+fn draw_compare_chart(f: &mut Frame, area: Rect, state: &CompareState) {
+    let (key, label, unit) = COMPARE_METRICS[state.metric];
+    let selected: Vec<&SavedRun> = state
+        .runs
+        .iter()
+        .filter(|run| state.visible.contains(&run.metadata.id))
+        .take(4)
+        .collect();
+    if selected.is_empty() {
+        f.render_widget(
+            Paragraph::new("Select at least one run with Space.")
+                .block(panel(format!("{label} · no runs selected")))
+                .style(Style::default().fg(DIM).bg(BG)),
+            area,
+        );
+        return;
+    }
+    let overlap_seconds = selected
+        .iter()
+        .filter_map(|run| {
+            run.samples
+                .last()
+                .map(|sample| elapsed_seconds(run, sample))
+        })
+        .reduce(f64::min);
+    let limit = state.overlap.then_some(overlap_seconds).flatten();
+    let points: Vec<Vec<(f64, f64)>> = selected
+        .iter()
+        .map(|run| compare_series(run, key, limit))
+        .collect();
+    let datasets: Vec<Dataset> = selected
+        .iter()
+        .zip(points.iter())
+        .enumerate()
+        .map(|(index, (run, points))| {
+            Dataset::default()
+                .name(run.metadata.name.as_str())
+                .marker(RUN_MARKERS[index])
+                .graph_type(GraphType::Line)
+                .style(Style::default().fg(RUN_COLORS[index]))
+                .data(points)
+        })
+        .collect();
+    let x_max = points
+        .iter()
+        .filter_map(|points| points.last().map(|point| point.0))
+        .fold(1.0f64, f64::max);
+    let values = points
+        .iter()
+        .flat_map(|points| points.iter().map(|point| point.1));
+    let (mut y_min, mut y_max) = values.fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(minimum, maximum), value| (minimum.min(value), maximum.max(value)),
+    );
+    if !y_min.is_finite() || !y_max.is_finite() {
+        y_min = 0.0;
+        y_max = 1.0;
+    } else {
+        let padding = ((y_max - y_min) * 0.1).max(0.5);
+        y_min = (y_min - padding).max(0.0);
+        y_max += padding;
+    }
+    let window = if state.overlap {
+        "common overlap"
+    } else {
+        "full duration"
+    };
+    let chart = Chart::new(datasets)
+        .block(panel(format!("{label} · {window} · elapsed time")))
+        .x_axis(
+            Axis::default()
+                .title("seconds")
+                .style(Style::default().fg(DIM))
+                .bounds([0.0, x_max])
+                .labels(vec![Span::raw("0"), Span::raw(format!("{x_max:.1}"))]),
+        )
+        .y_axis(
+            Axis::default()
+                .title(unit)
+                .style(Style::default().fg(DIM))
+                .bounds([y_min, y_max])
+                .labels(vec![
+                    Span::raw(format!("{y_min:.1}")),
+                    Span::raw(format!("{y_max:.1}")),
+                ]),
+        )
+        .legend_position(Some(ratatui::widgets::LegendPosition::TopLeft))
+        .style(Style::default().bg(BG));
+    f.render_widget(chart, area);
+}
+
+fn draw_compare_summary(f: &mut Frame, area: Rect, state: &CompareState) {
+    let (key, label, unit) = COMPARE_METRICS[state.metric];
+    let selected: Vec<&SavedRun> = state
+        .runs
+        .iter()
+        .filter(|run| state.visible.contains(&run.metadata.id))
+        .take(4)
+        .collect();
+    let overlap = selected
+        .iter()
+        .filter_map(|run| {
+            run.samples
+                .last()
+                .map(|sample| elapsed_seconds(run, sample))
+        })
+        .reduce(f64::min);
+    let limit = state.overlap.then_some(overlap).flatten();
+    let baseline_mean = selected
+        .iter()
+        .find(|run| state.baseline.as_deref() == Some(run.metadata.id.as_str()))
+        .and_then(|run| compare_stats(run, key, limit).mean);
+    let rows = selected.iter().enumerate().map(|(index, run)| {
+        let stats = compare_stats(run, key, limit);
+        let delta = match (stats.mean, baseline_mean) {
+            (Some(value), Some(baseline)) if baseline.abs() > f64::EPSILON => {
+                format!("{:+.1}%", (value - baseline) / baseline * 100.0)
+            }
+            _ => "-".into(),
+        };
+        let energy = if key == "power_current_watts" {
+            runs::integrate_energy_until(run, key, limit)
+                .map(|value| format!("{value:.1} J"))
+                .unwrap_or_else(|| "-".into())
+        } else {
+            "-".into()
+        };
+        Row::new(vec![
+            Cell::from(format!(
+                "{} {}",
+                run_symbol(index),
+                truncate_text(&run.metadata.name, 16)
+            ))
+            .style(Style::default().fg(RUN_COLORS[index])),
+            Cell::from(stats.count.to_string()),
+            Cell::from(format_optional(stats.minimum, unit)),
+            Cell::from(format_optional(stats.mean, unit)),
+            Cell::from(format_optional(stats.median, unit)),
+            Cell::from(format_optional(stats.p95, unit)),
+            Cell::from(format_optional(stats.maximum, unit)),
+            Cell::from(delta),
+            Cell::from(energy),
+        ])
+    });
+    f.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Min(17),
+                Constraint::Length(7),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(10),
+                Constraint::Length(9),
+                Constraint::Length(10),
+            ],
+        )
+        .header(
+            Row::new(vec![
+                "Run", "Samples", "Min", "Mean", "Median", "P95", "Max", "Δ base", "Energy",
+            ])
+            .style(Style::default().fg(DIM).add_modifier(Modifier::BOLD)),
+        )
+        .block(panel(format!("{label} summary")))
+        .style(Style::default().bg(BG).fg(FG)),
+        area,
+    );
+}
+
+fn compare_series(run: &SavedRun, key: &str, limit: Option<f64>) -> Vec<(f64, f64)> {
+    run.samples
+        .iter()
+        .filter_map(|sample| {
+            let elapsed = elapsed_seconds(run, sample);
+            if limit.is_some_and(|limit| elapsed > limit) {
+                return None;
+            }
+            compare_value(run, sample, key).map(|value| (elapsed, value))
+        })
+        .collect()
+}
+
+fn compare_value(run: &SavedRun, sample: &crate::model::Sample, key: &str) -> Option<f64> {
+    if key == "__thermal_max" {
+        run.metrics
+            .iter()
+            .filter(|metric| metric.unit == "C")
+            .filter_map(|metric| sample.values.get(&metric.key).copied().flatten())
+            .filter(|value| value.is_finite())
+            .reduce(f64::max)
+    } else {
+        sample
+            .values
+            .get(key)
+            .copied()
+            .flatten()
+            .filter(|value| value.is_finite())
+    }
+}
+
+fn compare_stats(run: &SavedRun, key: &str, limit: Option<f64>) -> runs::MetricStatistics {
+    let mut values: Vec<f64> = compare_series(run, key, limit)
+        .into_iter()
+        .map(|point| point.1)
+        .collect();
+    values.sort_by(f64::total_cmp);
+    if values.is_empty() {
+        return runs::MetricStatistics {
+            count: 0,
+            minimum: None,
+            maximum: None,
+            mean: None,
+            median: None,
+            p95: None,
+        };
+    }
+    let percentile = |fraction: f64| {
+        let index = ((values.len() - 1) as f64 * fraction).round() as usize;
+        values[index]
+    };
+    let mean = Some(values.iter().sum::<f64>() / values.len() as f64);
+    runs::MetricStatistics {
+        count: values.len(),
+        minimum: values.first().copied(),
+        maximum: values.last().copied(),
+        mean,
+        median: Some(percentile(0.5)),
+        p95: Some(percentile(0.95)),
+    }
+}
+
+fn elapsed_seconds(run: &SavedRun, sample: &crate::model::Sample) -> f64 {
+    (sample.timestamp - run.metadata.started_at)
+        .num_microseconds()
+        .unwrap_or(0)
+        .max(0) as f64
+        / 1_000_000.0
+}
+
+fn visible_run_index(state: &CompareState, id: &str) -> Option<usize> {
+    state
+        .runs
+        .iter()
+        .filter(|run| state.visible.contains(&run.metadata.id))
+        .take(4)
+        .position(|run| run.metadata.id == id)
+}
+
+fn run_symbol(index: usize) -> &'static str {
+    ["⠿", "•", "■", "▮"].get(index).copied().unwrap_or("•")
+}
+
+fn format_optional(value: Option<f64>, unit: &str) -> String {
+    value
+        .map(|value| format!("{value:.2} {unit}"))
+        .unwrap_or_else(|| "-".into())
+}
+
+fn truncate_text(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        value.into()
+    } else {
+        value
+            .chars()
+            .take(width.saturating_sub(1))
+            .collect::<String>()
+            + "…"
+    }
 }
 
 fn draw_kpi_chart(
@@ -1577,6 +2205,19 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use crate::model::{PowerRailStatus, PowerStatus, Sample};
+    use crate::runs::{RunMetadata, RUN_SCHEMA};
+
+    fn empty_compare() -> CompareState {
+        CompareState {
+            runs: Vec::new(),
+            selected: 0,
+            visible: BTreeSet::new(),
+            baseline: None,
+            metric: 0,
+            overlap: true,
+            message: None,
+        }
+    }
 
     #[test]
     fn power_tab_renders_totals_status_and_rails() {
@@ -1628,8 +2269,21 @@ mod tests {
 
         let backend = TestBackend::new(140, 42);
         let mut terminal = Terminal::new(backend).expect("test terminal");
+        let compare = empty_compare();
         terminal
-            .draw(|frame| draw(frame, &cache, Tab::Power, true, 0, 0))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &cache,
+                    Tab::Power,
+                    true,
+                    0,
+                    0,
+                    &compare,
+                    None,
+                    &InputMode::Normal,
+                )
+            })
             .expect("draw power tab");
         let rendered: String = terminal
             .backend()
@@ -1646,7 +2300,19 @@ mod tests {
         assert!(rendered.contains("MLA 0.68V"));
 
         terminal
-            .draw(|frame| draw(frame, &cache, Tab::Overview, true, 0, 0))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &cache,
+                    Tab::Overview,
+                    true,
+                    0,
+                    0,
+                    &compare,
+                    None,
+                    &InputMode::Normal,
+                )
+            })
             .expect("draw overview tab");
         let overview: String = terminal
             .backend()
@@ -1673,9 +2339,22 @@ mod tests {
         };
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
+        let compare = empty_compare();
 
         terminal
-            .draw(|frame| draw(frame, &cache, Tab::Overview, true, 0, 0))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &cache,
+                    Tab::Overview,
+                    true,
+                    0,
+                    0,
+                    &compare,
+                    None,
+                    &InputMode::Normal,
+                )
+            })
             .expect("draw overview tab");
         let rendered: String = terminal
             .backend()
@@ -1688,5 +2367,71 @@ mod tests {
         assert!(rendered.contains("Current Power"));
         assert!(rendered.contains("Current status"));
         assert!(rendered.contains("Notes"));
+    }
+
+    #[test]
+    fn compare_tab_renders_aligned_runs_and_summary() {
+        let start = Utc::now();
+        let metric = MetricDefinition::new(
+            "power_current_watts",
+            "Current power",
+            "Power",
+            "Power",
+            "W",
+            "Board power",
+            None,
+            None,
+        );
+        let make_run = |id: &str, name: &str, values: [f64; 3]| SavedRun {
+            schema: RUN_SCHEMA,
+            metadata: RunMetadata {
+                id: id.into(),
+                name: name.into(),
+                note: None,
+                tags: Vec::new(),
+                started_at: start,
+                ended_at: Some(start + chrono::Duration::seconds(4)),
+                sample_interval_ms: Some(2_000),
+                sentinel_version: "0.1.0".into(),
+                system: BTreeMap::new(),
+            },
+            metrics: vec![metric.clone()],
+            samples: values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| Sample {
+                    timestamp: start + chrono::Duration::seconds(index as i64 * 2),
+                    values: BTreeMap::from([("power_current_watts".into(), Some(value))]),
+                })
+                .collect(),
+        };
+        let baseline = make_run("base", "baseline", [2.0, 3.0, 4.0]);
+        let optimized = make_run("opt", "optimized", [1.0, 2.0, 3.0]);
+        let compare = CompareState {
+            runs: vec![baseline, optimized],
+            selected: 0,
+            visible: BTreeSet::from(["base".into(), "opt".into()]),
+            baseline: Some("base".into()),
+            metric: 0,
+            overlap: true,
+            message: None,
+        };
+        let backend = TestBackend::new(150, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw_compare(frame, frame.area(), &compare))
+            .expect("draw compare tab");
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("baseline"));
+        assert!(rendered.contains("optimized"));
+        assert!(rendered.contains("common overlap"));
+        assert!(rendered.contains("Δ base"));
+        assert!(rendered.contains("J"));
     }
 }

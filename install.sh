@@ -41,6 +41,12 @@ ${SUDO} install -m 0755 "${BINARY_SRC}" /usr/local/bin/simaai-sentinel
 
 ${SUDO} install -m 0755 -d /run/simaai-sentinel
 ${SUDO} install -m 0755 -d /var/log/simaai-sentinel
+${SUDO} install -m 0775 -d /var/lib/simaai-sentinel /var/lib/simaai-sentinel/runs
+DATA_GROUP="${SIMA_SENTINEL_DATA_GROUP:-sima}"
+if ! getent group "${DATA_GROUP}" >/dev/null 2>&1; then
+  DATA_GROUP="${SUDO_USER:-root}"
+fi
+${SUDO} chown "root:${DATA_GROUP}" /var/lib/simaai-sentinel /var/lib/simaai-sentinel/runs
 ${SUDO} install -m 0644 "${SERVICE_SRC}" "/etc/systemd/system/${SERVICE_NAME}"
 
 ${SUDO} systemctl daemon-reload

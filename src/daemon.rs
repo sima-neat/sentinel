@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,7 +17,7 @@ use crate::ring::Ring;
 use crate::system::{system_metric_definitions, SystemCollector};
 use crate::thermal::{thermal_metric_definitions, ThermalCollector};
 
-pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
+pub fn run(cache_path: &str, interval: Duration, history: usize, runs_dir: &Path) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stopped.clone());
 
@@ -57,6 +58,9 @@ pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
             Vec::new(),
         );
         write_cache(cache_path, &payload)?;
+        if let Err(error) = crate::runs::record(runs_dir, &payload) {
+            eprintln!("Sentinel checkpoint capture failed: {error:#}");
+        }
 
         let elapsed = loop_start.elapsed();
         if elapsed < interval {
