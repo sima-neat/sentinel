@@ -31,7 +31,7 @@ pub fn run(
     let mut metrics = Vec::<MetricDefinition>::new();
     metrics.extend(thermal_metric_definitions());
     metrics.extend(system_metric_definitions());
-    let power_config = PowerConfig::auto(Duration::from_millis(100));
+    let power_config = PowerConfig::auto(Duration::from_millis(250));
     metrics.extend(power_metric_definitions(&power_config));
 
     let mut system = SystemCollector::new();

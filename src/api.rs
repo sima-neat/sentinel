@@ -40,12 +40,26 @@ struct StartTrace {
     tags: Vec<String>,
 }
 
+pub struct ApiServer {
+    thread: JoinHandle<()>,
+    socket_path: std::path::PathBuf,
+}
+
+impl ApiServer {
+    pub fn join(self) -> thread::Result<()> {
+        // Wake a listener blocked in accept after the daemon sets its shared
+        // stop flag. The server checks that flag before reading this stream.
+        let _ = UnixStream::connect(&self.socket_path);
+        self.thread.join()
+    }
+}
+
 pub fn spawn(
     socket_path: &Path,
     cache_path: &Path,
     runs_dir: &Path,
     stopped: Arc<AtomicBool>,
-) -> Result<JoinHandle<()>> {
+) -> Result<ApiServer> {
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create API socket directory {}", parent.display()))?;
@@ -58,28 +72,29 @@ pub fn spawn(
         .with_context(|| format!("bind Sentinel API socket {}", socket_path.display()))?;
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o666))
         .with_context(|| format!("set API socket permissions {}", socket_path.display()))?;
-    listener.set_nonblocking(true)?;
-
     let socket_path = socket_path.to_path_buf();
+    let wake_path = socket_path.clone();
     let cache_path = cache_path.to_path_buf();
     let runs_dir = runs_dir.to_path_buf();
-    Ok(thread::spawn(move || {
+    let thread = thread::spawn(move || {
         while !stopped.load(Ordering::Relaxed) {
             match listener.accept() {
+                Ok(_) if stopped.load(Ordering::Relaxed) => break,
                 Ok((mut stream, _)) => {
                     if let Err(error) = serve(&mut stream, &cache_path, &runs_dir) {
                         eprintln!("Sentinel API request failed: {error:#}");
                     }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(25));
                 }
                 Err(error) => eprintln!("Sentinel API accept failed: {error}"),
             }
         }
         drop(listener);
         let _ = fs::remove_file(socket_path);
-    }))
+    });
+    Ok(ApiServer {
+        thread,
+        socket_path: wake_path,
+    })
 }
 
 fn serve(stream: &mut UnixStream, cache_path: &Path, runs_dir: &Path) -> Result<()> {
