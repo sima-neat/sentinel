@@ -26,8 +26,11 @@ All session statistics reset when the daemon restarts.
 - **UNAVAILABLE**: no valid total has been collected.
 
 During a partial failure, Current, Average, and Peak totals can contain fewer
-rails than a healthy sample. Do not compare partial and complete totals as if
-they measured the same boundary.
+rails than a healthy sample. If a pass fails completely, Current and all rail
+Power values retain their last successful readings; Failed samples and rail
+Errors increase, and the state becomes DEGRADED. Do not interpret retained
+values as measurements from the failed pass or compare partial and complete
+totals as if they measured the same boundary.
 
 ## Rail table fields
 
@@ -36,9 +39,11 @@ they measured the same boundary.
 - **Samples** counts successful readings for that rail since daemon start.
 - **Errors** counts failed page-select or PMBus-register reads for that rail.
 
-Because the total uses only rails that succeeded in its current PMBus pass
-while each rail row retains its last successful value, summing the visible rail
-rows can differ from Current during a degraded pass.
+For a partially successful pass, the total uses only rails that succeeded in
+that pass while each rail row retains its last successful value. For a
+completely failed pass, both the total and rail rows retain earlier values.
+Consequently, summing visible rail rows can differ from Current during a
+partial failure, and neither value is fresh after a complete failure.
 
 ## Modalix SOM rails
 

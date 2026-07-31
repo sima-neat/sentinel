@@ -18,7 +18,7 @@ cache is displayed. It does not change the hardware sampling interval.
 | PMBus power | 100 ms | Collected in a dedicated thread. Latest, average, peak, rail counters, and error state are published at the next cache update. |
 | Thermal sensors | Separate thermal loop | The loop sleeps for 2 seconds after each collection pass. Reading all RTSN channels also takes time, so the effective complete-pass interval is longer than 2 seconds. |
 | CPU, memory, MLA memory, disk, and network | 2 seconds | Uses the daemon `--interval`; minimum accepted value is 0.5 seconds. |
-| Processes | 5 seconds | Process CPU deltas and RSS are refreshed independently of the normal system metrics. |
+| Processes | At least 5 seconds | The 5-second deadline is checked only when the normal daemon loop samples system metrics. With the default 2-second daemon interval, process data normally refreshes about every 6 seconds; a daemon interval longer than 5 seconds becomes the effective minimum. |
 | Terminal UI | 0.5 seconds | Cache refresh only; it does not trigger collection. |
 
 The daemon keeps 240 cache samples by default. At the default 2-second cache
@@ -41,8 +41,12 @@ sensor health.
 
 - A headline or table **Value** comes from `latest.values`.
 - A chart is built from that metric across the retained `samples` history.
-- Missing, non-finite, or unavailable values are serialized as `null` and
-  displayed as `-`, `unknown`, or an empty chart depending on the view.
+- A collected non-finite value is serialized as `null`. Depending on the
+  collector, an unavailable metric can instead be omitted from the sample
+  entirely—for example, power keys are absent until their first valid reading,
+  and unavailable or disabled RTSN channels are omitted. Views and export
+  consumers must handle both an absent key and a `null` value; the UI displays
+  these as `-`, `unknown`, or an empty chart depending on the view.
 - Dynamic chart scales are presentation aids. A graph reaching the top does
   not by itself mean a hardware limit was reached.
 - **Trend** sparklines normalize values to a fixed 0–100 display range. They
@@ -64,8 +68,10 @@ thresholds. The current defaults are:
 Metrics without thresholds report `normal` when available. `unknown` means no
 finite value is present; it does not mean the value is zero.
 
-Thermal charts additionally use cyan below 45 C, green from 45 C to below
-70 C, red from 70 C, and bold red from 85 C.
+In the interactive TUI, Thermal-tab line charts are green; the Overview
+temperature chart uses green below 70 C, yellow from 70 C, and red from 85 C.
+The legacy non-TUI table formatter uses cyan below 45 C, green from 45 C to
+below 70 C, red from 70 C, and bold red from 85 C.
 
 ## Reset and persistence
 
