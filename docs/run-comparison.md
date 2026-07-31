@@ -80,7 +80,7 @@ Controls:
 | `Up` / `Down` | Select a saved run. |
 | `Space` | Show or hide it; at most four runs are visible. |
 | `Enter` | Designate it as the baseline. |
-| `Left` / `Right` | Cycle total power, maximum temperature, CPU, and memory. |
+| `Left` / `Right` | Select the metric series shown for every visible run. |
 | `w` | Toggle common-overlap and full-duration windows. |
 | `x` | Export the visible selection as versioned JSON under `/tmp`. |
 | `d` twice | Delete the selected completed run. |
@@ -91,6 +91,11 @@ alignment. Samples are plotted at their original elapsed times without
 resampling or interpolation. The common-overlap window stops at the shortest
 selected run. Full duration preserves longer tails and naturally leaves other
 series absent.
+
+The visible metric selector provides total board power, maximum board/SoC
+temperature, CPU utilization, normalized one-minute CPU load, Linux RAM used,
+and MLA allocated memory. Only one metric is overlaid at a time, keeping three
+or four selected runs readable.
 
 All visible runs use the same Braille line weight and rendering style so no
 series appears more prominent than another. Each run still receives a stable

@@ -1150,11 +1150,13 @@ fn draw_storage(f: &mut Frame, area: Rect, cache: &CachePayload) {
         ],
     );
 }
-const COMPARE_METRICS: [(&str, &str, &str); 4] = [
+const COMPARE_METRICS: [(&str, &str, &str); 6] = [
     ("power_current_watts", "Total power", "W"),
-    ("__thermal_max", "Board temperature", "C"),
+    ("__thermal_max", "Thermal maximum", "C"),
     ("cpu_usage_pct", "CPU utilization", "%"),
-    ("linux_mem_used_pct", "Memory utilization", "%"),
+    ("cpu_load_1_pct", "CPU load", "%"),
+    ("linux_mem_used_mb", "RAM used", "MB"),
+    ("mla_mem_allocated_mb", "MLA memory", "MB"),
 ];
 const RUN_COLORS: [Color; 4] = [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta];
 
@@ -1179,10 +1181,30 @@ fn draw_compare(f: &mut Frame, area: Rect, state: &CompareState) {
     draw_compare_run_list(f, columns[0], state);
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(62), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Percentage(60),
+            Constraint::Min(0),
+        ])
         .split(columns[1]);
-    draw_compare_chart(f, right[0], state);
-    draw_compare_summary(f, right[1], state);
+    draw_compare_metric_selector(f, right[0], state);
+    draw_compare_chart(f, right[1], state);
+    draw_compare_summary(f, right[2], state);
+}
+
+fn draw_compare_metric_selector(f: &mut Frame, area: Rect, state: &CompareState) {
+    let titles: Vec<Line> = COMPARE_METRICS
+        .iter()
+        .map(|(_, label, _)| Line::from(format!(" {label} ")))
+        .collect();
+    f.render_widget(
+        Tabs::new(titles)
+            .select(state.metric)
+            .block(panel("Metric series  ◀ ▶"))
+            .style(Style::default().fg(DIM).bg(BG))
+            .highlight_style(Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+        area,
+    );
 }
 
 fn draw_compare_run_list(f: &mut Frame, area: Rect, state: &CompareState) {
@@ -2465,5 +2487,9 @@ mod tests {
         assert!(rendered.contains("common overlap"));
         assert!(rendered.contains("Δ base"));
         assert!(rendered.contains("J"));
+        assert!(rendered.contains("Thermal maximum"));
+        assert!(rendered.contains("CPU load"));
+        assert!(rendered.contains("RAM used"));
+        assert!(rendered.contains("MLA memory"));
     }
 }
