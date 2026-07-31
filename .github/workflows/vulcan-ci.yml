@@ -93,6 +93,7 @@ jobs:
           grep -Fq \
             'PLAYBOOK_SOURCE="gh:sima-neat/sentinel/skills/use-sentinel@${PLAYBOOK_REF}"' \
             dist/sentinel/install.sh
+          grep -Fq '[[ "${PLAYBOOK_REF}" =~ ^[0-9a-f]{40}$ ]]' dist/sentinel/install.sh
           test ! -e dist/sentinel/skills
           ls -lh dist/sentinel
 

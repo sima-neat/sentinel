@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_ROOT="${SIMA_SENTINEL_INSTALL_ROOT:-/opt/simaai/sentinel}"
 SERVICE_NAME="simaai-sentinel.service"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY_SRC="${SCRIPT_DIR}/simaai-sentinel"
@@ -33,11 +32,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   fi
 fi
 
-echo "Installing SiMa.ai Sentinel to ${INSTALL_ROOT}..."
-${SUDO} mkdir -p "${INSTALL_ROOT}"
-${SUDO} install -m 0755 "${BINARY_SRC}" "${INSTALL_ROOT}/simaai-sentinel"
-${SUDO} install -m 0644 "${SERVICE_SRC}" "${INSTALL_ROOT}/${SERVICE_NAME}"
-
+echo "Installing SiMa.ai Sentinel system service..."
 ${SUDO} install -m 0755 -d /usr/local/bin
 ${SUDO} install -m 0755 "${BINARY_SRC}" /usr/local/bin/simaai-sentinel
 
@@ -57,7 +52,7 @@ ${SUDO} systemctl restart "${SERVICE_NAME}"
 
 # Keep agent-directory ownership and playbook registry management in sima-cli.
 # This command intentionally runs as the invoking user, not through sudo.
-if [[ "${PLAYBOOK_REF}" != "__SENTINEL_PLAYBOOK_REF__" ]]; then
+if [[ "${PLAYBOOK_REF}" =~ ^[0-9a-f]{40}$ ]]; then
   SIMA_CLI_BIN="${SIMA_CLI:-}"
   if [[ -z "${SIMA_CLI_BIN}" ]] && command -v sima-cli >/dev/null 2>&1; then
     SIMA_CLI_BIN="$(command -v sima-cli)"
@@ -73,6 +68,8 @@ if [[ "${PLAYBOOK_REF}" != "__SENTINEL_PLAYBOOK_REF__" ]]; then
     echo "Warning: sima-cli was not found; Sentinel is installed, but its agent skill was not registered." >&2
     echo "Install it later with: sima-cli playbooks install ${PLAYBOOK_SOURCE}" >&2
   fi
+else
+  echo "Warning: package has no valid Git commit for the Sentinel agent skill; skipping playbook installation." >&2
 fi
 
 echo "Sentinel installed."
