@@ -9,6 +9,41 @@ Use `scripts/sentinel_api.py` for deterministic access to the local API. Default
 to `/run/simaai-sentinel/api.sock`; pass `--socket PATH` only when the user or
 test environment supplies another socket.
 
+The API is HTTP/1.1 over a Unix domain socket, not a TCP listener. Choose the
+execution path before making requests:
+
+- On the DevKit, run the bundled client directly.
+- From an external machine, use an authorized SSH target and execute the
+  client on the DevKit. A Unix socket cannot be contacted directly over the
+  network.
+- Do not expose the socket with `socat` or add a TCP listener. Use SSH unless
+  the user explicitly provides an authenticated proxy.
+
+Confirm the SSH target from user input or established session context; do not
+scan for DevKits. Verify the daemon and socket before collecting evidence:
+
+```bash
+ssh TARGET 'systemctl is-active simaai-sentinel && test -S /run/simaai-sentinel/api.sock'
+```
+
+The Sentinel package installs this skill for both Codex and Claude on the
+DevKit. Invoke that remote copy so SSH stdin remains available for normal
+authentication and command handling:
+
+```bash
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py health'
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py latest'
+```
+
+If the remote skill is missing and SSH uses non-interactive authentication,
+stream the bundled client with
+`ssh TARGET 'python3 - health' < scripts/sentinel_api.py`. Otherwise use local
+HTTP-over-socket `curl` through SSH as documented in `references/api.md`.
+
+The socket is normally mode `0666`, so API access should not require `sudo`.
+Treat SSH failures and API failures separately when reporting a connection
+problem.
+
 ## Inspect
 
 1. Run `health` before collecting evidence.
@@ -36,6 +71,16 @@ python3 scripts/sentinel_api.py start --name baseline --note "before optimizatio
 # Run workload.
 python3 scripts/sentinel_api.py stop
 python3 scripts/sentinel_api.py runs
+```
+
+Run the same lifecycle remotely with the installed client:
+
+```bash
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py active'
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py start --name baseline --note "before optimization" --tag compiler-v1'
+# Run workload on the DevKit.
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py stop'
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py runs'
 ```
 
 Starting and stopping traces changes Sentinel state. Confirm the requested name,
