@@ -92,11 +92,12 @@ resampling or interpolation. The common-overlap window stops at the shortest
 selected run. Full duration preserves longer tails and naturally leaves other
 series absent.
 
-The chart uses a stable color and plot marker for each visible run and always
-shows a legend. The summary reports sample count, minimum, mean, median, 95th
-percentile, maximum, percentage delta from the selected baseline, and
-integrated energy for power. In overlap mode, energy is integrated only
-through the common window.
+All visible runs use the same Braille line weight and rendering style so no
+series appears more prominent than another. Each run still receives a stable
+color and distinct legend symbol, and the legend is always visible. The
+summary reports sample count, minimum, mean, median, 95th percentile, maximum,
+percentage delta from the selected baseline, and integrated energy for power.
+In overlap mode, energy is integrated only through the common window.
 
 ## CSV export
 

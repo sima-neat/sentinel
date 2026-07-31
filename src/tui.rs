@@ -1157,12 +1157,6 @@ const COMPARE_METRICS: [(&str, &str, &str); 4] = [
     ("linux_mem_used_pct", "Memory utilization", "%"),
 ];
 const RUN_COLORS: [Color; 4] = [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta];
-const RUN_MARKERS: [symbols::Marker; 4] = [
-    symbols::Marker::Braille,
-    symbols::Marker::Dot,
-    symbols::Marker::Block,
-    symbols::Marker::Bar,
-];
 
 fn draw_compare(f: &mut Frame, area: Rect, state: &CompareState) {
     if state.runs.is_empty() {
@@ -1280,8 +1274,8 @@ fn draw_compare_chart(f: &mut Frame, area: Rect, state: &CompareState) {
         .enumerate()
         .map(|(index, (run, points))| {
             Dataset::default()
-                .name(run.metadata.name.as_str())
-                .marker(RUN_MARKERS[index])
+                .name(format!("{} {}", run_symbol(index), run.metadata.name))
+                .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
                 .style(Style::default().fg(RUN_COLORS[index]))
                 .data(points)
