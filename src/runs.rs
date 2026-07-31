@@ -270,6 +270,16 @@ pub fn delete(directory: &Path, selector: &str) -> Result<SavedRun> {
     Ok(run)
 }
 
+pub fn clear_completed(directory: &Path) -> Result<usize> {
+    let _lock = StoreLock::acquire(directory)?;
+    let completed = completed_runs_unlocked(directory)?;
+    for run in &completed {
+        let path = completed_path(directory, &run.metadata.id);
+        fs::remove_file(&path).with_context(|| format!("delete {}", path.display()))?;
+    }
+    Ok(completed.len())
+}
+
 pub fn summary(run: &SavedRun) -> RunSummary {
     let ended = run
         .metadata
@@ -775,6 +785,23 @@ mod tests {
         stop(&directory).unwrap();
         fs::write(directory.join("corrupt.json"), b"not json").unwrap();
         assert_eq!(list(&directory).unwrap().len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clear_removes_completed_runs_but_preserves_active_capture() {
+        let directory = temp_dir();
+        let cache = cache();
+        start(&directory, &cache, "complete", None, vec![]).unwrap();
+        stop(&directory).unwrap();
+        start(&directory, &cache, "recording", None, vec![]).unwrap();
+
+        assert_eq!(clear_completed(&directory).unwrap(), 1);
+        let remaining = list(&directory).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].name, "recording");
+        assert!(remaining[0].ended_at.is_none());
+        stop(&directory).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 

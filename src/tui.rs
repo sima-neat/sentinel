@@ -73,6 +73,7 @@ struct CompareState {
     metric: usize,
     overlap: bool,
     message: Option<String>,
+    pending_delete: Option<String>,
 }
 
 impl CompareState {
@@ -98,6 +99,7 @@ impl CompareState {
             metric: 0,
             overlap: true,
             message: None,
+            pending_delete: None,
         }
     }
 
@@ -117,6 +119,13 @@ impl CompareState {
             .is_none_or(|id| !self.runs.iter().any(|run| &run.metadata.id == id))
         {
             self.baseline = self.runs.first().map(|run| run.metadata.id.clone());
+        }
+        if self
+            .pending_delete
+            .as_ref()
+            .is_some_and(|id| !self.runs.iter().any(|run| &run.metadata.id == id))
+        {
+            self.pending_delete = None;
         }
     }
 }
@@ -334,6 +343,31 @@ pub fn run_ops(cache_path: &str, interval: Duration, runs_dir: &Path) -> Result<
                             }
                             dirty = true;
                         }
+                        (KeyCode::Char('d'), _) if TABS[active] == Tab::Compare => {
+                            if let Some(run) = compare.runs.get(compare.selected) {
+                                let id = run.metadata.id.clone();
+                                let name = run.metadata.name.clone();
+                                if compare.pending_delete.as_deref() == Some(id.as_str()) {
+                                    match runs::delete(runs_dir, &id) {
+                                        Ok(_) => {
+                                            compare.message =
+                                                Some(format!("Deleted run '{name}'."));
+                                            compare.pending_delete = None;
+                                            compare.refresh(runs_dir);
+                                        }
+                                        Err(error) => {
+                                            compare.message = Some(error.to_string());
+                                            compare.pending_delete = None;
+                                        }
+                                    }
+                                } else {
+                                    compare.pending_delete = Some(id);
+                                    compare.message =
+                                        Some(format!("Press d again to delete '{name}'."));
+                                }
+                            }
+                            dirty = true;
+                        }
                         (KeyCode::Up, _) if TABS[active] == Tab::System => {
                             selected_core = selected_core.saturating_sub(1);
                             dirty = true;
@@ -512,6 +546,8 @@ fn draw_footer(f: &mut Frame, area: Rect, active: Tab) {
                 Span::styled(":Window  ", Style::default().fg(DIM)),
                 Span::styled("x", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled(":Export  ", Style::default().fg(DIM)),
+                Span::styled("d", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(":Delete  ", Style::default().fg(DIM)),
                 Span::styled("r", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled(":Record", Style::default().fg(DIM)),
             ]
@@ -2216,6 +2252,7 @@ mod tests {
             metric: 0,
             overlap: true,
             message: None,
+            pending_delete: None,
         }
     }
 
@@ -2415,6 +2452,7 @@ mod tests {
             metric: 0,
             overlap: true,
             message: None,
+            pending_delete: None,
         };
         let backend = TestBackend::new(150, 40);
         let mut terminal = Terminal::new(backend).expect("test terminal");

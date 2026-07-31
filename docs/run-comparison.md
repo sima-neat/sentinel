@@ -42,11 +42,15 @@ can still be stopped and saved.
 simaai-sentinel runs list
 simaai-sentinel runs show baseline
 simaai-sentinel runs delete baseline
+simaai-sentinel runs clear --force
 ```
 
 `list` shows recording/completed state, elapsed duration, and sample count.
 `show` reports metadata, duration, integrated total-board energy, and metric
 count. A run can be selected by its unique name or stable ID.
+
+`clear --force` removes every completed run while preserving an active
+recording. The explicit flag prevents accidental bulk deletion.
 
 Each run records:
 
@@ -79,6 +83,7 @@ Controls:
 | `Left` / `Right` | Cycle total power, maximum temperature, CPU, and memory. |
 | `w` | Toggle common-overlap and full-duration windows. |
 | `x` | Export the visible selection as versioned JSON under `/tmp`. |
+| `d` twice | Delete the selected completed run. |
 | `r` | Start or stop a checkpoint. |
 
 Every series begins at elapsed `t=0`; wall-clock timestamps are not used for

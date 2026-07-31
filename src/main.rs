@@ -197,6 +197,16 @@ fn runs_command(runs_dir: &Path, args: &[String]) -> Result<()> {
             println!("Deleted '{}' ({}).", run.metadata.name, run.metadata.id);
             Ok(())
         }
+        "clear" if args == ["clear", "--force"] => {
+            let count = runs::clear_completed(runs_dir)?;
+            println!(
+                "Cleared {count} completed run(s). Active recording, if any, was preserved."
+            );
+            Ok(())
+        }
+        "clear" => bail!(
+            "clearing all completed runs is destructive; confirm with: simaai-sentinel runs clear --force"
+        ),
         "list" | "show" | "delete" => bail!("usage: simaai-sentinel runs {command} [RUN]"),
         other => bail!("unknown runs command '{other}'"),
     }
