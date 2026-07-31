@@ -63,7 +63,26 @@ if [[ "${PLAYBOOK_REF}" =~ ^[0-9a-f]{40}$ ]]; then
 
   if [[ -n "${SIMA_CLI_BIN}" ]]; then
     echo "Installing Sentinel agent skill through sima-cli playbooks..."
-    SIMA_CLI_CHECK_FOR_UPDATE=0 "${SIMA_CLI_BIN}" playbooks install --force "${PLAYBOOK_SOURCE}"
+    if ! SIMA_CLI_CHECK_FOR_UPDATE=0 "${SIMA_CLI_BIN}" playbooks install --force "${PLAYBOOK_SOURCE}"; then
+      # sima-cli <= 2.1.15 treats commit SHAs as branch names when git is not
+      # available and does not preserve the archive extension. Keep the
+      # installation managed by sima-cli, but materialize the immutable GitHub
+      # archive locally for compatibility with those releases.
+      if ! command -v curl >/dev/null 2>&1; then
+        echo "Error: curl is required to install the Sentinel skill with this sima-cli version." >&2
+        exit 1
+      fi
+      echo "Retrying Sentinel agent skill installation from its commit archive..."
+      PLAYBOOK_TMP_DIR="$(mktemp -d)"
+      trap 'rm -rf -- "${PLAYBOOK_TMP_DIR}"' EXIT
+      PLAYBOOK_ARCHIVE="${PLAYBOOK_TMP_DIR}/sentinel-${PLAYBOOK_REF}.tar.gz"
+      curl -fsSL \
+        "https://codeload.github.com/sima-neat/sentinel/tar.gz/${PLAYBOOK_REF}" \
+        -o "${PLAYBOOK_ARCHIVE}"
+      SIMA_CLI_CHECK_FOR_UPDATE=0 "${SIMA_CLI_BIN}" playbooks install --force "${PLAYBOOK_ARCHIVE}"
+      rm -rf -- "${PLAYBOOK_TMP_DIR}"
+      trap - EXIT
+    fi
   else
     echo "Warning: sima-cli was not found; Sentinel is installed, but its agent skill was not registered." >&2
     echo "Install it later with: sima-cli playbooks install ${PLAYBOOK_SOURCE}" >&2
