@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Sentinel"
+  short_description: "Read telemetry and control Sentinel traces"
+  default_prompt: "Use $use-sentinel to inspect live telemetry and record a comparison trace."

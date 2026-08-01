@@ -28,12 +28,19 @@ DevKit.
 
 ```bash
 simaai-sentinel                 # open the terminal operations view
+simaai-sentinel --version       # print release or branch build identity
 simaai-sentinel table           # continuously redraw a color-coded table
 simaai-sentinel table --once    # print one table snapshot
 simaai-sentinel export          # print the daemon cache as JSON
 simaai-sentinel sensors         # explain each collected metric
 simaai-sentinel status          # daemon/cache status
+simaai-sentinel checkpoint --name baseline
+simaai-sentinel checkpoint --stop
+simaai-sentinel runs list
 ```
+
+Agents and local automation can use the daemon's Unix-socket JSON API for live
+telemetry and checkpoint control. See [Local agent API](docs/api.md).
 
 ## Documentation
 
@@ -47,6 +54,7 @@ are available in the [Sentinel documentation](docs/README.md):
 - [Storage/Net](docs/panels/storage-network.md)
 - [Sampling, history, and status semantics](docs/measurement-model.md)
 - [JSON export and command reports](docs/reports.md)
+- [Checkpoint capture and run comparison](docs/run-comparison.md)
 
 ## JSON export
 

@@ -84,10 +84,17 @@ struct PowerSnapshot {
 pub trait PowerI2cBackend: Send + Sync {
     fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String>;
     fn read_register(&self, bus: i32, addr: u8, register: u8) -> Result<u8, String>;
+
+    fn read_power(&self, rail: &PowerRailConfig) -> Result<u8, String> {
+        self.set_page(rail.i2c_bus, rail.i2c_addr, rail.page)?;
+        self.read_register(rail.i2c_bus, rail.i2c_addr, POUT_REGISTER)
+    }
 }
 
 #[derive(Debug, Default)]
-struct NativePowerI2cBackend;
+struct NativePowerI2cBackend {
+    devices: Mutex<BTreeMap<i32, fs::File>>,
+}
 
 impl PowerI2cBackend for NativePowerI2cBackend {
     fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String> {
@@ -104,6 +111,61 @@ impl PowerI2cBackend for NativePowerI2cBackend {
                 "i2c read register 0x{register:x} failed on /dev/i2c-{bus} addr 0x{addr:x}: {error}"
             )
         })
+    }
+
+    fn read_power(&self, rail: &PowerRailConfig) -> Result<u8, String> {
+        let mut devices = self
+            .devices
+            .lock()
+            .map_err(|_| "I2C device cache lock poisoned".to_string())?;
+        let result = (|| {
+            let device = match devices.entry(rail.i2c_bus) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let path = format!("/dev/i2c-{}", rail.i2c_bus);
+                    let device = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .custom_flags(libc::O_CLOEXEC)
+                        .open(&path)
+                        .map_err(|error| format!("open {path} failed: {error}"))?;
+                    entry.insert(device)
+                }
+            };
+            select_slave(device.as_raw_fd(), rail.i2c_bus, rail.i2c_addr)?;
+            smbus_write_byte_data(device.as_raw_fd(), PAGE_REGISTER, rail.page).map_err(
+                |error| {
+                    format!(
+                        "i2c write page 0x{:x} failed on /dev/i2c-{} addr 0x{:x}: {error}",
+                        rail.page, rail.i2c_bus, rail.i2c_addr
+                    )
+                },
+            )?;
+            smbus_read_byte_data(device.as_raw_fd(), POUT_REGISTER).map_err(|error| {
+                format!(
+                    "i2c read register 0x{POUT_REGISTER:x} failed on /dev/i2c-{} addr 0x{:x}: {error}",
+                    rail.i2c_bus, rail.i2c_addr
+                )
+            })
+        })();
+        if result.is_err() {
+            // Reopen on the next sample after a driver reset or transient bus
+            // failure rather than retaining a stale descriptor indefinitely.
+            devices.remove(&rail.i2c_bus);
+        }
+        result
+    }
+}
+
+fn select_slave(fd: i32, bus: i32, addr: u8) -> Result<(), String> {
+    let result = unsafe { libc::ioctl(fd, I2C_SLAVE as _, i32::from(addr)) };
+    if result < 0 {
+        Err(format!(
+            "I2C_SLAVE 0x{addr:x} on /dev/i2c-{bus} failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -130,13 +192,7 @@ fn open_device(bus: i32, addr: u8) -> Result<fs::File, String> {
         .custom_flags(libc::O_CLOEXEC)
         .open(&path)
         .map_err(|error| format!("open {path} failed: {error}"))?;
-    let result = unsafe { libc::ioctl(device.as_raw_fd(), I2C_SLAVE, i32::from(addr)) };
-    if result < 0 {
-        return Err(format!(
-            "I2C_SLAVE 0x{addr:x} on {path} failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
+    select_slave(device.as_raw_fd(), bus, addr)?;
     Ok(device)
 }
 
@@ -153,7 +209,7 @@ fn smbus_access(
         size,
         data,
     };
-    let result = unsafe { libc::ioctl(fd, I2C_SMBUS, &mut args) };
+    let result = unsafe { libc::ioctl(fd, I2C_SMBUS as _, &mut args) };
     if result < 0 {
         Err(std::io::Error::last_os_error())
     } else {
@@ -184,15 +240,7 @@ fn read_power_snapshot(config: &PowerConfig, backend: &dyn PowerI2cBackend) -> P
     let mut rails_with_power = 0;
 
     for rail in &config.rails {
-        if let Err(error) = backend.set_page(rail.i2c_bus, rail.i2c_addr, rail.page) {
-            readings.push(PowerRailReading {
-                watts: None,
-                error: Some(format!("set page failed for {}: {error}", rail.name)),
-            });
-            continue;
-        }
-
-        match backend.read_register(rail.i2c_bus, rail.i2c_addr, POUT_REGISTER) {
+        match backend.read_power(rail) {
             Ok(raw) => {
                 let watts = f64::from(raw) * 2f64.powi(rail.pout_exponent);
                 total_watts += watts;
@@ -387,7 +435,7 @@ pub fn spawn_power_collector(
     config: PowerConfig,
     accumulator: Arc<Mutex<PowerAccumulator>>,
 ) {
-    let backend: Arc<dyn PowerI2cBackend> = Arc::new(NativePowerI2cBackend);
+    let backend: Arc<dyn PowerI2cBackend> = Arc::new(NativePowerI2cBackend::default());
     let _ = thread::Builder::new()
         .name("sentinel-power".into())
         .spawn(move || {
@@ -406,11 +454,10 @@ pub fn spawn_power_collector(
 }
 
 fn sleep_interruptible(stopped: &AtomicBool, duration: Duration) {
-    let deadline = Instant::now() + duration;
-    while !stopped.load(Ordering::Relaxed) && Instant::now() < deadline {
-        thread::sleep(
-            Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
-        );
+    if !stopped.load(Ordering::Relaxed) {
+        // The power interval is 100 ms, so one sleep has the same sampling
+        // cadence with at most 100 ms shutdown latency and no 10 ms polling.
+        thread::sleep(duration);
     }
 }
 

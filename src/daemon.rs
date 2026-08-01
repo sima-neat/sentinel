@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -8,26 +9,44 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::cache::write_cache;
-use crate::model::{CachePayload, MetricDefinition, PowerStatus, ProcessInfo, Sample};
+use crate::model::{CachePayload, MetricDefinition, Sample};
 use crate::power::{
     power_metric_definitions, spawn_power_collector, PowerAccumulator, PowerConfig,
 };
-use crate::ring::Ring;
 use crate::system::{system_metric_definitions, SystemCollector};
 use crate::thermal::{thermal_metric_definitions, ThermalCollector};
 
-pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
+pub fn run(
+    cache_path: &str,
+    interval: Duration,
+    history: usize,
+    runs_dir: &Path,
+    api_socket: &Path,
+) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stopped.clone());
+    let api_thread =
+        crate::api::spawn(api_socket, Path::new(cache_path), runs_dir, stopped.clone())?;
 
     let mut metrics = Vec::<MetricDefinition>::new();
     metrics.extend(thermal_metric_definitions());
     metrics.extend(system_metric_definitions());
-    let power_config = PowerConfig::auto(Duration::from_millis(100));
+    let power_config = PowerConfig::auto(Duration::from_millis(250));
     metrics.extend(power_metric_definitions(&power_config));
 
     let mut system = SystemCollector::new();
-    let mut samples = Ring::new(history.max(1));
+    let sample_capacity = history.max(1);
+    let mut payload = CachePayload {
+        schema: 1,
+        version: crate::version::VERSION.into(),
+        updated_at: Utc::now(),
+        metrics,
+        latest: None,
+        samples: Vec::with_capacity(sample_capacity),
+        processes: Vec::new(),
+        power: None,
+        errors: Vec::new(),
+    };
     let thermal_values = Arc::new(Mutex::new(BTreeMap::new()));
     spawn_thermal_collector(stopped.clone(), thermal_values.clone());
     let power = Arc::new(Mutex::new(PowerAccumulator::new(power_config.clone())));
@@ -44,19 +63,23 @@ pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
             values.extend(state.metric_values());
             state.status()
         });
-        samples.push(Sample {
+        let sample = Sample {
             timestamp: Utc::now(),
             values: sanitize_values(&values),
-        });
-
-        let payload = payload(
-            &metrics,
-            &samples,
-            system.processes(),
-            power_status,
-            Vec::new(),
-        );
+        };
+        if payload.samples.len() == sample_capacity {
+            payload.samples.remove(0);
+        }
+        payload.latest = Some(sample.clone());
+        payload.samples.push(sample);
+        payload.updated_at = Utc::now();
+        payload.processes = system.processes();
+        payload.power = power_status;
+        payload.errors.clear();
         write_cache(cache_path, &payload)?;
+        if let Err(error) = crate::runs::record(runs_dir, &payload) {
+            eprintln!("Sentinel checkpoint capture failed: {error:#}");
+        }
 
         let elapsed = loop_start.elapsed();
         if elapsed < interval {
@@ -64,15 +87,12 @@ pub fn run(cache_path: &str, interval: Duration, history: usize) -> Result<()> {
         }
     }
 
-    let power_status = power.lock().ok().map(|state| state.status());
-    let payload = payload(
-        &metrics,
-        &samples,
-        system.processes(),
-        power_status,
-        vec!["daemon stopped".into()],
-    );
+    payload.updated_at = Utc::now();
+    payload.processes = system.processes();
+    payload.power = power.lock().ok().map(|state| state.status());
+    payload.errors = vec!["daemon stopped".into()];
     write_cache(cache_path, &payload)?;
+    let _ = api_thread.join();
     Ok(())
 }
 
@@ -110,26 +130,6 @@ fn sanitize_values(values: &BTreeMap<String, f64>) -> BTreeMap<String, Option<f6
         .iter()
         .map(|(key, value)| (key.clone(), value.is_finite().then_some(*value)))
         .collect()
-}
-
-fn payload(
-    metrics: &[MetricDefinition],
-    samples: &Ring<Sample>,
-    processes: Vec<ProcessInfo>,
-    power: Option<PowerStatus>,
-    errors: Vec<String>,
-) -> CachePayload {
-    CachePayload {
-        schema: 1,
-        version: env!("CARGO_PKG_VERSION").into(),
-        updated_at: Utc::now(),
-        metrics: metrics.to_vec(),
-        latest: samples.last().cloned(),
-        samples: samples.to_vec(),
-        processes,
-        power,
-        errors,
-    }
 }
 
 fn install_signal_handlers(stopped: Arc<AtomicBool>) {

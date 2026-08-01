@@ -1,0 +1,8 @@
+id: use-sentinel
+type: skill
+version: 0.1.0
+name: Use Sentinel
+description: Read Sentinel telemetry and control or compare recorded traces.
+agents:
+  - codex
+  - claude
