@@ -68,8 +68,11 @@ nested skill resources to the Vulcan artifact. The playbook manager installs
 the skill for each supported agent and records its source commit in the local
 registry.
 
-If `sima-cli` was unavailable while installing Sentinel, install the skill
-later from GitHub:
+Sentinel installation on a DevKit always starts with `sima-cli neat install
+sentinel`, so no separate skill-install step is normally required there. To
+use the Sentinel skill in an environment where the DevKit package is not
+installed—for example, an SDK container or developer workstation—install the
+skill directly from GitHub with that environment's `sima-cli`:
 
 ```bash
 sima-cli playbooks install gh:sima-neat/sentinel/skills/use-sentinel
