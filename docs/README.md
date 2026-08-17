@@ -26,14 +26,3 @@ calculated, and what its limitations are.
   daemon's Unix socket.
 - [Capturing and comparing runs](run-comparison.md) documents persistent
   checkpoints, the Compare Runs tab, retention, and CSV/JSON exports.
-
-## Documentation integration contract
-
-This directory is the canonical detailed Sentinel documentation. Pages use
-relative Markdown links and do not depend on a particular documentation-site
-generator. A consuming repository can import the directory as a subtree and
-wrap it with site-specific navigation or front matter without rewriting the
-content.
-
-When a panel, metric key, unit, threshold, calculation, or cache field changes,
-update the corresponding page in the same change.

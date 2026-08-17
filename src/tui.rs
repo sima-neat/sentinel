@@ -1523,11 +1523,7 @@ fn compare_stats(run: &SavedRun, key: &str, limit: Option<f64>) -> runs::MetricS
 }
 
 fn elapsed_seconds(run: &SavedRun, sample: &crate::model::Sample) -> f64 {
-    (sample.timestamp - run.metadata.started_at)
-        .num_microseconds()
-        .unwrap_or(0)
-        .max(0) as f64
-        / 1_000_000.0
+    runs::sample_elapsed_seconds(run, sample)
 }
 
 fn visible_run_index(state: &CompareState, id: &str) -> Option<usize> {
@@ -2621,5 +2617,37 @@ mod tests {
         assert!(rendered.contains("CPU load"));
         assert!(rendered.contains("RAM used"));
         assert!(rendered.contains("MLA memory"));
+    }
+
+    #[test]
+    fn compare_series_keeps_missing_metric_gap_after_run_alignment() {
+        let start = Utc::now();
+        let run = SavedRun {
+            schema: RUN_SCHEMA,
+            metadata: RunMetadata {
+                id: "gap".into(),
+                name: "gap".into(),
+                note: None,
+                tags: Vec::new(),
+                started_at: start,
+                ended_at: Some(start + chrono::Duration::seconds(8)),
+                sample_interval_ms: Some(2_000),
+                sentinel_version: "0.1.0".into(),
+                system: BTreeMap::new(),
+            },
+            metrics: Vec::new(),
+            samples: vec![
+                Sample {
+                    timestamp: start + chrono::Duration::seconds(3),
+                    values: BTreeMap::from([("metric".into(), None)]),
+                },
+                Sample {
+                    timestamp: start + chrono::Duration::seconds(5),
+                    values: BTreeMap::from([("metric".into(), Some(42.0))]),
+                },
+            ],
+        };
+
+        assert_eq!(compare_series(&run, "metric", None), vec![(2.0, 42.0)]);
     }
 }

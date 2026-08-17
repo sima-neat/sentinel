@@ -352,7 +352,7 @@ pub fn export_json(runs: Vec<SavedRun>) -> ExportDocument {
             (
                 run.metadata.id.clone(),
                 ExportRunSummary {
-                    duration_ms: run_summary.duration_ms,
+                    duration_ms: comparison_duration_milliseconds(run),
                     samples: run_summary.samples,
                     energy_joules: run_summary.energy_joules,
                     metrics,
@@ -400,9 +400,7 @@ pub fn export_csv(runs: &[SavedRun]) -> String {
             .map(|metric| (metric.key.as_str(), metric))
             .collect();
         for sample in &run.samples {
-            let elapsed = (sample.timestamp - run.metadata.started_at)
-                .num_milliseconds()
-                .max(0);
+            let elapsed = sample_elapsed_milliseconds(run, sample);
             let keys: BTreeSet<&str> = definitions
                 .keys()
                 .copied()
@@ -459,10 +457,7 @@ pub fn integrate_energy_until(
     let mut energy = 0.0;
     let mut segments = 0usize;
     for pair in run.samples.windows(2) {
-        let right_elapsed = (pair[1].timestamp - run.metadata.started_at)
-            .num_microseconds()
-            .unwrap_or(0) as f64
-            / 1_000_000.0;
+        let right_elapsed = sample_elapsed_seconds(run, &pair[1]);
         if max_elapsed_seconds.is_some_and(|limit| right_elapsed > limit) {
             continue;
         }
@@ -480,6 +475,37 @@ pub fn integrate_energy_until(
         }
     }
     (segments > 0).then_some(energy)
+}
+
+/// Return a sample's comparison time relative to the run's first captured
+/// sample. Checkpoint creation precedes the first daemon sample by a variable
+/// amount, so using metadata.started_at would introduce an unrelated leading
+/// gap and misalign otherwise comparable runs.
+pub fn sample_elapsed_seconds(run: &SavedRun, sample: &Sample) -> f64 {
+    sample_elapsed_microseconds(run, sample) as f64 / 1_000_000.0
+}
+
+pub fn sample_elapsed_milliseconds(run: &SavedRun, sample: &Sample) -> i64 {
+    sample_elapsed_microseconds(run, sample) / 1_000
+}
+
+pub fn comparison_duration_milliseconds(run: &SavedRun) -> i64 {
+    run.samples
+        .last()
+        .map(|sample| sample_elapsed_milliseconds(run, sample))
+        .unwrap_or(0)
+}
+
+fn sample_elapsed_microseconds(run: &SavedRun, sample: &Sample) -> i64 {
+    let origin = run
+        .samples
+        .first()
+        .map(|first| first.timestamp)
+        .unwrap_or(sample.timestamp);
+    (sample.timestamp - origin)
+        .num_microseconds()
+        .unwrap_or(0)
+        .max(0)
 }
 
 fn metric_status(value: f64, definition: Option<&MetricDefinition>) -> &'static str {
@@ -814,6 +840,51 @@ mod tests {
         let run = stop(&directory).unwrap();
         let csv = export_csv(&[run]);
         assert!(csv.contains("\"a,b\""));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn comparison_elapsed_time_starts_at_first_captured_sample() {
+        let mut cache = cache();
+        let directory = temp_dir();
+        let mut run = start(&directory, &cache, "delayed", None, vec![]).unwrap();
+        cache.latest.as_mut().unwrap().timestamp =
+            run.metadata.started_at + chrono::Duration::milliseconds(1_750);
+        run.samples = vec![
+            cache.latest.clone().unwrap(),
+            Sample {
+                timestamp: cache.latest.as_ref().unwrap().timestamp
+                    + chrono::Duration::milliseconds(2_000),
+                values: BTreeMap::from([("power_current_watts".into(), Some(4.0))]),
+            },
+        ];
+
+        assert_eq!(sample_elapsed_milliseconds(&run, &run.samples[0]), 0);
+        assert_eq!(sample_elapsed_milliseconds(&run, &run.samples[1]), 2_000);
+
+        let csv = export_csv(&[run.clone()]);
+        let elapsed: Vec<&str> = csv
+            .lines()
+            .skip(1)
+            .map(|row| row.split(',').nth(2).unwrap())
+            .collect();
+        assert_eq!(elapsed, ["0", "2000"]);
+        assert_eq!(
+            export_json(vec![run.clone()])
+                .summaries
+                .get(&run.metadata.id)
+                .unwrap()
+                .duration_ms,
+            2_000
+        );
+        assert_eq!(
+            integrate_energy_until(&run, "power_current_watts", Some(1.0)),
+            None
+        );
+        assert_eq!(
+            integrate_energy_until(&run, "power_current_watts", Some(2.0)),
+            Some(6.0)
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

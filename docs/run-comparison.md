@@ -86,11 +86,12 @@ Controls:
 | `d` twice | Delete the selected completed run. |
 | `r` | Start or stop a checkpoint. |
 
-Every series begins at elapsed `t=0`; wall-clock timestamps are not used for
-alignment. Samples are plotted at their original elapsed times without
-resampling or interpolation. The common-overlap window stops at the shortest
-selected run. Full duration preserves longer tails and naturally leaves other
-series absent.
+Every run begins at elapsed `t=0` at its first captured daemon sample;
+wall-clock timestamps and the variable delay between checkpoint creation and
+that first sample are not used for alignment. Samples are plotted at their
+original relative intervals without resampling or interpolation. The
+common-overlap window stops at the shortest selected run. Full duration
+preserves longer tails and naturally leaves other series absent.
 
 The visible metric selector provides total board power, maximum board/SoC
 temperature, CPU utilization, normalized one-minute CPU load, Linux RAM used,
@@ -131,10 +132,13 @@ simaai-sentinel export baseline optimized \
 
 The JSON document contains export `schema: 1`, generation time, complete run
 metadata, metric definitions, raw samples, integrated power energy, and
-per-run statistics for every defined metric. The first requested run is the
-baseline; `baseline_deltas_pct` reports mean percentage differences for
-subsequent runs when both means exist and the baseline is nonzero. Consumers
-must reject unsupported future schema versions rather than silently guessing.
+per-run statistics for every defined metric. Summary `duration_ms` uses the
+same first-sample-relative comparison timeline as the TUI and CSV; raw sample
+timestamps and checkpoint metadata retain their original UTC values. The
+first requested run is the baseline; `baseline_deltas_pct` reports mean
+percentage differences for subsequent runs when both means exist and the
+baseline is nonzero. Consumers must reject unsupported future schema versions
+rather than silently guessing.
 
 Both export formats are written to a temporary sibling and atomically renamed
 to the requested output. The output directory must already exist.
@@ -142,8 +146,8 @@ to the requested output. The output directory must already exist.
 ## Measurement cautions
 
 - A checkpoint begins when the CLI writes its active record. The first
-  captured point is the next daemon cache sample, not an interpolated value at
-  exactly zero seconds.
+  captured point is the next daemon cache sample and becomes comparison
+  `t=0`; no value is interpolated at the earlier checkpoint-creation time.
 - Capture cadence follows the daemon cache interval. Faster PMBus reads are
   already aggregated into the published power fields.
 - Missing samples are never filled.
