@@ -1,5 +1,7 @@
 # SiMa.ai Sentinel
 
+**Documentation:** [English](docs/README.md) | [한국어](docs/i18n/ko/README.md) | [日本語](docs/i18n/ja/README.md) | [繁體中文](docs/i18n/zh-Hant/README.md) | [Українська](docs/i18n/uk/README.md)
+
 Sentinel is a Rust-based Modalix DevKit metrics collector. It monitors board
 sensors and system utilization in the background, then exposes a low-overhead
 CLI for live inspection.

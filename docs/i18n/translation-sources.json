@@ -1,0 +1,50 @@
+{
+  "ja": {
+    "docs/api.md": "eeab0b742d2cdcd941d175f62eab380ece5fd45a0f7b7ddb77b600c36bd5845d",
+    "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
+    "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
+    "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
+    "docs/panels/storage-network.md": "f5dd309bf41cb239cabc1236d1be5cafc0aebe0ef964abfc4d9b29626713182c",
+    "docs/panels/system.md": "3b10a80acaa7f890dfb2363903f8a9b8f3a82957f9657930b695f0a410ed6c77",
+    "docs/panels/thermal.md": "fa5997f90e48d484acb1f586a075372134062cdb3e53dfb64fea15a361f2a20c",
+    "docs/README.md": "f64d4547fedb3fec2c4312433de6d347c17ebf7f55753d3932db49b5a2b70a30",
+    "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
+    "docs/run-comparison.md": "396e651cd5a2b81077cfeed22de6f5e67c710703fa82836c15c15304416d9ae6"
+  },
+  "ko": {
+    "docs/api.md": "eeab0b742d2cdcd941d175f62eab380ece5fd45a0f7b7ddb77b600c36bd5845d",
+    "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
+    "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
+    "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
+    "docs/panels/storage-network.md": "f5dd309bf41cb239cabc1236d1be5cafc0aebe0ef964abfc4d9b29626713182c",
+    "docs/panels/system.md": "3b10a80acaa7f890dfb2363903f8a9b8f3a82957f9657930b695f0a410ed6c77",
+    "docs/panels/thermal.md": "fa5997f90e48d484acb1f586a075372134062cdb3e53dfb64fea15a361f2a20c",
+    "docs/README.md": "f64d4547fedb3fec2c4312433de6d347c17ebf7f55753d3932db49b5a2b70a30",
+    "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
+    "docs/run-comparison.md": "396e651cd5a2b81077cfeed22de6f5e67c710703fa82836c15c15304416d9ae6"
+  },
+  "uk": {
+    "docs/api.md": "eeab0b742d2cdcd941d175f62eab380ece5fd45a0f7b7ddb77b600c36bd5845d",
+    "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
+    "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
+    "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
+    "docs/panels/storage-network.md": "f5dd309bf41cb239cabc1236d1be5cafc0aebe0ef964abfc4d9b29626713182c",
+    "docs/panels/system.md": "3b10a80acaa7f890dfb2363903f8a9b8f3a82957f9657930b695f0a410ed6c77",
+    "docs/panels/thermal.md": "fa5997f90e48d484acb1f586a075372134062cdb3e53dfb64fea15a361f2a20c",
+    "docs/README.md": "f64d4547fedb3fec2c4312433de6d347c17ebf7f55753d3932db49b5a2b70a30",
+    "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
+    "docs/run-comparison.md": "396e651cd5a2b81077cfeed22de6f5e67c710703fa82836c15c15304416d9ae6"
+  },
+  "zh-Hant": {
+    "docs/api.md": "eeab0b742d2cdcd941d175f62eab380ece5fd45a0f7b7ddb77b600c36bd5845d",
+    "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
+    "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
+    "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
+    "docs/panels/storage-network.md": "f5dd309bf41cb239cabc1236d1be5cafc0aebe0ef964abfc4d9b29626713182c",
+    "docs/panels/system.md": "3b10a80acaa7f890dfb2363903f8a9b8f3a82957f9657930b695f0a410ed6c77",
+    "docs/panels/thermal.md": "fa5997f90e48d484acb1f586a075372134062cdb3e53dfb64fea15a361f2a20c",
+    "docs/README.md": "f64d4547fedb3fec2c4312433de6d347c17ebf7f55753d3932db49b5a2b70a30",
+    "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
+    "docs/run-comparison.md": "396e651cd5a2b81077cfeed22de6f5e67c710703fa82836c15c15304416d9ae6"
+  }
+}

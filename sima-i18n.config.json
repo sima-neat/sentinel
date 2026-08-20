@@ -1,0 +1,19 @@
+{
+  "sourceDir": "docs",
+  "translationDir": "docs/i18n/{locale}",
+  "manifest": "docs/i18n/translation-sources.json",
+  "excludedPrefixes": ["docs/i18n/"],
+  "canonicalTerms": ["SiMa.ai", "Sentinel", "Modalix", "DevKit", "MLSoC", "PMBus", "Linux", "JSON", "CSV", "Unix"],
+  "locales": {
+    "ko": {
+      "name": "Korean",
+      "code": "ko",
+      "terms": {"pipeline": "파이프라인", "runtime": "런타임", "troubleshooting": "문제 해결"},
+      "proseReplacements": [["단열 패널", "열 패널"], ["| 힘 |", "| 전력 |"]]
+    },
+    "ja": {"name": "Japanese", "code": "ja", "terms": {"pipeline": "パイプライン", "runtime": "ランタイム", "troubleshooting": "トラブルシューティング"}},
+    "zh-Hant": {"name": "Traditional Chinese (Taiwan)", "code": "zh-Hant-TW", "terms": {"pipeline": "管線", "runtime": "執行階段", "troubleshooting": "疑難排解"}},
+    "uk": {"name": "Ukrainian (Ukraine)", "code": "uk-UA", "terms": {"pipeline": "конвеєр", "runtime": "середовище виконання", "troubleshooting": "усунення несправностей"}}
+  },
+  "provider": {"type": "ollama", "model": "translategemma:27b", "endpoint": "http://127.0.0.1:11434/api/chat", "timeoutMs": 300000}
+}
