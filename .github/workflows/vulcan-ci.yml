@@ -62,7 +62,7 @@ jobs:
       - name: Install sima-cli
         run: |
           set -euo pipefail
-          curl -fsSL https://docs.sima.ai/_static/tools/sima-cli-installer.sh | bash
+          curl -fsSL https://artifacts.neat.sima.ai/sima-cli/linux-mac.sh | bash
           echo "${HOME}/.sima-cli/.venv/bin" >> "${GITHUB_PATH}"
           "${HOME}/.sima-cli/.venv/bin/sima-cli" --version
           "${HOME}/.sima-cli/.venv/bin/sima-cli" packages build --help >/dev/null
