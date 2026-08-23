@@ -1,6 +1,6 @@
-# 本地代理 API
+# 本機 AI 代理人 API
 
-Sentinel 守護程式透過本機 Unix 介面公開一個帶有版本號的 HTTP/JSON API，即 `/run/simaai-sentinel/api.sock`。它不會在 TCP 連接埠上監聽。API 和終端使用者介面使用相同的快取和鎖定檢查點儲存，因此由代理程式啟動的追蹤資訊會立即顯示在使用者介面和命令列介面中。
+Sentinel 守護程式透過本機 Unix 介面公開一個帶有版本號的 HTTP/JSON API，即 `/run/simaai-sentinel/api.sock`。它不會在 TCP 連接埠上監聽。API 和終端使用者介面使用相同的快取和鎖定檢查點儲存，因此由 AI 代理人啟動的追蹤資訊會立即顯示在使用者介面和命令列介面中。
 
 ```bash
 curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
@@ -49,10 +49,10 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 
 快取寫入使用原子重新命名。執行作業使用與 CLI、TUI 和守護程式記錄器相同的獨佔檔案鎖定。因此，透過 API 啟動的追蹤可以安全地透過任何支援的介面進行檢查或停止。
 
-## 客服人員技能
+## AI 代理人技能
 
 在安裝過程中，產生的 Sentinel 安裝指令碼會執行 `sima-cli
-playbooks install`，並使用與建立套件時完全相同的 Sentinel Git 提交版本。 這樣可以確保執行階段和技能版本保持一致，而無需將巢狀技能資源新增到 Vulcan 構件中。 指令碼管理程式會為每個受支援的代理程式安裝技能，並將其來源提交記錄在本地登錄中。
+playbooks install`，並使用與建立套件時完全相同的 Sentinel Git 提交版本。 這樣可以確保執行階段和技能版本保持一致，而無需將巢狀技能資源新增到 Vulcan 構件中。 指令碼管理程式會為每個受支援的 AI 代理人安裝技能，並將其來源提交記錄在本地登錄中。
 
 在 DevKit 上安裝 Sentinel 時，始終從 `sima-cli neat install
 sentinel` 開始，因此通常不需要單獨的技能安裝步驟。 若要在一個不安裝 DevKit 套件的環境中使用 Sentinel 技能（例如，SDK 容器或開發人員工作站），請直接從 GitHub 使用該環境的 `sima-cli` 安裝技能。
