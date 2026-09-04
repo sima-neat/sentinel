@@ -1,8 +1,8 @@
 # Storage and network panel
 
 The Storage/Net panel reports capacity and whole-device I/O for the root eMMC,
-optional NVMe storage mounted at `/media/nvme`, and aggregate non-loopback
-network counters.
+optional NVMe storage mounted at `/media/nvme`, aggregate non-loopback network
+counters, and default-route uplink utilization for local agents.
 
 ## Filesystem capacity
 
@@ -57,6 +57,8 @@ therefore MiB/s-equivalent.
 | Network RX | Sum of receive-byte deltas from `/proc/net/dev` for every non-loopback interface, divided by elapsed time. |
 | Network TX | Sum of transmit-byte deltas from `/proc/net/dev` for every non-loopback interface, divided by elapsed time. |
 | Network chart | RX + TX. |
+| Uplink RX/TX | Receive/transmit byte delta for the interface selected by the IPv4 default route, divided by elapsed time. |
+| Uplink RX/TX utilization | Directional uplink rate in bits per second divided by the interface link speed from `/sys/class/net/<interface>/speed`. |
 
 The aggregation includes physical interfaces, bridges, VLANs, tunnels, and
 virtual Ethernet devices when present. The same traffic can therefore be
@@ -67,3 +69,10 @@ throughput.
 Interfaces must exist in consecutive samples to contribute a delta. The first
 network sample reports zero. The keys end in `_mbps`, but the unit is
 MiB/s-equivalent, not megabits per second.
+
+The local API also exposes `network_rx_bytes_per_second`,
+`network_tx_bytes_per_second`, `network_rx_utilization_percent`, and
+`network_tx_utilization_percent`. These unambiguous metrics only measure the
+default-route interface, avoiding the double counting possible in the aggregate
+UI counters. Utilization is unavailable when Linux does not report a positive
+link speed (for example, for some virtual or wireless interfaces).

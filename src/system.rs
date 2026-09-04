@@ -119,6 +119,46 @@ pub fn system_metric_definitions() -> Vec<MetricDefinition> {
             None,
             None,
         ),
+        MetricDefinition::new(
+            "network_rx_bytes_per_second",
+            "Uplink network RX",
+            "UpRX",
+            "Network",
+            "B/s",
+            "Receive rate on the interface selected by the IPv4 default route.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
+            "network_tx_bytes_per_second",
+            "Uplink network TX",
+            "UpTX",
+            "Network",
+            "B/s",
+            "Transmit rate on the interface selected by the IPv4 default route.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
+            "network_rx_utilization_percent",
+            "Uplink RX utilization",
+            "UpRX%",
+            "Network",
+            "%",
+            "Receive rate as a percentage of the default-route interface link speed.",
+            Some(80.0),
+            Some(95.0),
+        ),
+        MetricDefinition::new(
+            "network_tx_utilization_percent",
+            "Uplink TX utilization",
+            "UpTX%",
+            "Network",
+            "%",
+            "Transmit rate as a percentage of the default-route interface link speed.",
+            Some(80.0),
+            Some(95.0),
+        ),
     ];
     let core_count = read_cpu_core_times().len();
     for idx in 0..core_count {
@@ -330,11 +370,31 @@ impl SystemCollector {
                 tx += counters.1.saturating_sub(prev.1) as f64 / dt;
             }
         }
-        self.last_netdev = current;
-        BTreeMap::from([
+        let mut values = BTreeMap::from([
             ("net_rx_mbps".into(), rx / 1024.0 / 1024.0),
             ("net_tx_mbps".into(), tx / 1024.0 / 1024.0),
-        ])
+        ]);
+        if let Some(interface) = default_route_interface() {
+            if let (Some(counters), Some(previous)) =
+                (current.get(&interface), self.last_netdev.get(&interface))
+            {
+                let rx_bytes_per_second = counters.0.saturating_sub(previous.0) as f64 / dt;
+                let tx_bytes_per_second = counters.1.saturating_sub(previous.1) as f64 / dt;
+                values.insert("network_rx_bytes_per_second".into(), rx_bytes_per_second);
+                values.insert("network_tx_bytes_per_second".into(), tx_bytes_per_second);
+                let link_speed_mbps = read_link_speed_mbps(&interface).unwrap_or(f64::NAN);
+                values.insert(
+                    "network_rx_utilization_percent".into(),
+                    network_utilization_percent(rx_bytes_per_second, link_speed_mbps),
+                );
+                values.insert(
+                    "network_tx_utilization_percent".into(),
+                    network_utilization_percent(tx_bytes_per_second, link_speed_mbps),
+                );
+            }
+        }
+        self.last_netdev = current;
+        values
     }
 
     fn sample_processes(&mut self, now: Instant) -> Vec<ProcessInfo> {
@@ -685,6 +745,38 @@ fn read_netdev() -> BTreeMap<String, (u64, u64)> {
     out
 }
 
+fn default_route_interface() -> Option<String> {
+    let routes = fs::read_to_string("/proc/net/route").ok()?;
+    parse_default_route_interface(&routes)
+}
+
+fn parse_default_route_interface(routes: &str) -> Option<String> {
+    routes.lines().skip(1).find_map(|line| {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 8 || fields[1] != "00000000" || fields[7] != "00000000" {
+            return None;
+        }
+        let flags = u16::from_str_radix(fields[3], 16).ok()?;
+        ((flags & 0x1) != 0).then(|| fields[0].to_string())
+    })
+}
+
+fn read_link_speed_mbps(interface: &str) -> Option<f64> {
+    fs::read_to_string(format!("/sys/class/net/{interface}/speed"))
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|speed| *speed > 0.0)
+}
+
+fn network_utilization_percent(bytes_per_second: f64, link_speed_mbps: f64) -> f64 {
+    if !link_speed_mbps.is_finite() || link_speed_mbps <= 0.0 {
+        return f64::NAN;
+    }
+    (bytes_per_second * 8.0 / (link_speed_mbps * 1_000_000.0) * 100.0).clamp(0.0, 100.0)
+}
+
 trait MountCheck {
     fn is_mount(&self) -> bool;
 }
@@ -707,7 +799,7 @@ impl MountCheck for Path {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_meminfo;
+    use super::{network_utilization_percent, parse_default_route_interface, parse_meminfo};
 
     #[test]
     fn parses_cma_meminfo_fields_as_bytes() {
@@ -728,5 +820,24 @@ mod tests {
 
         assert!(!values.contains_key("CmaTotal"));
         assert_eq!(values["CmaFree"], 43_008);
+    }
+
+    #[test]
+    fn selects_an_up_ipv4_default_route() {
+        let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+                      tun0 00000000 00000000 0001 0 0 50 00000080 0 0 0\n\
+                      eth0 00000000 01004D0A 0003 0 0 100 00000000 0 0 0\n\
+                      eth1 00004D0A 00000000 0001 0 0 0 00FFFFFF 0 0 0\n";
+
+        assert_eq!(
+            parse_default_route_interface(routes).as_deref(),
+            Some("eth0")
+        );
+    }
+
+    #[test]
+    fn calculates_directional_link_utilization() {
+        assert_eq!(network_utilization_percent(12_500_000.0, 1000.0), 10.0);
+        assert!(network_utilization_percent(1.0, f64::NAN).is_nan());
     }
 }
