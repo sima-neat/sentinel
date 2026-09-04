@@ -753,7 +753,7 @@ fn default_route_interface() -> Option<String> {
 fn parse_default_route_interface(routes: &str) -> Option<String> {
     routes.lines().skip(1).find_map(|line| {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() < 4 || fields[1] != "00000000" {
+        if fields.len() < 8 || fields[1] != "00000000" || fields[7] != "00000000" {
             return None;
         }
         let flags = u16::from_str_radix(fields[3], 16).ok()?;
@@ -825,6 +825,7 @@ mod tests {
     #[test]
     fn selects_an_up_ipv4_default_route() {
         let routes = "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+                      tun0 00000000 00000000 0001 0 0 50 00000080 0 0 0\n\
                       eth0 00000000 01004D0A 0003 0 0 100 00000000 0 0 0\n\
                       eth1 00004D0A 00000000 0001 0 0 0 00FFFFFF 0 0 0\n";
 
