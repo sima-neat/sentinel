@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -126,7 +126,7 @@ pub fn start(
     validate_name(name)?;
     let _lock = StoreLock::acquire(directory)?;
     if active_path(directory).exists() {
-        let active = read_run_file(&active_path(directory))?;
+        let active = read_active_unlocked(directory)?;
         bail!(
             "checkpoint '{}' is already recording; stop it before starting another",
             active.metadata.name
@@ -158,7 +158,7 @@ pub fn start(
         metrics: cache.metrics.clone(),
         samples: Vec::new(),
     };
-    write_json_atomic(&active_path(directory), &run)?;
+    initialize_index(directory, run.clone())?;
     Ok(run)
 }
 
@@ -168,66 +168,217 @@ pub fn stop(directory: &Path) -> Result<SavedRun> {
     if !path.exists() {
         bail!("no checkpoint is currently recording");
     }
-    let mut run = read_run_file(&path)?;
+    let mut run = read_active_unlocked(directory)?;
     run.metadata.ended_at = Some(Utc::now());
     let destination = completed_path(directory, &run.metadata.id);
     write_json_atomic(&destination, &run)?;
     fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    if journal_path(directory).exists() {
+        fs::remove_file(journal_path(directory))?;
+    }
     enforce_retention_unlocked(directory, retention_limit())?;
     Ok(run)
 }
 
+/// Bounded active index; sample history lives in an append-only journal.
+#[derive(Serialize, Deserialize)]
+struct ActiveIndex {
+    storage_version: u32,
+    run: SavedRun,
+    count: usize,
+    last: Option<Sample>,
+    energy: Option<f64>,
+    committed_bytes: u64,
+}
+
+fn journal_path(directory: &Path) -> PathBuf {
+    directory.join("active.samples")
+}
+
+fn read_index(directory: &Path) -> Result<Option<ActiveIndex>> {
+    let bytes = fs::read(active_path(directory))?;
+    // Legacy files have a top-level schema field; they are migrated once by the writer.
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if value.get("storage_version").is_none() {
+        return Ok(None);
+    }
+    let index: ActiveIndex = serde_json::from_value(value)?;
+    if index.storage_version != 2 || index.run.schema != RUN_SCHEMA {
+        bail!("unsupported active recording format");
+    }
+    Ok(Some(index))
+}
+
+fn initialize_index(directory: &Path, mut run: SavedRun) -> Result<ActiveIndex> {
+    let energy = integrate_energy(&run, "power_current_watts");
+    let samples = std::mem::take(&mut run.samples);
+    let temporary = directory.join("active.samples.tmp");
+    let mut journal = fs::File::create(&temporary)?;
+    for sample in &samples {
+        serde_json::to_writer(&mut journal, sample)?;
+        journal.write_all(b"\n")?;
+    }
+    journal.sync_all()?;
+    let committed_bytes = journal.metadata()?.len();
+    fs::rename(temporary, journal_path(directory))?;
+    let index = ActiveIndex {
+        storage_version: 2,
+        run,
+        count: samples.len(),
+        last: samples.last().cloned(),
+        energy,
+        committed_bytes,
+    };
+    // Publishing the index is the commit point. Until then a legacy active.json
+    // remains authoritative, so interrupted migration can safely be repeated.
+    write_json_atomic(&active_path(directory), &index)?;
+    Ok(index)
+}
+
+fn read_active_unlocked(directory: &Path) -> Result<SavedRun> {
+    let Some(index) = read_index(directory)? else {
+        return read_run_file(&active_path(directory));
+    };
+    let mut run = index.run;
+    let file = fs::File::open(journal_path(directory))?;
+    if file.metadata()?.len() < index.committed_bytes {
+        bail!("active recording journal is shorter than its committed index");
+    }
+    for line in BufReader::new(file.take(index.committed_bytes)).lines() {
+        run.samples.push(serde_json::from_str(&line?)?);
+    }
+    if run.samples.len() != index.count {
+        bail!("active recording sample count does not match its index");
+    }
+    Ok(run)
+}
+
+/// Atomic index reads do not wait for the writer or load historical samples.
+pub fn active_metadata(directory: &Path) -> Result<Option<SavedRun>> {
+    if !active_path(directory).exists() {
+        return Ok(None);
+    }
+    if let Some(index) = read_index(directory)? {
+        return Ok(Some(index.run));
+    }
+    // Legacy compatibility until the daemon performs its one-time migration.
+    #[derive(Deserialize)]
+    struct Header {
+        schema: u32,
+        metadata: RunMetadata,
+        metrics: Vec<MetricDefinition>,
+    }
+    let header: Header = serde_json::from_reader(fs::File::open(active_path(directory))?)?;
+    Ok(Some(SavedRun {
+        schema: header.schema,
+        metadata: header.metadata,
+        metrics: header.metrics,
+        samples: Vec::new(),
+    }))
+}
+
 pub fn record(directory: &Path, cache: &CachePayload) -> Result<bool> {
     let _lock = StoreLock::acquire(directory)?;
-    let path = active_path(directory);
-    if !path.exists() {
+    if !active_path(directory).exists() {
         return Ok(false);
     }
     let Some(sample) = cache.latest.as_ref() else {
         return Ok(false);
     };
-    let mut run = read_run_file(&path)?;
-    if run
-        .samples
-        .last()
-        .is_some_and(|previous| previous.timestamp >= sample.timestamp)
+    let mut index = match read_index(directory)? {
+        Some(index) => index,
+        None => initialize_index(directory, read_run_file(&active_path(directory))?)?,
+    };
+    if index
+        .last
+        .as_ref()
+        .is_some_and(|last| last.timestamp >= sample.timestamp)
     {
         return Ok(false);
     }
-    if run.metrics.is_empty() {
-        run.metrics = cache.metrics.clone();
+    if index.count >= sample_limit() {
+        bail!("active checkpoint '{}' reached the {}-sample safety limit; stop it to save the captured data",
+            index.run.metadata.name, sample_limit());
     }
-    if run.samples.len() >= sample_limit() {
-        bail!(
-            "active checkpoint '{}' reached the {}-sample safety limit; stop it to save the captured data",
-            run.metadata.name,
-            sample_limit()
-        );
+    if index.run.metrics.is_empty() {
+        index.run.metrics = cache.metrics.clone();
     }
-    run.samples.push(sample.clone());
-    write_json_atomic(&path, &run)?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(journal_path(directory))?;
+    if file.metadata()?.len() < index.committed_bytes {
+        bail!("active recording journal is shorter than its committed index");
+    }
+    // Discard only an uncommitted tail left by an interrupted append.
+    file.set_len(index.committed_bytes)?;
+    file.seek(SeekFrom::Start(index.committed_bytes))?;
+    serde_json::to_writer(&mut file, sample)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    index.committed_bytes = file.stream_position()?;
+    if let Some(last) = &index.last {
+        let pair = SavedRun {
+            schema: RUN_SCHEMA,
+            metadata: index.run.metadata.clone(),
+            metrics: Vec::new(),
+            samples: vec![last.clone(), sample.clone()],
+        };
+        if let Some(energy) = integrate_energy(&pair, "power_current_watts") {
+            index.energy = Some(index.energy.unwrap_or(0.0) + energy);
+        }
+    }
+    index.last = Some(sample.clone());
+    index.count += 1;
+    write_json_atomic(&active_path(directory), &index)?;
     Ok(true)
 }
 
+#[cfg(test)]
 pub fn active(directory: &Path) -> Result<Option<SavedRun>> {
     let _lock = StoreLock::acquire(directory)?;
-    let path = active_path(directory);
-    path.exists().then(|| read_run_file(&path)).transpose()
+    active_path(directory)
+        .exists()
+        .then(|| read_active_unlocked(directory))
+        .transpose()
 }
 
-pub fn list(directory: &Path) -> Result<Vec<RunSummary>> {
-    let _lock = StoreLock::acquire(directory)?;
-    let mut runs = completed_runs_unlocked(directory)?;
-    if let Some(active) = active_path(directory)
-        .exists()
-        .then(|| read_run_file(&active_path(directory)))
-        .transpose()?
-    {
-        runs.push(active);
+pub fn active_status(directory: &Path) -> Result<Option<(RunMetadata, RunSummary)>> {
+    if !active_path(directory).exists() {
+        return Ok(None);
     }
-    runs.sort_by_key(|run| run.metadata.started_at);
-    runs.reverse();
-    Ok(runs.iter().map(summary).collect())
+    if let Some(index) = read_index(directory)? {
+        let mut value = summary(&index.run);
+        value.samples = index.count;
+        value.duration_ms = index
+            .last
+            .as_ref()
+            .map(|last| {
+                (last.timestamp - index.run.metadata.started_at)
+                    .num_milliseconds()
+                    .max(0)
+            })
+            .unwrap_or(0);
+        value.energy_joules = index.energy;
+        return Ok(Some((index.run.metadata, value)));
+    }
+    let run = read_active_unlocked(directory)?;
+    let value = summary(&run);
+    Ok(Some((run.metadata, value)))
+}
+
+// Completed files and the active index are published by atomic rename. A list
+// is a best-effort snapshot and need not block behind durable sample writes.
+pub fn list(directory: &Path) -> Result<Vec<RunSummary>> {
+    let mut summaries: Vec<_> = completed_runs_unlocked(directory)?
+        .iter()
+        .map(summary)
+        .collect();
+    if let Some((_, summary)) = active_status(directory)? {
+        summaries.push(summary);
+    }
+    summaries.sort_by_key(|run| std::cmp::Reverse(run.started_at));
+    Ok(summaries)
 }
 
 pub fn load(directory: &Path, selector: &str) -> Result<SavedRun> {
@@ -253,7 +404,7 @@ pub fn delete(directory: &Path, selector: &str) -> Result<SavedRun> {
     let _lock = StoreLock::acquire(directory)?;
     if let Some(active) = active_path(directory)
         .exists()
-        .then(|| read_run_file(&active_path(directory)))
+        .then(|| read_active_unlocked(directory))
         .transpose()?
     {
         if active.metadata.id == selector || active.metadata.name == selector {
@@ -622,7 +773,7 @@ fn completed_runs_unlocked(directory: &Path) -> Result<Vec<SavedRun>> {
 
 fn find_run_unlocked(directory: &Path, selector: &str) -> Result<Option<SavedRun>> {
     if active_path(directory).exists() {
-        let active = read_run_file(&active_path(directory))?;
+        let active = read_active_unlocked(directory)?;
         if active.metadata.id == selector || active.metadata.name == selector {
             return Ok(Some(active));
         }
@@ -745,6 +896,97 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_metadata_and_listing_do_not_wait_for_writer_lock() {
+        let directory = temp_dir();
+        start(&directory, &cache(), "busy", None, vec![]).unwrap();
+        let lock = StoreLock::acquire(&directory).unwrap();
+        let path = directory.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result =
+                active_metadata(&path).unwrap().is_some() && list(&path).unwrap().len() == 1;
+            sender.send(result).unwrap();
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(2));
+        drop(lock);
+        reader.join().unwrap();
+        assert!(result.unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_capture_and_recovers_uncommitted_tail() {
+        let directory = temp_dir();
+        let mut cache = cache();
+        let mut legacy = start(&directory, &cache, "legacy", None, vec![]).unwrap();
+        legacy.samples.push(cache.latest.clone().unwrap());
+        write_json_atomic(&active_path(&directory), &legacy).unwrap();
+        cache.latest.as_mut().unwrap().timestamp += chrono::Duration::seconds(2);
+        assert!(record(&directory, &cache).unwrap());
+        assert_eq!(active(&directory).unwrap().unwrap().samples.len(), 2);
+        let committed = fs::read(journal_path(&directory)).unwrap();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(journal_path(&directory))
+            .unwrap();
+        file.write_all(b"{interrupted sample").unwrap();
+        assert_eq!(active(&directory).unwrap().unwrap().samples.len(), 2);
+        cache.latest.as_mut().unwrap().timestamp += chrono::Duration::seconds(2);
+        record(&directory, &cache).unwrap();
+        let journal = fs::read(journal_path(&directory)).unwrap();
+        assert!(journal.starts_with(&committed));
+        let run = stop(&directory).unwrap();
+        assert_eq!(run.samples.len(), 3);
+        assert_eq!(run.samples[0].timestamp, legacy.samples[0].timestamp);
+        assert!(!journal_path(&directory).exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn append_cost_and_metadata_are_independent_of_history() {
+        use std::os::unix::fs::MetadataExt;
+        let directory = temp_dir();
+        let mut cache = cache();
+        let mut legacy = start(&directory, &cache, "long", None, vec![]).unwrap();
+        for n in 0..11_420 {
+            let mut sample = cache.latest.clone().unwrap();
+            sample.timestamp += chrono::Duration::seconds(n * 2);
+            legacy.samples.push(sample);
+        }
+        initialize_index(&directory, legacy.clone()).unwrap();
+        let before = fs::metadata(journal_path(&directory)).unwrap();
+        cache.latest.as_mut().unwrap().timestamp =
+            legacy.samples.last().unwrap().timestamp + chrono::Duration::seconds(2);
+        record(&directory, &cache).unwrap();
+        let after = fs::metadata(journal_path(&directory)).unwrap();
+        assert_eq!(before.ino(), after.ino());
+        assert!(after.len() - before.len() < 1024);
+        assert!(fs::metadata(active_path(&directory)).unwrap().len() < 4096);
+        // Metadata/listing must not open or parse the sample journal.
+        fs::rename(journal_path(&directory), directory.join("hidden.samples")).unwrap();
+        assert!(active_metadata(&directory)
+            .unwrap()
+            .unwrap()
+            .samples
+            .is_empty());
+        assert_eq!(list(&directory).unwrap()[0].samples, 11_421);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn committed_data_loss_is_reported_not_silently_truncated() {
+        let directory = temp_dir();
+        let mut cache = cache();
+        start(&directory, &cache, "damaged", None, vec![]).unwrap();
+        record(&directory, &cache).unwrap();
+        fs::write(journal_path(&directory), b"").unwrap();
+        assert!(active(&directory).is_err());
+        cache.latest.as_mut().unwrap().timestamp += chrono::Duration::seconds(2);
+        assert!(record(&directory, &cache).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn lifecycle_persists_samples_and_exports() {
         let directory = temp_dir();
         let mut cache = cache();
@@ -760,6 +1002,7 @@ mod tests {
             .insert("power_current_watts".into(), Some(4.0));
         assert!(record(&directory, &cache).unwrap());
         assert!(!record(&directory, &cache).unwrap());
+        assert_eq!(list(&directory).unwrap()[0].energy_joules, Some(6.0));
         let stopped = stop(&directory).unwrap();
         assert_eq!(stopped.samples.len(), 2);
         assert_eq!(integrate_energy(&stopped, "power_current_watts"), Some(6.0));

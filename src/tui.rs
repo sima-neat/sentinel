@@ -65,6 +65,7 @@ impl Tab {
     }
 }
 
+#[derive(Default)]
 struct CompareState {
     runs: Vec<SavedRun>,
     selected: usize,
@@ -151,17 +152,19 @@ pub fn run_ops(cache_path: &str, interval: Duration, runs_dir: &Path) -> Result<
     let mut clear_body = true;
     let mut selected_core = 0usize;
     let mut thermal_group = 0usize;
-    let mut compare = CompareState::load(runs_dir);
+    let mut compare = CompareState {
+        overlap: true,
+        ..CompareState::default()
+    };
     let mut input_mode = InputMode::Normal;
-    let mut recording = runs::active(runs_dir).ok().flatten();
+    let mut recording = runs::active_metadata(runs_dir).ok().flatten();
 
     let result = loop {
         if last_read.elapsed() >= cache_tick {
             if let Ok(next) = read_cache(cache_path) {
                 cache = next;
                 thermal_group = thermal_group.min(thermal_groups(&cache).len().saturating_sub(1));
-                compare.refresh(runs_dir);
-                recording = runs::active(runs_dir).ok().flatten();
+                recording = runs::active_metadata(runs_dir).ok().flatten();
                 dirty = true;
             }
             last_read = Instant::now();
@@ -224,11 +227,17 @@ pub fn run_ops(cache_path: &str, interval: Duration, runs_dir: &Path) -> Result<
                         }
                         (KeyCode::Tab, _) => {
                             active = (active + 1) % TABS.len();
+                            if TABS[active] == Tab::Compare {
+                                compare.refresh(runs_dir);
+                            }
                             dirty = true;
                             clear_body = true;
                         }
                         (KeyCode::BackTab, _) => {
                             active = (active + TABS.len() - 1) % TABS.len();
+                            if TABS[active] == Tab::Compare {
+                                compare.refresh(runs_dir);
+                            }
                             dirty = true;
                             clear_body = true;
                         }
@@ -258,11 +267,12 @@ pub fn run_ops(cache_path: &str, interval: Duration, runs_dir: &Path) -> Result<
                             clear_body = true;
                         }
                         (KeyCode::Char('6'), _) => {
+                            compare.refresh(runs_dir);
                             active = 5;
                             dirty = true;
                             clear_body = true;
                         }
-                        (KeyCode::Char('r'), _) => {
+                        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
                             if recording.is_some() {
                                 match runs::stop(runs_dir) {
                                     Ok(run) => {
@@ -575,7 +585,10 @@ fn draw_footer(f: &mut Frame, area: Rect, active: Tab) {
                 Span::styled(":Export  ", Style::default().fg(DIM)),
                 Span::styled("d", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled(":Delete  ", Style::default().fg(DIM)),
-                Span::styled("r", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Ctrl+R",
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(":Record", Style::default().fg(DIM)),
             ]
         } else {
@@ -592,7 +605,10 @@ fn draw_footer(f: &mut Frame, area: Rect, active: Tab) {
                 Span::styled(":Next  ", Style::default().fg(DIM)),
                 Span::styled("q", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
                 Span::styled(":Quit  ", Style::default().fg(DIM)),
-                Span::styled("r", Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Ctrl+R",
+                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(":Record", Style::default().fg(DIM)),
             ]
         }))
@@ -1193,7 +1209,7 @@ fn draw_compare(f: &mut Frame, area: Rect, state: &CompareState) {
     if state.runs.is_empty() {
         f.render_widget(
             Paragraph::new(
-                "No completed runs yet.\n\nPress r to start a named checkpoint, run the workload, then press r again to stop and save it.",
+                "No completed runs yet.\n\nPress Ctrl+R to start a named checkpoint, run the workload, then press Ctrl+R again to stop and save it.",
             )
             .block(panel("Compare Runs"))
             .style(Style::default().fg(DIM).bg(BG))

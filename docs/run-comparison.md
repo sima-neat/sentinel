@@ -22,9 +22,9 @@ Names must be unique. Starting while another checkpoint is active, stopping
 when none is active, deleting an active run, and selecting an unknown or
 ambiguous run all produce actionable errors.
 
-The interactive TUI provides the same basic lifecycle: press `r`, enter a
+The interactive TUI provides the same basic lifecycle: press `Ctrl+R`, enter a
 checkpoint name, and press Enter to start. A red `RECORDING` indicator remains
-in the header. Press `r` again to stop and save the run.
+in the header. Press `Ctrl+R` again to stop and save the run.
 
 An active checkpoint is updated by the daemon using an atomic write and rename
 under an exclusive file lock. If the daemon restarts, it resumes appending to
@@ -84,7 +84,7 @@ Controls:
 | `w` | Toggle common-overlap and full-duration windows. |
 | `x` | Export the visible selection as versioned JSON under `/tmp`. |
 | `d` twice | Delete the selected completed run. |
-| `r` | Start or stop a checkpoint. |
+| `Ctrl+R` | Start or stop a checkpoint. |
 
 Every run begins at elapsed `t=0` at its first captured daemon sample;
 wall-clock timestamps and the variable delay between checkpoint creation and
@@ -155,3 +155,19 @@ to the requested output. The output directory must already exist.
   [Power panel](panels/power.md).
 - Comparisons establish measured differences; they do not establish
   statistical significance by themselves.
+
+## Long recordings and storage
+
+Active captures use an append-only `active.samples` journal and a small atomic
+`active.json` index. Each sample is flushed before the index commits its byte
+length. Recovery discards an uncommitted tail; a truncated committed journal is
+reported as an error. Completed captures and exported files retain their existing
+JSON schema. Older active JSON captures migrate once on the next collected sample.
+Back up both active files together while the daemon is stopped; older Sentinel
+binaries cannot read the new active index. Stop/save the capture before downgrading.
+
+The live dashboard reads only recording metadata without taking the writer lock.
+History loads when entering Compare Runs, not on every live refresh. Recording
+requires Ctrl+R (then a name and Enter), or an explicit checkpoint CLI/API request;
+opening SSH or starting the dashboard does not begin a recording. Plain shell
+text such as `printf` no longer activates the recording prompt.

@@ -166,7 +166,7 @@ fn runs_command(runs_dir: &Path, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).unwrap_or("list");
     match command {
         "list" if args.len() <= 1 => {
-            let active_id = runs::active(runs_dir)?.map(|run| run.metadata.id);
+            let active_id = runs::active_metadata(runs_dir)?.map(|run| run.metadata.id);
             println!(
                 "{:<28}  {:<20}  {:>8}  {:>8}  State",
                 "ID", "Name", "Duration", "Samples"

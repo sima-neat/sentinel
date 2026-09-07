@@ -180,7 +180,7 @@ fn route(
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/v1/health") => {
             let payload = cache::read_cache(cache_path).map_err(internal)?;
-            let active = runs::active(runs_dir).map_err(internal)?;
+            let active = runs::active_metadata(runs_dir).map_err(internal)?;
             Ok(json!({
                 "schema": 1,
                 "version": payload.version,
@@ -209,11 +209,11 @@ fn route(
             }))
         }
         ("GET", "/v1/traces/active") => {
-            let active = runs::active(runs_dir).map_err(internal)?;
+            let active = runs::active_status(runs_dir).map_err(internal)?;
             Ok(json!({
                 "schema": 1,
-                "trace": active.as_ref().map(|run| &run.metadata),
-                "summary": active.as_ref().map(runs::summary),
+                "trace": active.as_ref().map(|(metadata, _)| metadata),
+                "summary": active.as_ref().map(|(_, summary)| summary),
             }))
         }
         ("POST", "/v1/traces") => {
