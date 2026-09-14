@@ -22,7 +22,8 @@ sima-cli neat install sentinel
 ```
 
 The installer must run on a Modalix DevKit because the daemon reads hardware
-sensors through `/dev/mem`, Linux `hwmon`, and `/dev/i2c-*`. The package
+sensors through Linux `hwmon` and `/dev/i2c-*`. The kernel owns the on-die
+temperature controller; Sentinel never accesses it through `/dev/mem`. The package
 installs a prebuilt aarch64 binary and does not require a Rust toolchain on the
 DevKit.
 

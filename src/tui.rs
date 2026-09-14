@@ -1573,6 +1573,22 @@ fn truncate_text(value: &str, width: usize) -> String {
     }
 }
 
+// Retain the familiar temperature scale, but expand it to keep every real
+// reading visible, including cool sensors and temperatures above the default.
+fn chart_bounds(unit: &str, min: f64, max: f64, values: impl Iterator<Item = f64>) -> (f64, f64) {
+    if unit != "C" {
+        return (min, max);
+    }
+    values
+        .filter(|value| value.is_finite())
+        .fold((min, max), |(low, high), value| {
+            (
+                low.min(((value - 1.0) / 5.0).floor() * 5.0),
+                high.max(((value + 1.0) / 5.0).ceil() * 5.0),
+            )
+        })
+}
+
 fn draw_kpi_chart(
     f: &mut Frame,
     area: Rect,
@@ -1584,6 +1600,7 @@ fn draw_kpi_chart(
     samples: Vec<f64>,
     cache: &CachePayload,
 ) {
+    let (min, max) = chart_bounds(unit, min, max, samples.iter().copied().chain(current));
     let max = max.max(min + 0.001);
     let current_text = format_value(current, unit);
     let scale_text = format!("scale {}-{}", compact_number(min), compact_number(max));
@@ -1689,14 +1706,7 @@ fn draw_line_chart(
     cache: &CachePayload,
 ) {
     let latest = samples.iter().rev().copied().find(|v| v.is_finite());
-    let label = format!(
-        "{}  {}  ·  scale {}-{} {}",
-        title,
-        format_value(latest, unit),
-        compact_number(min),
-        compact_number(max),
-        unit
-    );
+    let label = format!("{}  {}", title, format_value(latest, unit));
     draw_multi_line_chart(
         f,
         area,
@@ -1719,6 +1729,14 @@ fn draw_multi_line_chart(
     unit: &str,
     cache: &CachePayload,
 ) {
+    let (min, max) = chart_bounds(
+        unit,
+        min,
+        max,
+        series_list
+            .iter()
+            .flat_map(|(_, samples, _)| samples.iter().copied()),
+    );
     let max = max.max(min + 0.001);
     let block = panel(format!(
         "{}  ·  scale {}-{} {}",
@@ -2327,6 +2345,70 @@ mod tests {
 
     use crate::model::{PowerRailStatus, PowerStatus, Sample};
     use crate::runs::{RunMetadata, RUN_SCHEMA};
+
+    #[test]
+    fn thermal_charts_render_readings_outside_default_range() {
+        for temperature in [35.0, 105.0] {
+            let samples: Vec<Sample> = (0..4)
+                .map(|idx| Sample {
+                    timestamp: Utc::now() + chrono::Duration::seconds(idx),
+                    values: BTreeMap::from([("rtsn_0".into(), Some(temperature))]),
+                })
+                .collect();
+            let cache = CachePayload {
+                schema: 1,
+                version: "test".into(),
+                updated_at: Utc::now(),
+                metrics: crate::thermal::thermal_metric_definitions()
+                    .into_iter()
+                    .take(1)
+                    .collect(),
+                latest: samples.last().cloned(),
+                samples,
+                processes: Vec::new(),
+                power: None,
+                errors: Vec::new(),
+            };
+            for chart in ["overview", "maximum", "sensor"] {
+                let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        match chart {
+                            "overview" => draw_kpi_chart(
+                                frame,
+                                area,
+                                "Thermal Max",
+                                Some(temperature),
+                                "C",
+                                40.0,
+                                90.0,
+                                thermal_max_series(&cache),
+                                &cache,
+                            ),
+                            "maximum" => draw_group_thermal_chart(frame, area, &cache),
+                            _ => draw_thermal_sensor_chart_column(
+                                frame,
+                                area,
+                                &cache,
+                                &["rtsn_0".into()],
+                            ),
+                        }
+                    })
+                    .unwrap();
+                assert!(
+                    terminal
+                        .backend()
+                        .buffer()
+                        .content()
+                        .iter()
+                        .flat_map(|cell| cell.symbol().chars())
+                        .any(|ch| ('\u{2801}'..='\u{28ff}').contains(&ch)),
+                    "{chart} chart hides {temperature} C"
+                );
+            }
+        }
+    }
 
     #[test]
     fn recording_elapsed_uses_unbounded_hh_mm_ss() {

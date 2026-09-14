@@ -1,18 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::os::fd::AsRawFd;
-use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 
 use crate::model::MetricDefinition;
 
-const PVT_BASE: libc::off_t = 0x0FF0E000;
-const PRC_BASE: libc::off_t = 0x0FF00000;
-const MAP_SIZE: usize = 4096;
+const MODALIX_HWMON_NAME: &str = "simaai_modalix_thermal_sensor";
 
 const RTSN_GROUPS: [&str; 14] = [
     "MLA", "MLA", "MLA", "MLA", "APU", "CVU", "TOP", "MLA", "MLA", "MLA", "MLA", "APU", "CVU",
@@ -29,15 +24,14 @@ const RTSN_SITES: [&str; 7] = [
     "TOP (near PCIE/ETH area)",
 ];
 
-const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str, &str); 3] = [
+const HWMON: [(&str, &str, &str, &str, &str, &str, &str); 3] = [
     (
         "lm96163_temp1",
         "LM96163 temp1",
         "LM96-1",
         "Board",
-        Some("lm96163"),
+        "lm96163",
         "temp1_input",
-        "/sys/class/hwmon/hwmon2/temp1_input",
         "SOM top-side board temperature from the LM96063 hardware-monitoring IC's internal sensor.",
     ),
     (
@@ -45,9 +39,8 @@ const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str, &str); 3] = [
         "LM96163 temp2",
         "LM96-2",
         "Board",
-        Some("lm96163"),
+        "lm96163",
         "temp2_input",
-        "/sys/class/hwmon/hwmon2/temp2_input",
         "SOM bottom-side board temperature from a diode on the bottom side of the SOM, read through the LM96063 IC.",
     ),
     (
@@ -55,9 +48,8 @@ const HWMON: [(&str, &str, &str, &str, Option<&str>, &str, &str, &str); 3] = [
         "ETH/MDIO temp1",
         "ETH-1",
         "Board",
-        None,
+        "a800000ethernetmdio000",
         "temp1_input",
-        "/sys/class/hwmon/hwmon0/temp1_input",
         "Ethernet/MDIO temperature reported through the ETH hwmon device.",
     ),
 ];
@@ -78,7 +70,7 @@ pub fn thermal_metric_definitions() -> Vec<MetricDefinition> {
             Some(85.0),
         ));
     }
-    for (key, label, short, group, _chip, _input, _fallback, description) in HWMON {
+    for (key, label, short, group, _chip, _input, description) in HWMON {
         out.push(MetricDefinition::new(
             key,
             label,
@@ -94,176 +86,177 @@ pub fn thermal_metric_definitions() -> Vec<MetricDefinition> {
 }
 
 pub struct ThermalCollector {
-    sampler: Option<ModalixSampler>,
-    hwmon_paths: BTreeMap<String, String>,
+    hwmon_root: PathBuf,
 }
 
 impl ThermalCollector {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            sampler: ModalixSampler::new().ok(),
-            hwmon_paths: resolve_hwmon_paths(),
+            hwmon_root: PathBuf::from("/sys/class/hwmon"),
         })
     }
 
     pub fn sample(&mut self) -> BTreeMap<String, f64> {
+        // Rediscover devices so driver rebinding/late registration cannot leave
+        // stale hwmonN paths pointing at a different chip.
         let mut values = BTreeMap::new();
-        if let Some(sampler) = self.sampler.as_mut() {
-            match sampler.sample_rtsn() {
-                Ok(rtsn) => values.extend(rtsn),
-                Err(err) => {
-                    eprintln!("Sentinel thermal sample failed: {err}");
-                    self.sampler = None;
-                }
-            }
+        let modalix = find_hwmon_by_name(&self.hwmon_root, MODALIX_HWMON_NAME);
+        for idx in 0..RTSN_GROUPS.len() {
+            // Linux hwmon channels are one-based; RTSN identifiers are zero-based.
+            let value = modalix
+                .as_ref()
+                .and_then(|dir| read_hwmon(&dir.join(format!("temp{}_input", idx + 1))).ok())
+                .unwrap_or(f64::NAN);
+            values.insert(format!("rtsn_{idx}"), value);
         }
-        for (key, path) in &self.hwmon_paths {
-            values.insert(key.clone(), read_hwmon(path).unwrap_or(f64::NAN));
+        for (key, _label, _short, _group, chip, input, _description) in HWMON {
+            let value = find_hwmon_by_name(&self.hwmon_root, chip)
+                .and_then(|dir| read_hwmon(&dir.join(input)).ok())
+                .unwrap_or(f64::NAN);
+            values.insert(key.to_string(), value);
         }
         values
     }
 }
 
-fn resolve_hwmon_paths() -> BTreeMap<String, String> {
-    let mut paths = BTreeMap::new();
-    for (key, _label, _short, _group, chip, input, fallback, _description) in HWMON {
-        let resolved = chip
-            .and_then(find_hwmon_by_name)
-            .map(|dir| format!("{dir}/{input}"))
-            .filter(|path| Path::new(path).exists())
-            .unwrap_or_else(|| fallback.to_string());
-        paths.insert(key.to_string(), resolved);
-    }
-    paths
-}
-
-fn find_hwmon_by_name(chip: &str) -> Option<String> {
-    let entries = fs::read_dir("/sys/class/hwmon").ok()?;
+fn find_hwmon_by_name(root: &Path, chip: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
-        let name = fs::read_to_string(entry.path().join("name")).ok()?;
+        let Ok(name) = fs::read_to_string(entry.path().join("name")) else {
+            continue;
+        };
         if name.trim() == chip {
-            return Some(entry.path().display().to_string());
+            return Some(entry.path());
         }
     }
     None
 }
 
-fn read_hwmon(path: &str) -> io::Result<f64> {
+fn read_hwmon(path: &Path) -> io::Result<f64> {
     let raw = fs::read_to_string(path)?;
-    let milli_c: f64 = raw.trim().parse().unwrap_or(f64::NAN);
-    Ok(milli_c / 1000.0)
+    let milli_c: i64 = raw
+        .trim()
+        .parse()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    Ok(milli_c as f64 / 1000.0)
 }
 
-struct RegisterRegion {
-    file: fs::File,
-    ptr: *mut libc::c_void,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-impl RegisterRegion {
-    fn new(base: libc::off_t) -> Result<Self> {
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/mem")
-            .context("open /dev/mem")?;
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                MAP_SIZE,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                file.as_raw_fd(),
-                base,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(anyhow!("mmap /dev/mem failed"));
+    static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    struct Sysfs(PathBuf);
+
+    impl Sysfs {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "sentinel-thermal-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
         }
-        Ok(Self { file, ptr })
-    }
 
-    fn read32(&self, offset: usize) -> u32 {
-        unsafe { std::ptr::read_volatile((self.ptr as *const u8).add(offset) as *const u32) }
-    }
-
-    fn write32(&self, offset: usize, value: u32) {
-        unsafe { std::ptr::write_volatile((self.ptr as *mut u8).add(offset) as *mut u32, value) }
-    }
-}
-
-impl Drop for RegisterRegion {
-    fn drop(&mut self) {
-        unsafe {
-            libc::munmap(self.ptr, MAP_SIZE);
+        fn chip(&self, dir: &str, name: &str) -> PathBuf {
+            let path = self.0.join(dir);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("name"), format!("{name}\n")).unwrap();
+            path
         }
-        let _ = self.file.sync_all();
-    }
-}
 
-struct ModalixSampler {
-    prc: RegisterRegion,
-    pvt: RegisterRegion,
-}
-
-impl ModalixSampler {
-    fn new() -> Result<Self> {
-        let prc = RegisterRegion::new(PRC_BASE)?;
-        let pvt = RegisterRegion::new(PVT_BASE)?;
-        let sampler = Self { prc, pvt };
-        sampler.initialize();
-        Ok(sampler)
-    }
-
-    fn initialize(&self) {
-        self.prc.write32(0x514, 0x3F);
-        self.pvt.write32(0x800, 0x01000404);
-        self.pvt.write32(0x80C, 0x88000001);
-        thread::sleep(Duration::from_secs(1));
-        let _ = self.pvt.read32(0x808);
-    }
-
-    fn sample_rtsn(&mut self) -> Result<BTreeMap<String, f64>> {
-        let mut values = BTreeMap::new();
-        for sensor_id in 0..14 {
-            self.trigger_sensor(sensor_id)?;
-            let data = self.pvt.read32(0xA40 + sensor_id * 4);
-            values.insert(
-                format!("rtsn_{sensor_id}"),
-                data as f64 * 698.9 / 4096.0 - 283.0,
-            );
-        }
-        Ok(values)
-    }
-
-    fn trigger_sensor(&self, sensor_id: usize) -> Result<()> {
-        let sid = sensor_id as u32;
-        let _ = self.pvt.read32(0x808);
-        thread::sleep(Duration::from_millis(100));
-        self.pvt.write32(0x80C, 0x89000000 | (sid << 8));
-        let _ = self.pvt.read32(0x808);
-        thread::sleep(Duration::from_millis(10));
-        self.pvt.write32(0x80C, 0x8E0000A3);
-        let _ = self.pvt.read32(0x808);
-        thread::sleep(Duration::from_millis(10));
-        self.pvt.write32(0x80C, 0x8D000200);
-        let _ = self.pvt.read32(0x808);
-        thread::sleep(Duration::from_millis(10));
-        self.pvt
-            .write32(0x80C, 0x8C200000 | (1 << sid) | (sid << 16));
-        let _ = self.pvt.read32(0x808);
-        thread::sleep(Duration::from_millis(10));
-        let _ = self.pvt.read32(0x808);
-        self.pvt.write32(0x80C, 0x88000504);
-        let _ = self.pvt.read32(0x808);
-        thread::sleep(Duration::from_millis(10));
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while self.pvt.read32(0xA34) == 0 {
-            if Instant::now() > deadline {
-                return Err(anyhow!("timed out waiting for RTSN sensor {sensor_id}"));
+        fn collector(&self) -> ThermalCollector {
+            ThermalCollector {
+                hwmon_root: self.0.clone(),
             }
-            thread::sleep(Duration::from_millis(1));
         }
-        Ok(())
+    }
+
+    impl Drop for Sysfs {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn maps_all_kernel_channels_and_converts_millidegrees() {
+        let sysfs = Sysfs::new();
+        let dir = sysfs.chip("hwmon19", MODALIX_HWMON_NAME);
+        for idx in 0..14 {
+            fs::write(
+                dir.join(format!("temp{}_input", idx + 1)),
+                (40000 + idx * 125).to_string(),
+            )
+            .unwrap();
+        }
+        let values = sysfs.collector().sample();
+        for idx in 0..14 {
+            assert_eq!(values[&format!("rtsn_{idx}")], 40.0 + idx as f64 * 0.125);
+        }
+    }
+
+    #[test]
+    fn identifies_board_sensors_after_hwmon_renumbering() {
+        let sysfs = Sysfs::new();
+        let soc = sysfs.chip("hwmon0", MODALIX_HWMON_NAME);
+        fs::write(soc.join("temp1_input"), "99000").unwrap();
+        let board = sysfs.chip("hwmon7", "lm96163");
+        fs::write(board.join("temp1_input"), "31000").unwrap();
+        fs::write(board.join("temp2_input"), "32500").unwrap();
+        let eth = sysfs.chip("hwmon2", "a800000ethernetmdio000");
+        fs::write(eth.join("temp1_input"), "45000").unwrap();
+        let values = sysfs.collector().sample();
+        assert_eq!(values["rtsn_0"], 99.0);
+        assert_eq!(values["lm96163_temp1"], 31.0);
+        assert_eq!(values["lm96163_temp2"], 32.5);
+        assert_eq!(values["eth_mdio_temp1"], 45.0);
+    }
+
+    #[test]
+    fn absent_driver_never_uses_an_unrelated_chip() {
+        let sysfs = Sysfs::new();
+        let other = sysfs.chip("hwmon2", "unrelated");
+        fs::write(other.join("temp1_input"), "120000").unwrap();
+        fs::create_dir(sysfs.0.join("hwmon0")).unwrap(); // missing name
+        let values = sysfs.collector().sample();
+        assert_eq!(values.len(), 17);
+        assert!(values.values().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn read_failure_is_unavailable_and_recovers_on_next_sample() {
+        let sysfs = Sysfs::new();
+        let dir = sysfs.chip("hwmon5", MODALIX_HWMON_NAME);
+        let input = dir.join("temp1_input");
+        let mut collector = sysfs.collector();
+        for invalid in ["", "timeout", "NaN", "inf", "40000.5"] {
+            fs::write(&input, invalid).unwrap();
+            assert!(collector.sample()["rtsn_0"].is_nan());
+        }
+        fs::remove_file(&input).unwrap();
+        assert!(collector.sample()["rtsn_0"].is_nan());
+        fs::write(&input, "-12500\n").unwrap();
+        assert_eq!(collector.sample()["rtsn_0"], -12.5);
+        fs::write(&input, "120000\n").unwrap();
+        assert_eq!(collector.sample()["rtsn_0"], 120.0); // Do not suppress hot readings.
+    }
+
+    #[test]
+    fn rediscovers_late_and_rebound_driver() {
+        let sysfs = Sysfs::new();
+        let mut collector = sysfs.collector();
+        assert!(collector.sample()["rtsn_0"].is_nan());
+        let old = sysfs.chip("hwmon1", MODALIX_HWMON_NAME);
+        fs::write(old.join("temp1_input"), "41000").unwrap();
+        assert_eq!(collector.sample()["rtsn_0"], 41.0);
+        fs::remove_dir_all(&old).unwrap();
+        let other = sysfs.chip("hwmon1", "unrelated");
+        fs::write(other.join("temp1_input"), "120000").unwrap();
+        let new = sysfs.chip("hwmon8", MODALIX_HWMON_NAME);
+        fs::write(new.join("temp1_input"), "42000").unwrap();
+        assert_eq!(collector.sample()["rtsn_0"], 42.0);
     }
 }
