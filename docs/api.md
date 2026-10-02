@@ -13,7 +13,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /v1/health` | Version, freshness, sample and metric counts, errors, and active trace. |
+| `GET /v1/health` | Version, freshness, sample and metric counts, errors, active trace, and a `peripherals` summary. |
 | `GET /v1/cache` | Complete live cache document. |
 | `GET /v1/metrics` | Metric definitions, units, descriptions, and thresholds. |
 | `GET /v1/samples/latest` | Latest timestamped metric values. |
