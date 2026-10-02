@@ -9,6 +9,7 @@ pub mod model;
 pub mod scan;
 pub mod service;
 pub mod uevent;
+pub mod v4l2;
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +27,7 @@ pub struct Settings {
 
 /// Assemble the built-in and external providers and start the thread.
 pub fn start(settings: &Settings) -> Result<PeripheralsHandle> {
-    let mut providers: Vec<Box<dyn Provider>> = Vec::new();
+    let mut providers: Vec<Box<dyn Provider>> = vec![Box::new(v4l2::V4l2Provider::new())];
     let (external, rejected) = load_providers(&settings.providers_dir, Trust::root());
     for provider in external {
         providers.push(Box::new(provider));
