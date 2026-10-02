@@ -5,6 +5,7 @@
 pub mod catalog;
 pub mod cli;
 pub mod external;
+pub mod mipi;
 pub mod model;
 pub mod scan;
 pub mod service;
