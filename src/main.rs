@@ -2,6 +2,7 @@ mod api;
 mod cache;
 mod daemon;
 mod model;
+mod peripherals;
 mod power;
 mod runs;
 mod system;
