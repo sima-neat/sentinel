@@ -327,6 +327,9 @@ pub fn new_instance_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keeps temporary directories distinct when tests start in the same instant.
+    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     use crate::peripherals::model::{ProviderError, Record};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -376,12 +379,13 @@ mod tests {
     #[test]
     fn publishes_initial_scan_and_honours_refresh_targets() {
         let root = std::env::temp_dir().join(format!(
-            "sentinel-peripherals-{}-{}",
+            "sentinel-peripherals-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let path = root.join("peripherals.json");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -441,12 +445,13 @@ mod tests {
     #[test]
     fn installing_core_rules_reclassifies_without_rescanning() {
         let root = std::env::temp_dir().join(format!(
-            "sentinel-rules-{}-{}",
+            "sentinel-rules-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let rules_dir = root.join("support");
         fs::create_dir_all(&rules_dir).unwrap();

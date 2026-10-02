@@ -110,16 +110,25 @@ document. After `POST /v1/peripherals/refresh`, re-read until `scan_sequence`
 reaches the returned `target_scan_sequence`. A missing or unreadable catalog
 returns HTTP 503.
 
-USB/UVC cameras are discovered in-process. Other providers run as separate
-programs described by JSON manifests in `/usr/lib/simaai-sentinel/providers/`:
+Cameras are discovered in-process from kernel interfaces only; Sentinel does
+not use libcamera or GStreamer. MIPI cameras come from the media-controller
+graph: every sensor entity on a `simaai-v4l2-vid` media device is a camera
+named exactly as the entity (for example `imx477 5-001a`, the name
+`CameraInput` accepts), with modes taken from the ISP output node's formats
+and sizes (`isp_output: true`). The ISP reports no frame intervals, so those
+modes carry a nominal 30/1 rate (`framerate_source: "nominal"`). USB/UVC
+cameras come from their V4L2 nodes and are identified by USB topology.
+
+Devices that need vendor code can be added as separate programs described by
+JSON manifests in `/usr/lib/simaai-sentinel/providers/`:
 
 ```json
 {
   "protocol": 1,
-  "name": "daemon.camera.libcamera",
-  "exec": "/usr/lib/simaai-sentinel/providers/mipi-camera",
+  "name": "vendor.lidar.example",
+  "exec": "/usr/lib/simaai-sentinel/providers/example-lidar",
   "args": [],
-  "subsystems": ["media", "video4linux"],
+  "subsystems": ["net"],
   "timeout_ms": 4000,
   "user": "sima"
 }

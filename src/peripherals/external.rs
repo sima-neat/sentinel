@@ -462,6 +462,9 @@ fn resolve_user(name: &str) -> Result<Identity, ProviderError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keeps temporary directories distinct when tests start in the same instant.
+    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -470,12 +473,13 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "sentinel-external-{}-{}",
+                "sentinel-external-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).unwrap();
             Self(path)

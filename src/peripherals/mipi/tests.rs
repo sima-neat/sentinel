@@ -1160,3 +1160,56 @@ fn system_backend_reports_non_media_file_as_unreadable() {
         )
     );
 }
+
+#[test]
+fn real_imx477_modes_classified_by_core_rules() {
+    // Transcribed from a real DevKit capture, then classified the way the
+    // peripherals thread does with the rules Neat Core installs.
+    let board = Board::new()
+        .media("media0", real_imx477_media())
+        .video(
+            "video0",
+            "raw-capture.1.0",
+            Ok(FakeVideo::new("raw-capture", 0, 0)),
+        )
+        .isp("video1", real_isp_node());
+    let mut records = board.discover().unwrap();
+    let dir = TempDir::new();
+    let rules = dir.0.join("neat-core.json");
+    fs::write(
+        &rules,
+        crate::peripherals::support::core_rules().to_string(),
+    )
+    .unwrap();
+    let mut issues = Vec::new();
+    let status =
+        crate::peripherals::support::SupportStage::new(&rules).apply(&mut records, &mut issues);
+    assert_eq!(status.state, "applied");
+    assert!(issues.is_empty());
+    let supported: Vec<String> = records[0].details["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|mode| mode["supported"] == true)
+        .map(|mode| {
+            format!(
+                "{} {}x{}",
+                mode["format"].as_str().unwrap(),
+                mode["width"],
+                mode["height"]
+            )
+        })
+        .collect();
+    assert_eq!(
+        supported,
+        ["NV12 1920x1080", "NV12 2048x1080", "NV12 2432x2048"],
+        "only NV12 at the ISP output sizes"
+    );
+    let rgb = &records[0].details["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mode| mode["format"] == "RGB3")
+        .unwrap()["reason"];
+    assert!(rgb.as_str().unwrap().contains("NV12 output only"));
+}

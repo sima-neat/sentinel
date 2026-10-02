@@ -300,9 +300,19 @@ fn events_concern(mut buffer: &[u8], file_name: &[u8]) -> bool {
     concerned
 }
 
+/// The rules Neat Core ships (`src/peripherals/sentinel-support-rules.json.in`
+/// in Core), for tests elsewhere in Sentinel.
+#[cfg(test)]
+pub(crate) fn core_rules() -> Value {
+    tests::core_rules()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keeps temporary directories distinct when tests start in the same instant.
+    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -325,12 +335,13 @@ mod tests {
     impl TempDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "sentinel-support-{}-{}",
+                "sentinel-support-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).unwrap();
             Self(path)
