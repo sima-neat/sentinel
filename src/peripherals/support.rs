@@ -463,7 +463,7 @@ mod tests {
         let status = stage.apply(&mut devices, &mut issues);
         assert_eq!(status.state, "invalid");
         assert!(!issues[0].retained_last_good);
-        assert_eq!(verdicts(&devices[0])[0].0, false);
+        assert!(!verdicts(&devices[0])[0].0);
     }
 
     #[test]

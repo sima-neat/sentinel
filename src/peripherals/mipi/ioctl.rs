@@ -24,6 +24,7 @@ pub const MEDIA_ENT_F_IO_V4L: u32 = 0x0001_0001;
 #[cfg(test)]
 pub const MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN: u32 = 0x0002_0000;
 
+#[cfg(test)]
 pub const V4L2_CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
 pub const V4L2_CAP_VIDEO_CAPTURE_MPLANE: u32 = 0x0000_1000;
 
