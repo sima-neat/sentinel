@@ -49,13 +49,15 @@ def build_parser():
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--socket", default="/run/simaai-sentinel/api.sock")
     commands = root.add_subparsers(dest="command", required=True)
-    for command in ("health", "latest", "metrics", "active", "stop", "runs"):
+    for command in ("health", "latest", "metrics", "active", "stop", "runs", "refresh"):
         commands.add_parser(command)
     run = commands.add_parser("run")
     run.add_argument("selector")
     compare = commands.add_parser("compare")
     compare.add_argument("selectors", nargs="+", metavar="RUN")
     compare.add_argument("--raw", action="store_true", help="include timestamped samples")
+    peripherals = commands.add_parser("peripherals")
+    peripherals.add_argument("--since-revision", type=int, help="reply briefly if unchanged")
     start = commands.add_parser("start")
     start.add_argument("--name", required=True)
     start.add_argument("--note")
@@ -73,6 +75,7 @@ def main():
         "active": ("GET", "/v1/traces/active", None),
         "stop": ("POST", "/v1/traces/stop", None),
         "runs": ("GET", "/v1/runs", None),
+        "refresh": ("POST", "/v1/peripherals/refresh", None),
     }
     if args.command == "run":
         operation = ("GET", f"/v1/runs/{quote(args.selector, safe='')}", None)
@@ -82,6 +85,9 @@ def main():
         encoded = ",".join(quote(value, safe="") for value in args.selectors)
         raw = "&raw=1" if args.raw else ""
         operation = ("GET", f"/v1/compare?runs={encoded}{raw}", None)
+    elif args.command == "peripherals":
+        since = "" if args.since_revision is None else f"?since_revision={args.since_revision}"
+        operation = ("GET", f"/v1/peripherals{since}", None)
     elif args.command == "start":
         operation = (
             "POST",

@@ -23,6 +23,8 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/runs` | List active and completed run summaries. |
 | `GET /v1/runs/{name-or-id}` | Retrieve a saved run and raw samples. |
 | `GET /v1/compare?runs=A,B` | Compare two or more runs; the first is the baseline. |
+| `GET /v1/peripherals` | Current peripheral catalog. Add `since_revision=N` to get a short `unchanged` reply when nothing changed. |
+| `POST /v1/peripherals/refresh` | Request a rescan; returns `target_scan_sequence`. |
 
 Start request example:
 
@@ -45,6 +47,62 @@ operations return HTTP 409. Unknown runs and routes return HTTP 404. Invalid
 requests return HTTP 400. Responses use JSON `null` for unavailable metrics.
 Comparison responses contain run metadata, statistics, and baseline deltas by
 default. Add `raw=1` only when timestamped samples are required.
+
+## Peripheral catalog
+
+Sentinel keeps a catalog of connected peripherals, currently cameras. A
+dedicated daemon thread waits for kernel hot-plug events (uevents), waits
+250 ms for the burst to settle, runs every discovery provider once, and
+replaces `/run/simaai-sentinel/peripherals.json` by atomic rename. It does not
+scan on a timer. Providers only query devices: they never open a stream,
+change a format, or take ownership of a camera.
+
+```bash
+curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/peripherals
+simaai-sentinel peripherals            # table
+simaai-sentinel peripherals --json     # the catalog document
+simaai-sentinel peripherals --refresh  # rescan first
+```
+
+Catalog fields:
+
+| Field | Meaning |
+| --- | --- |
+| `instance_id` | New on every daemon start. A different value means the daemon restarted. |
+| `state`, `ready` | `starting` until the first scan, then `ready`, or `degraded` while a provider or the event monitor reports a problem. |
+| `revision` | Increases only when the device list or a device's details change. |
+| `scan_sequence` | Increases after every completed scan, including unchanged ones. |
+| `stale`, `issues` | A provider that failed keeps its last good records, marked by `retained_last_good`; other providers are unaffected. |
+| `changes` | The last 256 changes: `added`, `removed`, `changed`, `error`, `recovered`, each with `sequence` and `revision`. |
+| `devices` | `{id, type, provider, <type>: {...}}`. The `id` is stable across replugs and never a `/dev/videoN` name. |
+
+Clients should poll with `since_revision` rather than re-read the full
+document. After `POST /v1/peripherals/refresh`, re-read until `scan_sequence`
+reaches the returned `target_scan_sequence`. A missing or unreadable catalog
+returns HTTP 503.
+
+USB/UVC cameras are discovered in-process. Other providers run as separate
+programs described by JSON manifests in `/usr/lib/simaai-sentinel/providers/`:
+
+```json
+{
+  "protocol": 1,
+  "name": "daemon.camera.libcamera",
+  "exec": "/usr/lib/simaai-sentinel/providers/mipi-camera",
+  "args": [],
+  "subsystems": ["media", "video4linux"],
+  "timeout_ms": 4000,
+  "user": "sima"
+}
+```
+
+Manifests and executables must be owned by root and not writable by group or
+others. Sentinel runs each provider as the declared user, with its
+supplementary groups, closes its stdin, and kills it at the time limit. The
+provider prints one JSON document:
+`{"schema_version": 1, "ok": true, "records": [{"id", "type", "provider", "details"}]}`
+or `{"schema_version": 1, "ok": false, "error": {"code", "reason"}}`. A
+rejected manifest appears in `issues`.
 
 ## Security and concurrency
 
