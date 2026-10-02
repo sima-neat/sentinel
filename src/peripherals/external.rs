@@ -151,13 +151,12 @@ impl ExternalProvider {
                 if libc::setpgid(0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if switch_user {
-                    if libc::setgroups(identity.groups.len() as _, identity.groups.as_ptr()) != 0
+                if switch_user
+                    && (libc::setgroups(identity.groups.len() as _, identity.groups.as_ptr()) != 0
                         || libc::setgid(identity.gid) != 0
-                        || libc::setuid(identity.uid) != 0
-                    {
-                        return Err(io::Error::last_os_error());
-                    }
+                        || libc::setuid(identity.uid) != 0)
+                {
+                    return Err(io::Error::last_os_error());
                 }
                 Ok(())
             });
