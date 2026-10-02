@@ -74,6 +74,13 @@ fn run() -> Result<()> {
                 }
                 continue;
             }
+            "--support-rules" => {
+                let path = take_value(&mut args, i, "--support-rules")?;
+                if let Some(settings) = peripherals.as_mut() {
+                    settings.support_rules_path = path.into();
+                }
+                continue;
+            }
             "--no-peripherals" => {
                 args.remove(i);
                 peripherals = None;
@@ -350,7 +357,7 @@ fn print_help() {
     println!(
         "simaai-sentinel [--version] [--cache PATH] [--runs-dir PATH] [--api-socket PATH] [--interval SEC] [--once] [command]\n\n\
 Commands:\n  ops        Continuous terminal operations view (default)\n  table      Continuous color-coded table view\n  checkpoint Start or stop a persistent named run capture\n  runs       List, show, or delete captured runs\n  export     Export runs as CSV/JSON; without arguments print live cache JSON\n  sensors    Explain collected metrics and thresholds\n  status     Show daemon/cache status\n  peripherals List connected peripherals (--json, --refresh)\n  daemon     Run the background collector daemon\n\n\
-Daemon options:\n  --history N    Number of samples to keep in cache\n  --peripherals-file PATH  Peripheral catalog path\n  --providers-dir PATH     External peripheral provider manifests\n  --no-peripherals         Disable peripheral discovery\n\n\
+Daemon options:\n  --history N    Number of samples to keep in cache\n  --peripherals-file PATH  Peripheral catalog path\n  --providers-dir PATH     External peripheral provider manifests\n  --support-rules PATH     Neat Core camera support rules\n  --no-peripherals         Disable peripheral discovery\n\n\
 Examples:\n  simaai-sentinel checkpoint --name baseline --note \"before optimization\"\n  simaai-sentinel checkpoint --stop\n  simaai-sentinel runs list\n  simaai-sentinel export baseline optimized --format csv --output comparison.csv\n"
     );
 }

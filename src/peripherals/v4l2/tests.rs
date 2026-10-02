@@ -474,7 +474,8 @@ fn probe_of(devices: Vec<Device>) -> Probe {
 }
 
 /// `catalog.json` `devices[1]` from the shared v1 fixture
-/// (`core/tests/fixtures/peripherals/v1/catalog.json`), copied verbatim.
+/// (`core/tests/fixtures/peripherals/v1/catalog.json`), without `supported` and
+/// `reason`: the support stage adds those after discovery.
 const CANONICAL_V4L2_DEVICE: &str = r#"{
   "id": "camera:v4l2:295faa7ac0d61654",
   "type": "camera",
@@ -503,8 +504,6 @@ const CANONICAL_V4L2_DEVICE: &str = r#"{
         "height": 1080,
         "framerate_num": 30,
         "framerate_den": 1,
-        "supported": false,
-        "reason": "CameraInput currently accepts libcamera camera names only; direct V4L2 capture is not supported.",
         "frame_intervals": [
           {
             "width": 1920,
@@ -796,10 +795,12 @@ fn two_physical_cameras_produce_two_canonical_records() {
     assert!(camera["availability"].get("reason").is_some());
 
     let modes = &camera["modes"];
-    assert_eq!(modes[0]["supported"], false);
+    assert!(
+        modes[0].get("supported").is_none(),
+        "the support stage, not the provider, decides"
+    );
     assert_eq!(modes[0]["framerate_num"], 30, "fastest interval selected");
     assert_eq!(modes[0]["framerate_den"], 1);
-    assert!(modes[0]["reason"].as_str().unwrap().contains("libcamera"));
     let intervals = &modes[0]["frame_intervals"][0]["intervals"];
     assert_eq!(intervals.as_array().unwrap().len(), 2, "all intervals kept");
     assert_eq!(intervals[0]["denominator"], 30, "intervals canonicalized");

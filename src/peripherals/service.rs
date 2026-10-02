@@ -10,7 +10,8 @@ use anyhow::{Context, Result};
 
 use super::catalog::{Catalog, DEFAULT_CHANGE_CAPACITY};
 use super::model::{CatalogDocument, Provider};
-use super::scan::{run_scan, ProviderSlot};
+use super::scan::Scanner;
+use super::support::{RulesWatch, SupportStage};
 use super::uevent::UeventSocket;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
@@ -93,6 +94,7 @@ impl Control {
 
 pub struct Config {
     pub catalog_path: PathBuf,
+    pub support_rules_path: PathBuf,
     pub instance_id: String,
     pub debounce: Duration,
 }
@@ -117,11 +119,11 @@ impl PeripheralsHandle {
 pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<PeripheralsHandle> {
     let control = Arc::new(Control::new().context("create peripherals wake pipe")?);
     let mut catalog = Catalog::new(config.instance_id.clone(), DEFAULT_CHANGE_CAPACITY);
-    let subsystems: Vec<String> = providers
-        .iter()
-        .flat_map(|provider| provider.subsystems().iter().cloned())
-        .collect();
-    let uevents = match UeventSocket::open(subsystems) {
+    let scanner = Scanner::new(
+        providers,
+        SupportStage::new(config.support_rules_path.clone()),
+    );
+    let uevents = match UeventSocket::open(scanner.subsystems()) {
         Ok(socket) => Some(socket),
         Err(error) => {
             catalog.apply_error(
@@ -133,12 +135,30 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
             None
         }
     };
+    // Without the directory (Core not installed yet), rules are still re-read
+    // on every scan; Core's installer also requests a refresh.
+    let rules_watch = RulesWatch::open(scanner.support_path())
+        .map_err(|error| {
+            eprintln!(
+                "Sentinel is not watching {}: {error}",
+                scanner.support_path().display()
+            )
+        })
+        .ok();
     publish(&config.catalog_path, &catalog.document())?;
-    let slots = providers.into_iter().map(ProviderSlot::new).collect();
     let thread_control = control.clone();
     let thread = thread::Builder::new()
         .name("peripherals".into())
-        .spawn(move || run(config, thread_control, catalog, slots, uevents))
+        .spawn(move || {
+            run(
+                config,
+                thread_control,
+                catalog,
+                scanner,
+                uevents,
+                rules_watch,
+            )
+        })
         .context("spawn peripherals thread")?;
     Ok(PeripheralsHandle { control, thread })
 }
@@ -147,14 +167,20 @@ fn run(
     config: Config,
     control: Arc<Control>,
     mut catalog: Catalog,
-    mut slots: Vec<ProviderSlot>,
+    mut scanner: Scanner,
     mut uevents: Option<UeventSocket>,
+    mut rules_watch: Option<RulesWatch>,
 ) {
     // The initial scan runs immediately; afterwards the thread sleeps in
-    // poll() until a uevent, a refresh request, or shutdown.
+    // poll() until a uevent, a rules change, a refresh request, or shutdown.
     let mut due = Some(Instant::now());
+    let mut reclassify_due: Option<Instant> = None;
     loop {
-        let timeout = due.map_or(-1, |at| {
+        let next = match (due, reclassify_due) {
+            (Some(scan), Some(rules)) => Some(scan.min(rules)),
+            (scan, rules) => scan.or(rules),
+        };
+        let timeout = next.map_or(-1, |at| {
             at.saturating_duration_since(Instant::now())
                 .as_millis()
                 .min(i32::MAX as u128) as libc::c_int
@@ -170,9 +196,14 @@ fn run(
                 events: libc::POLLIN,
                 revents: 0,
             },
+            libc::pollfd {
+                fd: rules_watch.as_ref().map_or(-1, RulesWatch::as_raw_fd),
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
-        // SAFETY: fds is a valid array of two pollfd structures.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
+        // SAFETY: fds is a valid array of three pollfd structures.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout) };
         if ready < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             catalog.apply_error("peripherals.monitor_failed", "waiting for events failed");
             let _ = publish(&config.catalog_path, &catalog.document());
@@ -209,14 +240,38 @@ fn run(
                 }
             }
         }
+        if fds[2].revents != 0 {
+            if let Some(watch) = &rules_watch {
+                match watch.drain() {
+                    // A package install writes in steps; wait for it to settle.
+                    Ok(true) => reclassify_due = Some(Instant::now() + config.debounce),
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("Sentinel stopped watching support rules: {error}");
+                        rules_watch = None;
+                    }
+                }
+            }
+        }
+        if reclassify_due.is_some_and(|at| Instant::now() >= at) && due.is_none() {
+            reclassify_due = None;
+            if let Err(error) = scanner.reclassify(&mut catalog) {
+                eprintln!("Sentinel peripheral reclassification rejected: {error}");
+            }
+            if let Err(error) = publish(&config.catalog_path, &catalog.document()) {
+                eprintln!("Sentinel peripheral catalog write failed: {error:#}");
+            }
+        }
         if due.is_some_and(|at| Instant::now() >= at) {
             due = None;
+            // A scan re-reads the rules too.
+            reclassify_due = None;
             control
                 .schedule
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .scanning = true;
-            if let Err(error) = run_scan(&mut slots, &mut catalog) {
+            if let Err(error) = scanner.scan(&mut catalog) {
                 eprintln!("Sentinel peripheral scan rejected: {error}");
             }
             {
@@ -333,6 +388,7 @@ mod tests {
         let handle = spawn(
             Config {
                 catalog_path: path.clone(),
+                support_rules_path: root.join("support/neat-core.json"),
                 instance_id: "test-instance".into(),
                 debounce: Duration::from_millis(10),
             },
@@ -357,6 +413,86 @@ mod tests {
 
         handle.stop();
         assert_eq!(calls.load(Ordering::SeqCst), 2, "no scan without a trigger");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    struct OneMipiCamera;
+
+    impl Provider for OneMipiCamera {
+        fn name(&self) -> &str {
+            "test.mipi"
+        }
+        fn subsystems(&self) -> &[String] {
+            &[]
+        }
+        fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
+            Ok(vec![Record {
+                id: "camera:imx477 5-001a".into(),
+                kind: "camera".into(),
+                provider: "test.mipi".into(),
+                details: json!({"backend": "mipi", "modes": [{
+                    "format": "NV12", "width": 1920, "height": 1080,
+                    "framerate_num": 30, "framerate_den": 1, "isp_output": true
+                }]}),
+            }])
+        }
+    }
+
+    #[test]
+    fn installing_core_rules_reclassifies_without_rescanning() {
+        let root = std::env::temp_dir().join(format!(
+            "sentinel-rules-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rules_dir = root.join("support");
+        fs::create_dir_all(&rules_dir).unwrap();
+        let path = root.join("peripherals.json");
+        let handle = spawn(
+            Config {
+                catalog_path: path.clone(),
+                support_rules_path: rules_dir.join("neat-core.json"),
+                instance_id: "rules".into(),
+                debounce: Duration::from_millis(10),
+            },
+            vec![Box::new(OneMipiCamera)],
+        )
+        .unwrap();
+
+        let before = wait_for(&path, |document| document.ready);
+        assert_eq!(before.support.as_ref().unwrap().state, "not_installed");
+        assert_eq!(before.devices[0]["camera"]["modes"][0]["supported"], false);
+
+        let staged = rules_dir.join("neat-core.json.dpkg-new");
+        fs::write(
+            &staged,
+            json!({"format": 1, "source": "neat-core 0.4.0", "camera": {
+                "backends": {"accept": ["mipi"], "reason": "MIPI only."},
+                "formats": {"accept": ["NV12"], "reason": "NV12 only."},
+                "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "30/1 only."},
+                "isp_output": {"reason": "Not an ISP output size."}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        fs::rename(&staged, rules_dir.join("neat-core.json")).unwrap();
+
+        let after = wait_for(&path, |document| document.revision > before.revision);
+        assert_eq!(after.devices[0]["camera"]["modes"][0]["supported"], true);
+        assert_eq!(
+            after.support.as_ref().unwrap().source.as_deref(),
+            Some("neat-core 0.4.0")
+        );
+        assert_eq!(
+            after.scan_sequence, before.scan_sequence,
+            "no hardware rescan"
+        );
+        assert_eq!(after.changes.last().unwrap().kind, "changed");
+
+        handle.stop();
         fs::remove_dir_all(root).unwrap();
     }
 }

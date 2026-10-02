@@ -39,8 +39,6 @@ const CODE_IO_OPEN: &str = "io.open";
 const CODE_PERMISSION_DENIED: &str = "io.permission_denied";
 const CODE_DISCOVERY_FAILED: &str = "peripherals.discovery_failed";
 
-const UNSUPPORTED_REASON: &str = "CameraInput currently accepts libcamera camera names only; \
-direct V4L2 capture is not supported.";
 const AVAILABILITY_REASON: &str = "V4L2 does not expose a reliable read-only ownership state; \
 discovery does not acquire, configure, or stream from the camera.";
 
@@ -505,8 +503,6 @@ fn mode_json(format: &Format, size: &FrameSize) -> Option<Value> {
         "format": format.fourcc,
         "framerate_num": framerate.numerator,
         "framerate_den": framerate.denominator,
-        "supported": false,
-        "reason": UNSUPPORTED_REASON,
     });
     if size.kind == RangeType::Discrete {
         mode["width"] = json!(size.width);

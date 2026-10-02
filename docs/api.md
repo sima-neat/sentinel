@@ -76,6 +76,35 @@ Catalog fields:
 | `changes` | The last 256 changes: `added`, `removed`, `changed`, `error`, `recovered`, each with `sequence` and `revision`. |
 | `devices` | `{id, type, provider, <type>: {...}}`. The `id` is stable across replugs and never a `/dev/videoN` name. |
 
+Each camera mode carries `supported` and `reason`: whether the installed Neat
+Core's `CameraInput` accepts it. Sentinel does not decide this itself. Neat
+Core installs its rules at `/usr/share/simaai-sentinel/support/neat-core.json`,
+and the peripherals thread applies them to every mode before the catalog is
+compared and written, so a Core upgrade bumps `revision` like any other change.
+Sentinel watches that directory and re-applies the rules without rescanning
+hardware. The top-level `support` field reports `state` (`applied`,
+`not_installed`, `invalid`, or `stale` when an invalid update left the
+previous rules in use), the rules' `source`, and their `path`. Without Neat
+Core, every mode is `supported: false` with a reason saying Core is not
+installed.
+
+```json
+{
+  "format": 1,
+  "source": "neat-core 0.4.0",
+  "camera": {
+    "backends": {"accept": ["mipi"], "reason": "..."},
+    "formats": {"accept": ["NV12"], "reason": "..."},
+    "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "..."},
+    "isp_output": {"reason": "..."}
+  }
+}
+```
+
+Rules are checked in that order and the first failure becomes the mode's
+`reason`. Size ranges are never marked supported; `isp_output`, when present,
+requires the mode to be an ISP output size.
+
 Clients should poll with `since_revision` rather than re-read the full
 document. After `POST /v1/peripherals/refresh`, re-read until `scan_sequence`
 reaches the returned `target_scan_sequence`. A missing or unreadable catalog

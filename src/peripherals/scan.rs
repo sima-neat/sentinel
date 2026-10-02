@@ -3,6 +3,7 @@ use std::thread;
 
 use super::catalog::Catalog;
 use super::model::{Issue, Provider, ProviderError, Record};
+use super::support::SupportStage;
 
 /// A provider plus the records it returned in its last successful scan.
 pub struct ProviderSlot {
@@ -29,10 +30,84 @@ struct ScanResult {
     issue: Option<Issue>,
 }
 
-/// Run every provider once, in parallel, and apply the combined result. A
-/// failed provider contributes an issue and keeps only its own last-good
-/// records; healthy providers are always published.
-pub fn run_scan(slots: &mut [ProviderSlot], catalog: &mut Catalog) -> Result<(), String> {
+/// Owns the providers, their last-good records, and the support stage.
+pub struct Scanner {
+    slots: Vec<ProviderSlot>,
+    provider_issues: Vec<Issue>,
+    support: SupportStage,
+}
+
+impl Scanner {
+    pub fn new(providers: Vec<Box<dyn Provider>>, support: SupportStage) -> Self {
+        Self {
+            slots: providers.into_iter().map(ProviderSlot::new).collect(),
+            provider_issues: Vec::new(),
+            support,
+        }
+    }
+
+    pub fn subsystems(&self) -> Vec<String> {
+        self.slots
+            .iter()
+            .flat_map(|slot| slot.provider.subsystems().iter().cloned())
+            .collect()
+    }
+
+    pub fn support_path(&self) -> &std::path::Path {
+        self.support.path()
+    }
+
+    /// Run every provider, apply the support rules, then publish to the
+    /// catalog, which compares against the previous result.
+    pub fn scan(&mut self, catalog: &mut Catalog) -> Result<(), String> {
+        let issues = discover_all(&mut self.slots);
+        self.provider_issues = issues.clone();
+        let (devices, has_provider_result) = compose(&self.slots);
+        // No providers at all is a valid, empty catalog rather than a failure.
+        if has_provider_result || issues.is_empty() {
+            let (devices, issues) = self.classify(devices, issues, catalog);
+            catalog.apply_success(devices, issues)
+        } else {
+            catalog.apply_provider_failure(issues)
+        }
+    }
+
+    /// Re-apply changed support rules to the last scan's records without
+    /// reading any hardware.
+    pub fn reclassify(&mut self, catalog: &mut Catalog) -> Result<(), String> {
+        let (devices, has_provider_result) = compose(&self.slots);
+        if !has_provider_result {
+            return Ok(());
+        }
+        let (devices, issues) = self.classify(devices, self.provider_issues.clone(), catalog);
+        catalog.apply_reclassification(devices, issues)
+    }
+
+    fn classify(
+        &mut self,
+        mut devices: Vec<Record>,
+        mut issues: Vec<Issue>,
+        catalog: &mut Catalog,
+    ) -> (Vec<Record>, Vec<Issue>) {
+        let status = self.support.apply(&mut devices, &mut issues);
+        catalog.set_support(status);
+        (devices, issues)
+    }
+}
+
+fn compose(slots: &[ProviderSlot]) -> (Vec<Record>, bool) {
+    let mut devices = Vec::new();
+    let mut has_provider_result = false;
+    for records in slots.iter().filter_map(|slot| slot.last_good.as_ref()) {
+        has_provider_result = true;
+        devices.extend(records.iter().cloned());
+    }
+    (devices, has_provider_result)
+}
+
+/// Run every provider once, in parallel. A failed provider contributes an
+/// issue and keeps only its own last-good records.
+fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
     let mut established_owners = BTreeMap::<String, String>::new();
     for slot in slots.iter() {
         for record in slot.last_good.iter().flatten() {
@@ -82,9 +157,7 @@ pub fn run_scan(slots: &mut [ProviderSlot], catalog: &mut Catalog) -> Result<(),
 
     resolve_ownership(slots, &mut results, &established_owners);
 
-    let mut devices = Vec::new();
     let mut issues = Vec::new();
-    let mut has_provider_result = false;
     for (slot, result) in slots.iter_mut().zip(results) {
         if result.accepted {
             slot.last_good = Some(result.discovered);
@@ -92,17 +165,8 @@ pub fn run_scan(slots: &mut [ProviderSlot], catalog: &mut Catalog) -> Result<(),
         if let Some(issue) = result.issue {
             issues.push(issue);
         }
-        if let Some(records) = &slot.last_good {
-            has_provider_result = true;
-            devices.extend(records.iter().cloned());
-        }
     }
-    // No providers at all is a valid, empty catalog rather than a failure.
-    if has_provider_result || issues.is_empty() {
-        catalog.apply_success(devices, issues)
-    } else {
-        catalog.apply_provider_failure(issues)
-    }
+    issues
 }
 
 /// Two providers may not publish the same identity. The provider that already
@@ -269,6 +333,13 @@ mod tests {
         ProviderError::new("io.permission_denied", "denied")
     }
 
+    fn scanner(providers: Vec<Box<dyn Provider>>) -> Scanner {
+        Scanner::new(
+            providers,
+            SupportStage::new("/nonexistent/sentinel/neat-core.json"),
+        )
+    }
+
     fn ids(catalog: &Catalog) -> Vec<String> {
         catalog
             .document()
@@ -280,19 +351,13 @@ mod tests {
 
     #[test]
     fn failed_provider_keeps_its_last_good_records_beside_healthy_ones() {
-        let mut slots = vec![
-            ProviderSlot::new(Scripted::boxed(
-                "mipi",
-                vec![Ok(vec![record("mipi", "m1")]), Err(denied())],
-            )),
-            ProviderSlot::new(Scripted::boxed(
-                "usb",
-                vec![Ok(vec![]), Ok(vec![record("usb", "u1")])],
-            )),
-        ];
+        let mut scanner = scanner(vec![
+            Scripted::boxed("mipi", vec![Ok(vec![record("mipi", "m1")]), Err(denied())]),
+            Scripted::boxed("usb", vec![Ok(vec![]), Ok(vec![record("usb", "u1")])]),
+        ]);
         let mut catalog = Catalog::new("i", 16);
-        run_scan(&mut slots, &mut catalog).unwrap();
-        run_scan(&mut slots, &mut catalog).unwrap();
+        scanner.scan(&mut catalog).unwrap();
+        scanner.scan(&mut catalog).unwrap();
 
         assert_eq!(ids(&catalog), vec!["m1", "u1"]);
         let document = catalog.document();
@@ -304,12 +369,9 @@ mod tests {
 
     #[test]
     fn provider_failing_before_any_success_leaves_catalog_unready_until_another_succeeds() {
-        let mut slots = vec![ProviderSlot::new(Scripted::boxed(
-            "mipi",
-            vec![Err(denied())],
-        ))];
+        let mut scanner = scanner(vec![Scripted::boxed("mipi", vec![Err(denied())])]);
         let mut catalog = Catalog::new("i", 16);
-        run_scan(&mut slots, &mut catalog).unwrap();
+        scanner.scan(&mut catalog).unwrap();
         let document = catalog.document();
         assert!(!document.ready);
         assert!(!document.issues[0].retained_last_good);
@@ -317,12 +379,12 @@ mod tests {
 
     #[test]
     fn panicking_provider_becomes_an_issue() {
-        let mut slots = vec![
-            ProviderSlot::new(Scripted::boxed("panics", vec![])),
-            ProviderSlot::new(Scripted::boxed("usb", vec![Ok(vec![record("usb", "u1")])])),
-        ];
+        let mut scanner = scanner(vec![
+            Scripted::boxed("panics", vec![]),
+            Scripted::boxed("usb", vec![Ok(vec![record("usb", "u1")])]),
+        ]);
         let mut catalog = Catalog::new("i", 16);
-        run_scan(&mut slots, &mut catalog).unwrap();
+        scanner.scan(&mut catalog).unwrap();
         let document = catalog.document();
         assert_eq!(ids(&catalog), vec!["u1"]);
         assert_eq!(document.issues[0].provider, "panics");
@@ -340,9 +402,9 @@ mod tests {
             vec![bad_type],
             vec![record("usb", "d"), record("usb", "d")],
         ] {
-            let mut slots = vec![ProviderSlot::new(Scripted::boxed("usb", vec![Ok(invalid)]))];
+            let mut scanner = scanner(vec![Scripted::boxed("usb", vec![Ok(invalid)])]);
             let mut catalog = Catalog::new("i", 16);
-            run_scan(&mut slots, &mut catalog).unwrap();
+            scanner.scan(&mut catalog).unwrap();
             assert_eq!(
                 catalog.document().issues[0].code,
                 "peripherals.invalid_provider_result"
@@ -352,22 +414,19 @@ mod tests {
 
     #[test]
     fn established_owner_keeps_a_contested_identity() {
-        let mut slots = vec![
-            ProviderSlot::new(Scripted::boxed(
+        let mut scanner = scanner(vec![
+            Scripted::boxed(
                 "mipi",
                 vec![
                     Ok(vec![record("mipi", "same")]),
                     Ok(vec![record("mipi", "same")]),
                 ],
-            )),
-            ProviderSlot::new(Scripted::boxed(
-                "usb",
-                vec![Ok(vec![]), Ok(vec![record("usb", "same")])],
-            )),
-        ];
+            ),
+            Scripted::boxed("usb", vec![Ok(vec![]), Ok(vec![record("usb", "same")])]),
+        ]);
         let mut catalog = Catalog::new("i", 16);
-        run_scan(&mut slots, &mut catalog).unwrap();
-        run_scan(&mut slots, &mut catalog).unwrap();
+        scanner.scan(&mut catalog).unwrap();
+        scanner.scan(&mut catalog).unwrap();
         let document = catalog.document();
         assert_eq!(ids(&catalog), vec!["same"]);
         assert_eq!(document.devices[0]["provider"], "mipi");
@@ -379,12 +438,12 @@ mod tests {
 
     #[test]
     fn unowned_contested_identity_rejects_every_claimant() {
-        let mut slots = vec![
-            ProviderSlot::new(Scripted::boxed("a", vec![Ok(vec![record("a", "same")])])),
-            ProviderSlot::new(Scripted::boxed("b", vec![Ok(vec![record("b", "same")])])),
-        ];
+        let mut scanner = scanner(vec![
+            Scripted::boxed("a", vec![Ok(vec![record("a", "same")])]),
+            Scripted::boxed("b", vec![Ok(vec![record("b", "same")])]),
+        ]);
         let mut catalog = Catalog::new("i", 16);
-        run_scan(&mut slots, &mut catalog).unwrap();
+        scanner.scan(&mut catalog).unwrap();
         let document = catalog.document();
         assert!(document.devices.is_empty());
         assert_eq!(document.issues.len(), 2);
@@ -393,7 +452,7 @@ mod tests {
     #[test]
     fn no_providers_publish_a_ready_empty_catalog() {
         let mut catalog = Catalog::new("i", 16);
-        run_scan(&mut [], &mut catalog).unwrap();
+        scanner(vec![]).scan(&mut catalog).unwrap();
         let document = catalog.document();
         assert!(document.ready);
         assert_eq!(document.state, "ready");

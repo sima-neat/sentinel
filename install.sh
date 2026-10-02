@@ -38,6 +38,8 @@ ${SUDO} install -m 0755 "${BINARY_SRC}" /usr/local/bin/simaai-sentinel
 
 ${SUDO} install -m 0755 -d /run/simaai-sentinel
 ${SUDO} install -m 0755 -d /var/log/simaai-sentinel
+# Neat Core installs its camera support rules here; Sentinel watches it.
+${SUDO} install -m 0755 -d /usr/share/simaai-sentinel/support
 ${SUDO} install -m 0775 -d /var/lib/simaai-sentinel /var/lib/simaai-sentinel/runs
 DATA_GROUP="${SIMA_SENTINEL_DATA_GROUP:-sima}"
 if ! getent group "${DATA_GROUP}" >/dev/null 2>&1; then

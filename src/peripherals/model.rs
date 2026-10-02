@@ -95,5 +95,8 @@ pub struct CatalogDocument {
     pub issues: Vec<Issue>,
     #[serde(default)]
     pub changes: Vec<Change>,
+    /// Which Neat Core rules classified `supported`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<super::support::SupportStatus>,
     pub devices: Vec<Value>,
 }

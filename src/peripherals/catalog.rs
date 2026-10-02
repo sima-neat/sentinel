@@ -4,6 +4,7 @@ use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 
 use super::model::{CatalogDocument, Change, Issue, Record, SCHEMA_VERSION};
+use super::support::SupportStatus;
 
 pub const DEFAULT_CHANGE_CAPACITY: usize = 256;
 
@@ -22,6 +23,7 @@ pub struct Catalog {
     last_success_at: Option<String>,
     last_attempt_at: Option<String>,
     error: Option<Value>,
+    support: Option<SupportStatus>,
 }
 
 impl Catalog {
@@ -39,7 +41,12 @@ impl Catalog {
             last_success_at: None,
             last_attempt_at: None,
             error: None,
+            support: None,
         }
+    }
+
+    pub fn set_support(&mut self, support: SupportStatus) {
+        self.support = Some(support);
     }
 
     pub fn scan_sequence(&self) -> u64 {
@@ -49,20 +56,44 @@ impl Catalog {
     /// Record a scan in which at least one provider has usable records.
     pub fn apply_success(
         &mut self,
+        devices: Vec<Record>,
+        issues: Vec<Issue>,
+    ) -> Result<(), String> {
+        self.apply(devices, issues, true)
+    }
+
+    /// Republish the last scan's records after the support rules changed.
+    /// No hardware was read, so `scan_sequence` and the timestamps stay put.
+    pub fn apply_reclassification(
+        &mut self,
+        devices: Vec<Record>,
+        issues: Vec<Issue>,
+    ) -> Result<(), String> {
+        if !self.initialized {
+            return Ok(());
+        }
+        self.apply(devices, issues, false)
+    }
+
+    fn apply(
+        &mut self,
         mut devices: Vec<Record>,
         mut issues: Vec<Issue>,
+        scanned: bool,
     ) -> Result<(), String> {
         canonicalize_devices(&mut devices)?;
         canonicalize_issues(&mut issues)?;
-        let now = utc_now();
-        self.scan_sequence += 1;
         let recovered = (self.error.is_some() || !self.issues.is_empty()) && issues.is_empty();
         let issues_changed = self.issues != issues;
-        self.last_attempt_at = Some(now.clone());
-        if issues.is_empty() {
-            self.last_success_at = Some(now);
+        if scanned {
+            let now = utc_now();
+            self.scan_sequence += 1;
+            self.last_attempt_at = Some(now.clone());
+            if issues.is_empty() {
+                self.last_success_at = Some(now);
+            }
+            self.error = None;
         }
-        self.error = None;
 
         if !self.initialized {
             self.initialized = true;
@@ -152,6 +183,7 @@ impl Catalog {
             error: self.error.clone(),
             issues: self.issues.clone(),
             changes: self.changes.iter().cloned().collect(),
+            support: self.support.clone(),
             devices: self.devices.iter().map(Record::to_catalog_value).collect(),
         }
     }
@@ -367,6 +399,30 @@ mod tests {
         bad.reason.clear();
         assert!(catalog.apply_success(vec![], vec![bad]).is_err());
         assert_eq!(catalog.scan_sequence(), 0);
+    }
+
+    #[test]
+    fn reclassification_changes_revision_but_not_scan_sequence() {
+        let mut catalog = Catalog::new("a", 8);
+        catalog
+            .apply_reclassification(vec![camera("a", "1")], vec![])
+            .unwrap();
+        assert_eq!(
+            catalog.document().revision,
+            0,
+            "nothing before the first scan"
+        );
+        catalog
+            .apply_success(vec![camera("a", "1")], vec![])
+            .unwrap();
+        let attempted = catalog.document().last_attempt_at;
+        catalog
+            .apply_reclassification(vec![camera("a", "2")], vec![])
+            .unwrap();
+        let document = catalog.document();
+        assert_eq!((document.revision, document.scan_sequence), (2, 1));
+        assert_eq!(document.last_attempt_at, attempted);
+        assert_eq!(document.changes.last().unwrap().kind, "changed");
     }
 
     #[test]

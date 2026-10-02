@@ -8,6 +8,7 @@ pub mod external;
 pub mod model;
 pub mod scan;
 pub mod service;
+pub mod support;
 pub mod uevent;
 pub mod v4l2;
 
@@ -23,6 +24,7 @@ use service::{Config, PeripheralsHandle};
 pub struct Settings {
     pub catalog_path: PathBuf,
     pub providers_dir: PathBuf,
+    pub support_rules_path: PathBuf,
 }
 
 /// Assemble the built-in and external providers and start the thread.
@@ -42,6 +44,7 @@ pub fn start(settings: &Settings) -> Result<PeripheralsHandle> {
     service::spawn(
         Config {
             catalog_path: settings.catalog_path.clone(),
+            support_rules_path: settings.support_rules_path.clone(),
             instance_id: service::new_instance_id(),
             debounce: service::DEBOUNCE,
         },
@@ -53,5 +56,6 @@ pub fn default_settings() -> Settings {
     Settings {
         catalog_path: Path::new(model::DEFAULT_CATALOG_PATH).to_path_buf(),
         providers_dir: Path::new(model::DEFAULT_PROVIDERS_DIR).to_path_buf(),
+        support_rules_path: Path::new(support::DEFAULT_RULES_PATH).to_path_buf(),
     }
 }
