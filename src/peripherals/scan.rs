@@ -21,10 +21,6 @@ impl ProviderSlot {
     pub fn name(&self) -> &str {
         self.provider.name()
     }
-
-    pub fn subsystems(&self) -> &[String] {
-        self.provider.subsystems()
-    }
 }
 
 struct ScanResult {
@@ -101,7 +97,8 @@ pub fn run_scan(slots: &mut [ProviderSlot], catalog: &mut Catalog) -> Result<(),
             devices.extend(records.iter().cloned());
         }
     }
-    if has_provider_result {
+    // No providers at all is a valid, empty catalog rather than a failure.
+    if has_provider_result || issues.is_empty() {
         catalog.apply_success(devices, issues)
     } else {
         catalog.apply_provider_failure(issues)
@@ -391,6 +388,16 @@ mod tests {
         let document = catalog.document();
         assert!(document.devices.is_empty());
         assert_eq!(document.issues.len(), 2);
+    }
+
+    #[test]
+    fn no_providers_publish_a_ready_empty_catalog() {
+        let mut catalog = Catalog::new("i", 16);
+        run_scan(&mut [], &mut catalog).unwrap();
+        let document = catalog.document();
+        assert!(document.ready);
+        assert_eq!(document.state, "ready");
+        assert!(document.devices.is_empty());
     }
 
     #[test]

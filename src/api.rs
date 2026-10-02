@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::peripherals::service::{self as peripheral_service, Control};
 use crate::{cache, runs};
 
 pub const DEFAULT_API_SOCKET: &str = "/run/simaai-sentinel/api.sock";
@@ -40,6 +41,13 @@ struct StartTrace {
     tags: Vec<String>,
 }
 
+/// Where the API finds the peripheral catalog and how it asks for a rescan.
+#[derive(Clone)]
+pub struct PeripheralsApi {
+    pub catalog_path: PathBuf,
+    pub control: Option<Arc<Control>>,
+}
+
 pub struct ApiServer {
     thread: JoinHandle<()>,
     socket_path: std::path::PathBuf,
@@ -58,6 +66,7 @@ pub fn spawn(
     socket_path: &Path,
     cache_path: &Path,
     runs_dir: &Path,
+    peripherals: Option<PeripheralsApi>,
     stopped: Arc<AtomicBool>,
 ) -> Result<ApiServer> {
     if let Some(parent) = socket_path.parent() {
@@ -81,7 +90,9 @@ pub fn spawn(
             match listener.accept() {
                 Ok(_) if stopped.load(Ordering::Relaxed) => break,
                 Ok((mut stream, _)) => {
-                    if let Err(error) = serve(&mut stream, &cache_path, &runs_dir) {
+                    if let Err(error) =
+                        serve(&mut stream, &cache_path, &runs_dir, peripherals.as_ref())
+                    {
                         eprintln!("Sentinel API request failed: {error:#}");
                     }
                 }
@@ -97,14 +108,20 @@ pub fn spawn(
     })
 }
 
-fn serve(stream: &mut UnixStream, cache_path: &Path, runs_dir: &Path) -> Result<()> {
+fn serve(
+    stream: &mut UnixStream,
+    cache_path: &Path,
+    runs_dir: &Path,
+    peripherals: Option<&PeripheralsApi>,
+) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let response =
-        match read_request(stream).and_then(|request| route(request, cache_path, runs_dir)) {
-            Ok(value) => response(200, value),
-            Err(error) => response(error.status, json!({"error": error.message})),
-        };
+    let response = match read_request(stream)
+        .and_then(|request| route(request, cache_path, runs_dir, peripherals))
+    {
+        Ok(value) => response(200, value),
+        Err(error) => response(error.status, json!({"error": error.message})),
+    };
     stream.write_all(&response)?;
     Ok(())
 }
@@ -173,6 +190,7 @@ fn route(
     request: Request,
     cache_path: &Path,
     runs_dir: &Path,
+    peripherals: Option<&PeripheralsApi>,
 ) -> std::result::Result<Value, ApiError> {
     let cache_path = cache_path
         .to_str()
@@ -190,6 +208,44 @@ fn route(
                 "cached_samples": payload.samples.len(),
                 "active_trace": active.map(|run| run.metadata),
                 "errors": payload.errors,
+                "peripherals": peripherals.and_then(peripheral_summary),
+            }))
+        }
+        ("GET", "/v1/peripherals") => {
+            let peripherals = peripherals.ok_or_else(peripherals_disabled)?;
+            let document =
+                peripheral_service::read(&peripherals.catalog_path).map_err(|error| {
+                    unavailable(format!("peripheral catalog unavailable: {error:#}"))
+                })?;
+            let since = query_values(&request.query, "since_revision")
+                .first()
+                .map(|value| {
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| bad_request("since_revision must be a non-negative integer"))
+                })
+                .transpose()?;
+            let same_instance = query_values(&request.query, "instance_id")
+                .first()
+                .is_none_or(|instance| *instance == document.instance_id);
+            if same_instance && since == Some(document.revision) && document.ready {
+                return Ok(json!({
+                    "schema_version": document.schema_version,
+                    "instance_id": document.instance_id,
+                    "revision": document.revision,
+                    "scan_sequence": document.scan_sequence,
+                    "unchanged": true,
+                }));
+            }
+            serde_json::to_value(document).map_err(internal)
+        }
+        ("POST", "/v1/peripherals/refresh") => {
+            let control = peripherals
+                .and_then(|peripherals| peripherals.control.as_ref())
+                .ok_or_else(peripherals_disabled)?;
+            Ok(json!({
+                "accepted": true,
+                "target_scan_sequence": control.request_refresh(),
             }))
         }
         ("GET", "/v1/cache") => {
@@ -262,6 +318,23 @@ fn route(
     }
 }
 
+fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
+    let document = peripheral_service::read(&peripherals.catalog_path).ok()?;
+    Some(json!({
+        "state": document.state,
+        "ready": document.ready,
+        "stale": document.stale,
+        "revision": document.revision,
+        "scan_sequence": document.scan_sequence,
+        "device_count": document.devices.len(),
+        "issue_count": document.issues.len(),
+    }))
+}
+
+fn peripherals_disabled() -> ApiError {
+    unavailable("peripheral discovery is not enabled in this Sentinel daemon")
+}
+
 fn query_values(query: &str, key: &str) -> Vec<String> {
     query
         .split('&')
@@ -309,6 +382,7 @@ fn response(status: u16, body: Value) -> Vec<u8> {
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
     let header = format!(
@@ -342,6 +416,13 @@ fn not_found(error: impl std::fmt::Display) -> ApiError {
     ApiError {
         status: 404,
         message: error.to_string(),
+    }
+}
+
+fn unavailable(message: impl Into<String>) -> ApiError {
+    ApiError {
+        status: 503,
+        message: message.into(),
     }
 }
 
@@ -392,7 +473,7 @@ mod tests {
         };
         cache::write_cache(cache_path.to_str().unwrap(), &payload).unwrap();
         let stopped = Arc::new(AtomicBool::new(false));
-        let handle = spawn(&socket_path, &cache_path, &runs_dir, stopped.clone()).unwrap();
+        let handle = spawn(&socket_path, &cache_path, &runs_dir, None, stopped.clone()).unwrap();
 
         let latest = request(
             &socket_path,

@@ -212,6 +212,43 @@ impl Provider for ExternalProvider {
     }
 }
 
+/// Stands in for a manifest that could not be loaded, so the problem is
+/// visible as a catalog issue on every scan instead of only in the journal.
+pub struct RejectedManifest {
+    name: String,
+    reason: String,
+}
+
+impl RejectedManifest {
+    pub fn new(path: &Path, reason: String) -> Self {
+        let stem = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        Self {
+            name: format!("manifest:{stem}"),
+            reason: format!("{}: {reason}", path.display()),
+        }
+    }
+}
+
+impl Provider for RejectedManifest {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn subsystems(&self) -> &[String] {
+        &[]
+    }
+
+    fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
+        Err(ProviderError::new(
+            "peripherals.provider_rejected",
+            self.reason.clone(),
+        ))
+    }
+}
+
 type Output = (Vec<u8>, Vec<u8>);
 
 fn collect_output(child: &mut Child, timeout: Duration) -> Result<Output, ProviderError> {

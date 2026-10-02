@@ -35,6 +35,7 @@ fn run() -> Result<()> {
     let mut history = 240usize;
     let mut runs_dir = PathBuf::from(runs::DEFAULT_RUNS_DIR);
     let mut api_socket = PathBuf::from(api::DEFAULT_API_SOCKET);
+    let mut peripherals = Some(peripherals::default_settings());
 
     let mut i = 0;
     while i < args.len() {
@@ -57,6 +58,25 @@ fn run() -> Result<()> {
             }
             "--api-socket" => {
                 api_socket = take_value(&mut args, i, "--api-socket")?.into();
+                continue;
+            }
+            "--peripherals-file" => {
+                let path = take_value(&mut args, i, "--peripherals-file")?;
+                if let Some(settings) = peripherals.as_mut() {
+                    settings.catalog_path = path.into();
+                }
+                continue;
+            }
+            "--providers-dir" => {
+                let path = take_value(&mut args, i, "--providers-dir")?;
+                if let Some(settings) = peripherals.as_mut() {
+                    settings.providers_dir = path.into();
+                }
+                continue;
+            }
+            "--no-peripherals" => {
+                args.remove(i);
+                peripherals = None;
                 continue;
             }
             "--once" => {
@@ -84,6 +104,7 @@ fn run() -> Result<()> {
             history,
             &runs_dir,
             &api_socket,
+            peripherals.as_ref(),
         ),
         "table" => ui::run_table(
             &cache,
@@ -106,6 +127,14 @@ fn run() -> Result<()> {
         "export" => export_runs_command(&runs_dir, &args[1..]),
         "sensors" | "metrics" => ui::print_sensors(&cache),
         "status" => ui::print_status(&cache),
+        "peripherals" => peripherals::cli::run(
+            &peripherals
+                .as_ref()
+                .map(|settings| settings.catalog_path.clone())
+                .unwrap_or_else(|| peripherals::default_settings().catalog_path),
+            &api_socket,
+            &args[1..],
+        ),
         other => bail!("unknown command '{other}'"),
     }
 }
@@ -320,8 +349,8 @@ fn truncate(value: &str, width: usize) -> String {
 fn print_help() {
     println!(
         "simaai-sentinel [--version] [--cache PATH] [--runs-dir PATH] [--api-socket PATH] [--interval SEC] [--once] [command]\n\n\
-Commands:\n  ops        Continuous terminal operations view (default)\n  table      Continuous color-coded table view\n  checkpoint Start or stop a persistent named run capture\n  runs       List, show, or delete captured runs\n  export     Export runs as CSV/JSON; without arguments print live cache JSON\n  sensors    Explain collected metrics and thresholds\n  status     Show daemon/cache status\n  daemon     Run the background collector daemon\n\n\
-Daemon options:\n  --history N    Number of samples to keep in cache\n\n\
+Commands:\n  ops        Continuous terminal operations view (default)\n  table      Continuous color-coded table view\n  checkpoint Start or stop a persistent named run capture\n  runs       List, show, or delete captured runs\n  export     Export runs as CSV/JSON; without arguments print live cache JSON\n  sensors    Explain collected metrics and thresholds\n  status     Show daemon/cache status\n  peripherals List connected peripherals (--json, --refresh)\n  daemon     Run the background collector daemon\n\n\
+Daemon options:\n  --history N    Number of samples to keep in cache\n  --peripherals-file PATH  Peripheral catalog path\n  --providers-dir PATH     External peripheral provider manifests\n  --no-peripherals         Disable peripheral discovery\n\n\
 Examples:\n  simaai-sentinel checkpoint --name baseline --note \"before optimization\"\n  simaai-sentinel checkpoint --stop\n  simaai-sentinel runs list\n  simaai-sentinel export baseline optimized --format csv --output comparison.csv\n"
     );
 }
