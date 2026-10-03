@@ -9,10 +9,11 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::peripherals::service::{self as peripheral_service, Control};
+use crate::peripherals::service::Control;
 use crate::{cache, runs};
 
 pub const DEFAULT_API_SOCKET: &str = "/run/simaai-sentinel/api.sock";
@@ -116,12 +117,15 @@ fn serve(
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let response = match read_request(stream)
-        .and_then(|request| route(request, cache_path, runs_dir, peripherals))
-    {
-        Ok(value) => response(200, value),
-        Err(error) => response(error.status, json!({"error": error.message})),
-    };
+    let reply = read_request(stream).and_then(|request| {
+        if request.method == "GET" && request.path == "/v1/peripherals" {
+            peripheral_catalog(&request, peripherals)
+        } else {
+            route(request, cache_path, runs_dir, peripherals).map(|value| response(200, value))
+        }
+    });
+    let response =
+        reply.unwrap_or_else(|error| response(error.status, json!({"error": error.message})));
     stream.write_all(&response)?;
     Ok(())
 }
@@ -211,34 +215,6 @@ fn route(
                 "peripherals": peripherals.and_then(peripheral_summary),
             }))
         }
-        ("GET", "/v1/peripherals") => {
-            let peripherals = peripherals.ok_or_else(peripherals_disabled)?;
-            let document =
-                peripheral_service::read(&peripherals.catalog_path).map_err(|error| {
-                    unavailable(format!("peripheral catalog unavailable: {error:#}"))
-                })?;
-            let since = query_values(&request.query, "since_revision")
-                .first()
-                .map(|value| {
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| bad_request("since_revision must be a non-negative integer"))
-                })
-                .transpose()?;
-            let same_instance = query_values(&request.query, "instance_id")
-                .first()
-                .is_none_or(|instance| *instance == document.instance_id);
-            if same_instance && since == Some(document.revision) && document.ready {
-                return Ok(json!({
-                    "schema_version": document.schema_version,
-                    "instance_id": document.instance_id,
-                    "revision": document.revision,
-                    "scan_sequence": document.scan_sequence,
-                    "unchanged": true,
-                }));
-            }
-            serde_json::to_value(document).map_err(internal)
-        }
         ("POST", "/v1/peripherals/refresh") => {
             let control = peripherals
                 .and_then(|peripherals| peripherals.control.as_ref())
@@ -318,16 +294,75 @@ fn route(
     }
 }
 
+/// The fields the API needs from the catalog. Deserializing only these (and
+/// counting, not building, the arrays) keeps each request cheap.
+#[derive(Deserialize)]
+struct CatalogHeader {
+    schema_version: u32,
+    instance_id: String,
+    state: String,
+    ready: bool,
+    stale: bool,
+    revision: u64,
+    scan_sequence: u64,
+    devices: Vec<IgnoredAny>,
+    issues: Vec<IgnoredAny>,
+}
+
+/// `GET /v1/peripherals`: the catalog file's bytes exactly as the
+/// peripherals thread wrote them, or a short reply when the client is current.
+fn peripheral_catalog(
+    request: &Request,
+    peripherals: Option<&PeripheralsApi>,
+) -> std::result::Result<Vec<u8>, ApiError> {
+    let peripherals = peripherals.ok_or_else(peripherals_disabled)?;
+    let since = query_values(&request.query, "since_revision")
+        .first()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| bad_request("since_revision must be a non-negative integer"))
+        })
+        .transpose()?;
+    let body = fs::read(&peripherals.catalog_path).map_err(|error| {
+        unavailable(format!(
+            "peripheral catalog unavailable: {}: {error}",
+            peripherals.catalog_path.display()
+        ))
+    })?;
+    if let Some(since) = since {
+        let header: CatalogHeader = serde_json::from_slice(&body)
+            .map_err(|error| unavailable(format!("peripheral catalog unreadable: {error}")))?;
+        let same_instance = query_values(&request.query, "instance_id")
+            .first()
+            .is_none_or(|instance| *instance == header.instance_id);
+        if same_instance && since == header.revision && header.ready {
+            return Ok(response(
+                200,
+                json!({
+                    "schema_version": header.schema_version,
+                    "instance_id": header.instance_id,
+                    "revision": header.revision,
+                    "scan_sequence": header.scan_sequence,
+                    "unchanged": true,
+                }),
+            ));
+        }
+    }
+    Ok(raw_response(200, body))
+}
+
 fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
-    let document = peripheral_service::read(&peripherals.catalog_path).ok()?;
+    let body = fs::read(&peripherals.catalog_path).ok()?;
+    let header: CatalogHeader = serde_json::from_slice(&body).ok()?;
     Some(json!({
-        "state": document.state,
-        "ready": document.ready,
-        "stale": document.stale,
-        "revision": document.revision,
-        "scan_sequence": document.scan_sequence,
-        "device_count": document.devices.len(),
-        "issue_count": document.issues.len(),
+        "state": header.state,
+        "ready": header.ready,
+        "stale": header.stale,
+        "revision": header.revision,
+        "scan_sequence": header.scan_sequence,
+        "device_count": header.devices.len(),
+        "issue_count": header.issues.len(),
     }))
 }
 
@@ -376,6 +411,10 @@ fn percent_decode(value: &str) -> std::result::Result<String, ApiError> {
 fn response(status: u16, body: Value) -> Vec<u8> {
     let body = serde_json::to_vec_pretty(&body)
         .unwrap_or_else(|_| b"{\"error\":\"serialization failed\"}".to_vec());
+    raw_response(status, body)
+}
+
+fn raw_response(status: u16, body: Vec<u8>) -> Vec<u8> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -508,6 +547,81 @@ mod tests {
             "GET /v1/compare?runs=agent-test,agent-test-2&raw=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
         ));
         assert!(raw["runs"][0]["samples"].is_array());
+
+        stopped.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn peripheral_catalog_is_served_as_written() {
+        let root = std::env::temp_dir().join(format!(
+            "sentinel-api-peripherals-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let catalog_path = root.join("peripherals.json");
+        let mut catalog = crate::peripherals::catalog::Catalog::new("instance-a", 8);
+        catalog
+            .apply_success(
+                vec![crate::peripherals::model::Record {
+                    id: "camera:imx477 5-001a".into(),
+                    kind: "camera".into(),
+                    provider: "daemon.camera.mipi".into(),
+                    details: json!({"modes": []}),
+                }],
+                vec![],
+            )
+            .unwrap();
+        crate::peripherals::service::publish(&catalog_path, &catalog.document()).unwrap();
+        let socket_path = root.join("api.sock");
+        let stopped = Arc::new(AtomicBool::new(false));
+        let handle = spawn(
+            &socket_path,
+            &root.join("cache.json"),
+            &root.join("runs"),
+            Some(PeripheralsApi {
+                catalog_path: catalog_path.clone(),
+                control: None,
+            }),
+            stopped.clone(),
+        )
+        .unwrap();
+
+        let full = request(
+            &socket_path,
+            "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        let body = full.split_once("\r\n\r\n").unwrap().1;
+        assert_eq!(body.as_bytes(), fs::read(&catalog_path).unwrap());
+
+        let current = response_json(&request(
+            &socket_path,
+            "GET /v1/peripherals?since_revision=1&instance_id=instance-a HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        assert_eq!(current["unchanged"], true);
+        let other_instance = response_json(&request(
+            &socket_path,
+            "GET /v1/peripherals?since_revision=1&instance_id=instance-b HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        assert_eq!(other_instance["devices"][0]["id"], "camera:imx477 5-001a");
+        let invalid = request(
+            &socket_path,
+            "GET /v1/peripherals?since_revision=x HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(invalid.starts_with("HTTP/1.1 400"));
+        let refresh = request(
+            &socket_path,
+            "POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert!(
+            refresh.starts_with("HTTP/1.1 503"),
+            "no control, no refresh"
+        );
 
         stopped.store(true, Ordering::Relaxed);
         handle.join().unwrap();

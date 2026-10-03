@@ -179,6 +179,9 @@ fn run(
     // poll() until a uevent, a rules change, a refresh request, or shutdown.
     let mut due = Some(Instant::now());
     let mut reclassify_due: Option<Instant> = None;
+    // Refresh requests within one debounce window of the last scan share the
+    // next scan, so a client that spams refresh cannot keep the thread busy.
+    let mut last_scan_end: Option<Instant> = None;
     loop {
         let next = match (due, reclassify_due) {
             (Some(scan), Some(rules)) => Some(scan.min(rules)),
@@ -222,7 +225,10 @@ fn run(
                 return;
             }
             if std::mem::take(&mut schedule.refresh) {
-                due = Some(Instant::now());
+                let earliest = last_scan_end.map_or_else(Instant::now, |end| {
+                    (end + config.debounce).max(Instant::now())
+                });
+                due = Some(due.map_or(earliest, |at| at.min(earliest)));
             }
         }
         if fds[1].revents != 0 {
@@ -286,6 +292,7 @@ fn run(
             if let Err(error) = publish(&config.catalog_path, &catalog.document()) {
                 eprintln!("Sentinel peripheral catalog write failed: {error:#}");
             }
+            last_scan_end = Some(Instant::now());
         }
     }
 }
@@ -568,5 +575,48 @@ mod tests {
         // The process may already run niced; discovery adds NICE on top.
         let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
         assert_eq!(*seen.lock().unwrap(), Some((base + NICE).min(19)));
+    }
+
+    #[test]
+    fn a_burst_of_refresh_requests_shares_one_scan() {
+        let root = std::env::temp_dir().join(format!(
+            "sentinel-burst-{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = root.join("peripherals.json");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handle = spawn(
+            Config {
+                catalog_path: path.clone(),
+                support_rules_path: root.join("support/neat-core.json"),
+                instance_id: "burst".into(),
+                debounce: Duration::from_millis(100),
+            },
+            vec![Box::new(Counting {
+                calls: calls.clone(),
+                subsystems: vec![],
+            })],
+        )
+        .unwrap();
+        wait_for(&path, |document| document.ready);
+        let control = handle.control();
+        let mut target = 0;
+        for _ in 0..200 {
+            target = control.request_refresh();
+        }
+        let document = wait_for(&path, |document| document.scan_sequence >= target);
+        handle.stop();
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            target <= 3,
+            "200 requests promise at most two more scans, got {target}"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) <= 3,
+            "200 refresh requests ran {} scans",
+            calls.load(Ordering::SeqCst)
+        );
+        assert!(document.scan_sequence <= 3);
     }
 }
