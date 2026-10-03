@@ -1,16 +1,41 @@
 # <Type name>
 
-What this type covers and which devices are in its class.
+<!-- One paragraph: what this type covers and which devices are in its class. -->
 
 - **Type token:** `<type>`
-- **Provider:** `<provider name>`, rescans on `<uevent subsystems>`
-- **Identity:** how `id` is formed and why it is stable
+- **Providers:** `<provider name>`
+- **Rescan triggers:** `<uevent subsystems>`
+
+## Identity
+
+How `id` is formed, from which stable attributes, and what keeps it stable
+across replugs, reboots and renumbering. Example: `<type>:<stable key>`.
+
+## Details
 
 | Field | Type | Always present | Meaning | Source |
 | --- | --- | --- | --- | --- |
-| `<field>` | string | yes | | sysfs file, ioctl |
+| `<field>` | string | yes | <what it means> | <sysfs file, ioctl, vendor API> |
 
-**Variation covered:** how devices of this class differ and how each is handled.
+## Example record
 
-**Verification:** which behaviour was checked on real hardware (which device)
-and which only on fixtures.
+```json
+{"id": "<type>:...", "type": "<type>", "provider": "...", "<type>": {}}
+```
+
+## Variation covered
+
+List the ways devices of this class differ and how each is handled
+(counts, formats, ranges, optional fields, composite devices, several
+identical devices, values that change while in use).
+
+## Support rules
+
+Whether a Neat component's rules classify this type, and which fields they
+read. Write "none" if the type has no support classification.
+
+## Verification
+
+| Behaviour | Real hardware (which device) | Fixtures only |
+| --- | --- | --- |
+| <behaviour> | <device> | |
