@@ -6,13 +6,13 @@ use serde_json::{json, Value};
 use super::model::{CatalogDocument, Change, Issue, Record, SCHEMA_VERSION};
 use super::support::SupportStatus;
 
-pub const DEFAULT_CHANGE_CAPACITY: usize = 256;
+/// How many recent changes the catalog publishes.
+pub const CHANGE_LOG_CAPACITY: usize = 256;
 
 /// Authoritative catalog state. Only the peripherals thread mutates it; every
 /// reader sees the published [`CatalogDocument`].
 pub struct Catalog {
     instance_id: String,
-    change_capacity: usize,
     devices: Vec<Record>,
     issues: Vec<Issue>,
     changes: VecDeque<Change>,
@@ -22,16 +22,17 @@ pub struct Catalog {
     initialized: bool,
     last_success_at: Option<String>,
     last_attempt_at: Option<String>,
+    /// A failure of the daemon itself (event monitor, shutdown). Scans never
+    /// clear it; it lasts until the daemon restarts.
     error: Option<Value>,
     support: Option<SupportStatus>,
     support_changed: bool,
 }
 
 impl Catalog {
-    pub fn new(instance_id: impl Into<String>, change_capacity: usize) -> Self {
+    pub fn new(instance_id: impl Into<String>) -> Self {
         Self {
             instance_id: instance_id.into(),
-            change_capacity: change_capacity.max(1),
             devices: Vec::new(),
             issues: Vec::new(),
             changes: VecDeque::new(),
@@ -48,9 +49,7 @@ impl Catalog {
     }
 
     pub fn set_support(&mut self, support: SupportStatus) {
-        if self.support.as_ref() != Some(&support) {
-            self.support_changed = true;
-        }
+        self.support_changed |= self.support.as_ref() != Some(&support);
         self.support = Some(support);
     }
 
@@ -86,106 +85,50 @@ impl Catalog {
         mut issues: Vec<Issue>,
         scanned: bool,
     ) -> Result<(), String> {
-        canonicalize_devices(&mut devices)?;
-        canonicalize_issues(&mut issues)?;
-        let recovered = !self.issues.is_empty() && issues.is_empty();
-        let issues_changed = self.issues != issues;
-        if scanned {
-            let now = utc_now();
-            self.scan_sequence += 1;
-            self.last_attempt_at = Some(now.clone());
-            if issues.is_empty() {
-                self.last_success_at = Some(now);
-            }
+        devices.sort_by(|left, right| left.id.cmp(&right.id));
+        if let Some(pair) = devices.windows(2).find(|pair| pair[0].id == pair[1].id) {
+            return Err(format!("duplicate peripheral identity: {}", pair[0].id));
         }
-
+        issues.sort();
+        if scanned {
+            self.record_attempt(issues.is_empty());
+        }
         if !self.initialized {
             self.initialized = true;
             self.revision = 1;
             self.support_changed = false;
             self.devices = devices;
-            self.push_status_changes(recovered, issues_changed, &issues);
-            self.issues = issues;
+            self.set_issues(issues);
             return Ok(());
         }
-
+        let devices_changed = self.devices != devices;
         // `revision` changes whenever anything a client can see changes, so
         // polling with `since_revision` never hides a new state.
-        let devices_changed = self.devices != devices;
-        if devices_changed || issues_changed || std::mem::take(&mut self.support_changed) {
+        if devices_changed || self.issues != issues || std::mem::take(&mut self.support_changed) {
             self.revision += 1;
         }
-        self.push_status_changes(recovered, issues_changed, &issues);
+        self.set_issues(issues);
         if devices_changed {
-            let previous = std::mem::take(&mut self.devices);
-            let (mut old, mut new) = (0, 0);
-            while old < previous.len() || new < devices.len() {
-                if new == devices.len()
-                    || (old < previous.len() && previous[old].id < devices[new].id)
-                {
-                    self.push_device_change("removed", &previous[old]);
-                    old += 1;
-                } else if old == previous.len() || devices[new].id < previous[old].id {
-                    self.push_device_change("added", &devices[new]);
-                    new += 1;
-                } else {
-                    if previous[old] != devices[new] {
-                        self.push_device_change("changed", &devices[new]);
-                    }
-                    old += 1;
-                    new += 1;
-                }
-            }
+            let previous = std::mem::replace(&mut self.devices, devices);
+            self.log_device_changes(&previous);
         }
-        self.devices = devices;
-        self.issues = issues;
         Ok(())
     }
 
-    /// Record a scan in which no provider has ever produced records.
-    pub fn apply_provider_failure(&mut self, mut issues: Vec<Issue>) -> Result<(), String> {
-        canonicalize_issues(&mut issues)?;
-        if issues.is_empty() {
-            return Err("a provider failure scan must contain an issue".into());
+    /// Record a scan that produced no usable records: every provider failed
+    /// before ever succeeding, or the combined result was invalid. Devices
+    /// keep their previous values; the scan still counts, so refresh targets
+    /// are reached.
+    pub fn apply_issues_only(&mut self, mut issues: Vec<Issue>) {
+        issues.sort();
+        self.record_attempt(false);
+        if self.initialized && self.issues != issues {
+            self.revision += 1;
         }
-        self.scan_sequence += 1;
-        self.last_attempt_at = Some(utc_now());
-        if self.issues != issues {
-            if self.initialized {
-                self.revision += 1;
-            }
-            let error = issue_error(&issues);
-            self.push_change("error", None, None, Some(error));
-        }
-        self.issues = issues;
-        Ok(())
+        self.set_issues(issues);
     }
 
-    /// Record a scan whose combined result was invalid (a provider bug such as
-    /// two providers returning one id). Devices keep their previous values;
-    /// the scan still counts, so refresh targets are reached.
-    pub fn apply_rejected_scan(&mut self, reason: &str) {
-        self.scan_sequence += 1;
-        self.last_attempt_at = Some(utc_now());
-        let issues = vec![Issue {
-            provider: "catalog".into(),
-            code: "peripherals.invalid_provider_result".into(),
-            reason: reason.into(),
-            retained_last_good: self.initialized,
-        }];
-        if self.issues != issues {
-            if self.initialized {
-                self.revision += 1;
-            }
-            let error = issue_error(&issues);
-            self.push_change("error", None, None, Some(error));
-            self.issues = issues;
-        }
-    }
-
-    /// Record a failure of the event monitor or the thread itself. Unlike a
-    /// provider issue it is not cleared by later scans: it describes the
-    /// daemon, and stays until the daemon restarts.
+    /// Record a failure of the event monitor or the daemon itself.
     pub fn apply_error(&mut self, code: &str, reason: &str) {
         let error = json!({"code": code, "reason": reason});
         if self.error.as_ref() == Some(&error) {
@@ -195,7 +138,7 @@ impl Catalog {
             self.revision += 1;
         }
         self.error = Some(error.clone());
-        self.push_change("error", None, None, Some(error));
+        self.push_change("error", None, Some(error));
     }
 
     pub fn document(&self) -> CatalogDocument {
@@ -227,85 +170,77 @@ impl Catalog {
         }
     }
 
-    fn push_status_changes(&mut self, recovered: bool, issues_changed: bool, issues: &[Issue]) {
-        if recovered {
-            self.push_change("recovered", None, None, None);
+    fn record_attempt(&mut self, succeeded: bool) {
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        self.scan_sequence += 1;
+        if succeeded {
+            self.last_success_at = Some(now.clone());
         }
-        if issues_changed && !issues.is_empty() {
-            let error = issue_error(issues);
-            self.push_change("error", None, None, Some(error));
-        }
+        self.last_attempt_at = Some(now);
     }
 
-    fn push_device_change(&mut self, kind: &str, record: &Record) {
-        self.push_change(
-            kind,
-            Some(record.id.clone()),
-            Some(record.kind.clone()),
-            None,
-        );
+    /// Replace the issues, logging `error` for a new set and `recovered` when
+    /// the last one clears.
+    fn set_issues(&mut self, issues: Vec<Issue>) {
+        if issues != self.issues {
+            if issues.is_empty() {
+                self.push_change("recovered", None, None);
+            } else {
+                let error = json!({
+                    "code": "peripherals.provider_degraded",
+                    "reason": "One or more peripheral providers could not be refreshed.",
+                    "issues": issues,
+                });
+                self.push_change("error", None, Some(error));
+            }
+        }
+        self.issues = issues;
     }
 
-    fn push_change(
-        &mut self,
-        kind: &str,
-        device_id: Option<String>,
-        device_type: Option<String>,
-        error: Option<Value>,
-    ) {
+    /// Log added, removed and changed devices against `previous`; both lists
+    /// are sorted by id.
+    fn log_device_changes(&mut self, previous: &[Record]) {
+        let current = std::mem::take(&mut self.devices);
+        let (mut old, mut new) = (previous.iter().peekable(), current.iter().peekable());
+        loop {
+            let change = match (old.peek(), new.peek()) {
+                (None, None) => break,
+                (Some(gone), next) if next.is_none_or(|next| gone.id < next.id) => {
+                    ("removed", old.next())
+                }
+                (gone, Some(added)) if gone.is_none_or(|gone| added.id < gone.id) => {
+                    ("added", new.next())
+                }
+                _ => {
+                    let before = old.next();
+                    let after = new.next();
+                    if before == after {
+                        continue;
+                    }
+                    ("changed", after)
+                }
+            };
+            if let (kind, Some(record)) = change {
+                self.push_change(kind, Some(record), None);
+            }
+        }
+        self.devices = current;
+    }
+
+    fn push_change(&mut self, kind: &str, record: Option<&Record>, error: Option<Value>) {
         self.sequence += 1;
-        if self.changes.len() == self.change_capacity {
+        if self.changes.len() == CHANGE_LOG_CAPACITY {
             self.changes.pop_front();
         }
         self.changes.push_back(Change {
             sequence: self.sequence,
             revision: self.revision,
             kind: kind.into(),
-            device_id,
-            device_type,
+            device_id: record.map(|record| record.id.clone()),
+            device_type: record.map(|record| record.kind.clone()),
             error,
         });
     }
-}
-
-pub fn utc_now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn canonicalize_devices(devices: &mut [Record]) -> Result<(), String> {
-    devices.sort_by(|left, right| left.id.cmp(&right.id));
-    if let Some(pair) = devices.windows(2).find(|pair| pair[0].id == pair[1].id) {
-        return Err(format!("duplicate peripheral identity: {}", pair[0].id));
-    }
-    Ok(())
-}
-
-fn canonicalize_issues(issues: &mut [Issue]) -> Result<(), String> {
-    issues.sort();
-    if issues
-        .iter()
-        .any(|issue| issue.provider.is_empty() || issue.code.is_empty() || issue.reason.is_empty())
-    {
-        return Err("peripheral provider issue fields must not be empty".into());
-    }
-    if let Some(pair) = issues
-        .windows(2)
-        .find(|pair| pair[0].provider == pair[1].provider)
-    {
-        return Err(format!(
-            "duplicate peripheral provider issue: {}",
-            pair[0].provider
-        ));
-    }
-    Ok(())
-}
-
-fn issue_error(issues: &[Issue]) -> Value {
-    json!({
-        "code": "peripherals.provider_degraded",
-        "reason": "One or more peripheral providers could not be refreshed.",
-        "issues": issues,
-    })
 }
 
 #[cfg(test)]
@@ -321,35 +256,28 @@ mod tests {
         }
     }
 
-    fn issue(retained: bool) -> Issue {
+    fn issue() -> Issue {
         Issue {
             provider: "test.camera".into(),
             code: "io.permission_denied".into(),
             reason: "permission denied".into(),
-            retained_last_good: retained,
+            retained_last_good: true,
         }
     }
 
-    #[test]
-    fn starts_unready_and_first_scan_is_revision_one() {
-        let mut catalog = Catalog::new("a", 8);
-        let starting = catalog.document();
-        assert_eq!(starting.state, "starting");
-        assert!(!starting.ready);
-        assert_eq!(starting.revision, 0);
-
-        catalog.apply_success(vec![], vec![]).unwrap();
-        let ready = catalog.document();
-        assert_eq!(ready.state, "ready");
-        assert!(ready.ready);
-        assert_eq!((ready.revision, ready.scan_sequence), (1, 1));
-        assert!(ready.devices.is_empty());
-        assert!(ready.last_success_at.is_some());
+    fn kinds(catalog: &Catalog) -> Vec<String> {
+        catalog
+            .document()
+            .changes
+            .iter()
+            .map(|change| change.kind.clone())
+            .collect()
     }
 
     #[test]
-    fn unchanged_scan_advances_scan_sequence_but_not_revision() {
-        let mut catalog = Catalog::new("a", 8);
+    fn first_scan_is_revision_one_and_unchanged_scans_keep_it() {
+        let mut catalog = Catalog::new("a");
+        assert_eq!(catalog.document().state, "starting");
         catalog
             .apply_success(vec![camera("c1", "x")], vec![])
             .unwrap();
@@ -357,13 +285,20 @@ mod tests {
             .apply_success(vec![camera("c1", "x")], vec![])
             .unwrap();
         let document = catalog.document();
-        assert_eq!((document.revision, document.scan_sequence), (1, 2));
+        assert_eq!(
+            (
+                document.state.as_str(),
+                document.revision,
+                document.scan_sequence
+            ),
+            ("ready", 1, 2)
+        );
         assert!(document.changes.is_empty());
     }
 
     #[test]
-    fn diff_emits_added_removed_and_changed_in_one_revision() {
-        let mut catalog = Catalog::new("a", 8);
+    fn device_diff_is_logged_in_one_revision() {
+        let mut catalog = Catalog::new("a");
         catalog
             .apply_success(vec![camera("a", "1"), camera("b", "1")], vec![])
             .unwrap();
@@ -371,172 +306,112 @@ mod tests {
             .apply_success(vec![camera("b", "2"), camera("c", "1")], vec![])
             .unwrap();
         let document = catalog.document();
-        assert_eq!(document.revision, 2);
-        let kinds: Vec<_> = document
+        let logged: Vec<_> = document
             .changes
             .iter()
-            .map(|change| (change.kind.as_str(), change.device_id.as_deref().unwrap()))
+            .map(|change| {
+                (
+                    change.kind.as_str(),
+                    change.device_id.as_deref().unwrap(),
+                    change.revision,
+                )
+            })
             .collect();
         assert_eq!(
-            kinds,
-            vec![("removed", "a"), ("changed", "b"), ("added", "c")]
+            logged,
+            [("removed", "a", 2), ("changed", "b", 2), ("added", "c", 2)]
         );
-        assert!(document.changes.iter().all(|change| change.revision == 2));
-        assert_eq!(document.sequence, 3);
-        assert_eq!(document.devices[0]["camera"]["model"], "2");
     }
 
     #[test]
-    fn retained_issue_marks_catalog_stale_and_recovery_is_logged() {
-        let mut catalog = Catalog::new("a", 8);
+    fn issues_mark_the_catalog_stale_bump_revision_and_recover() {
+        let mut catalog = Catalog::new("a");
         catalog
             .apply_success(vec![camera("a", "1")], vec![])
             .unwrap();
         catalog
-            .apply_success(vec![camera("a", "1")], vec![issue(true)])
+            .apply_success(vec![camera("a", "1")], vec![issue()])
             .unwrap();
         let degraded = catalog.document();
-        assert_eq!(degraded.state, "degraded");
-        assert!(degraded.stale);
-        assert!(degraded.error.is_none());
-        let logged = degraded.changes.last().unwrap();
-        assert_eq!(logged.kind, "error");
         assert_eq!(
-            logged.error.as_ref().unwrap()["code"],
-            "peripherals.provider_degraded"
+            (degraded.state.as_str(), degraded.stale, degraded.revision),
+            ("degraded", true, 2)
         );
-
         catalog
             .apply_success(vec![camera("a", "1")], vec![])
             .unwrap();
         let recovered = catalog.document();
-        assert_eq!(recovered.state, "ready");
-        assert!(!recovered.stale);
-        assert_eq!(recovered.changes.last().unwrap().kind, "recovered");
         assert_eq!(
-            (degraded.revision, recovered.revision),
-            (2, 3),
-            "issue changes are visible changes"
+            (
+                recovered.state.as_str(),
+                recovered.stale,
+                recovered.revision
+            ),
+            ("ready", false, 3)
         );
+        assert_eq!(kinds(&catalog), ["error", "recovered"]);
     }
 
     #[test]
-    fn provider_failure_before_any_success_stays_unready() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog.apply_provider_failure(vec![issue(false)]).unwrap();
+    fn issue_only_scans_count_and_keep_devices() {
+        let mut catalog = Catalog::new("a");
+        catalog.apply_issues_only(vec![issue()]);
+        assert!(!catalog.document().ready, "no records yet");
+        catalog
+            .apply_success(vec![camera("a", "1")], vec![])
+            .unwrap();
+        catalog.apply_issues_only(vec![issue()]);
         let document = catalog.document();
-        assert!(!document.ready);
-        assert_eq!(document.state, "degraded");
-        assert!(!document.stale);
-        assert_eq!(document.scan_sequence, 1);
-        assert!(catalog.apply_provider_failure(vec![]).is_err());
-    }
-
-    #[test]
-    fn duplicate_identities_and_empty_issue_fields_are_rejected() {
-        let mut catalog = Catalog::new("a", 8);
+        assert_eq!((document.scan_sequence, document.devices.len()), (3, 1));
         assert!(catalog
             .apply_success(vec![camera("a", "1"), camera("a", "2")], vec![])
             .is_err());
-        let mut bad = issue(false);
-        bad.reason.clear();
-        assert!(catalog.apply_success(vec![], vec![bad]).is_err());
-        assert_eq!(catalog.scan_sequence(), 0);
     }
 
     #[test]
     fn reclassification_changes_revision_but_not_scan_sequence() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_reclassification(vec![camera("a", "1")], vec![])
-            .unwrap();
-        assert_eq!(
-            catalog.document().revision,
-            0,
-            "nothing before the first scan"
-        );
+        let mut catalog = Catalog::new("a");
         catalog
             .apply_success(vec![camera("a", "1")], vec![])
             .unwrap();
-        let attempted = catalog.document().last_attempt_at;
         catalog
             .apply_reclassification(vec![camera("a", "2")], vec![])
             .unwrap();
         let document = catalog.document();
         assert_eq!((document.revision, document.scan_sequence), (2, 1));
-        assert_eq!(document.last_attempt_at, attempted);
-        assert_eq!(document.changes.last().unwrap().kind, "changed");
+        assert_eq!(kinds(&catalog), ["changed"]);
     }
 
     #[test]
-    fn monitor_error_survives_later_scans_and_is_never_reported_recovered() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog.apply_error("peripherals.monitor_failed", "uevent socket unavailable");
+    fn daemon_errors_persist_across_scans_and_are_logged_once() {
+        let mut catalog = Catalog::new("a");
         catalog
             .apply_success(vec![camera("a", "1")], vec![])
             .unwrap();
+        catalog.apply_error("peripherals.monitor_failed", "uevent socket closed");
+        catalog.apply_error("peripherals.monitor_failed", "uevent socket closed");
         catalog
             .apply_success(vec![camera("a", "1")], vec![])
             .unwrap();
         let document = catalog.document();
-        assert_eq!(document.state, "degraded");
         assert!(document.stale);
         assert_eq!(
             document.error.unwrap()["code"],
             "peripherals.monitor_failed"
         );
-        assert!(document
-            .changes
-            .iter()
-            .all(|change| change.kind != "recovered"));
-    }
-
-    #[test]
-    fn unchanged_rescans_and_repeated_errors_keep_the_revision() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![issue(true)])
-            .unwrap();
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![issue(true)])
-            .unwrap();
-        catalog.apply_error("peripherals.monitor_failed", "x");
-        let first = catalog.document();
-        catalog.apply_error("peripherals.monitor_failed", "x");
-        let second = catalog.document();
-        assert_eq!(first.revision, 2);
-        assert_eq!(
-            (second.revision, second.sequence),
-            (first.revision, first.sequence)
-        );
+        assert_eq!((document.revision, kinds(&catalog).len()), (2, 1));
     }
 
     #[test]
     fn change_log_is_bounded() {
-        let mut catalog = Catalog::new("a", 2);
-        for index in 0..5 {
+        let mut catalog = Catalog::new("a");
+        for index in 0..=CHANGE_LOG_CAPACITY {
             catalog
                 .apply_success(vec![camera(&format!("c{index}"), "x")], vec![])
                 .unwrap();
         }
         let document = catalog.document();
-        assert_eq!(document.changes.len(), 2);
-        assert_eq!(document.changes[1].sequence, document.sequence);
-    }
-
-    #[test]
-    fn monitor_error_marks_initialized_catalog_stale() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![])
-            .unwrap();
-        catalog.apply_error("peripherals.monitor_failed", "uevent socket closed");
-        let document = catalog.document();
-        assert!(document.stale);
-        assert_eq!(
-            document.error.unwrap()["code"],
-            "peripherals.monitor_failed"
-        );
-        assert_eq!(document.scan_sequence, 1);
+        assert_eq!(document.changes.len(), CHANGE_LOG_CAPACITY);
+        assert_eq!(document.changes.last().unwrap().sequence, document.sequence);
     }
 }

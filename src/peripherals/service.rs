@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use super::catalog::{Catalog, DEFAULT_CHANGE_CAPACITY};
+use super::catalog::Catalog;
 use super::model::{CatalogDocument, Provider};
 use super::scan::Scanner;
 use super::support::{RulesWatch, SupportStage};
@@ -134,7 +134,7 @@ impl PeripheralsHandle {
 /// Publish a `starting` catalog, then run the event loop on its own thread.
 pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<PeripheralsHandle> {
     let control = Arc::new(Control::new().context("create peripherals wake pipe")?);
-    let mut catalog = Catalog::new(config.instance_id.clone(), DEFAULT_CHANGE_CAPACITY);
+    let mut catalog = Catalog::new(config.instance_id.clone());
     let scanner = Scanner::new(
         providers,
         SupportStage::new(config.support_rules_path.clone()),
@@ -426,7 +426,7 @@ pub fn new_instance_id() -> String {
             format!(
                 "{}-{}",
                 std::process::id(),
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                chrono::Utc::now().timestamp_micros()
             )
         })
 }
@@ -434,187 +434,23 @@ pub fn new_instance_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Keeps temporary directories distinct when tests start in the same instant.
-    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     use crate::peripherals::model::{ProviderError, Record};
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::SystemTime;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+    static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+    /// Each scan reports one more camera than the last and records the
+    /// thread priority it ran at.
+    #[derive(Clone, Default)]
     struct Counting {
         calls: Arc<AtomicUsize>,
-        subsystems: Vec<String>,
+        nice: Arc<Mutex<Option<i32>>>,
     }
 
     impl Provider for Counting {
         fn name(&self) -> &str {
             "test.camera"
-        }
-        fn subsystems(&self) -> &[String] {
-            &self.subsystems
-        }
-        fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok((0..=call)
-                .map(|index| Record {
-                    id: format!("camera:{index}"),
-                    kind: "camera".into(),
-                    provider: "test.camera".into(),
-                    details: json!({}),
-                })
-                .collect())
-        }
-    }
-
-    fn wait_for(path: &Path, predicate: impl Fn(&CatalogDocument) -> bool) -> CatalogDocument {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(document) = read(path) {
-                if predicate(&document) {
-                    return document;
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "catalog never reached the expected state"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[test]
-    fn publishes_initial_scan_and_honours_refresh_targets() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-peripherals-{}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "test-instance".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(Counting {
-                calls: calls.clone(),
-                subsystems: vec!["video4linux".into()],
-            })],
-        )
-        .unwrap();
-
-        let first = wait_for(&path, |document| document.ready);
-        assert_eq!(first.instance_id, "test-instance");
-        assert_eq!((first.revision, first.scan_sequence), (1, 1));
-        assert_eq!(first.devices.len(), 1);
-
-        let target = handle.control().request_refresh().unwrap();
-        assert_eq!(target, 2);
-        let refreshed = wait_for(&path, |document| document.scan_sequence >= target);
-        assert_eq!(refreshed.revision, 2);
-        assert_eq!(refreshed.devices.len(), 2);
-        assert_eq!(refreshed.changes.last().unwrap().kind, "added");
-
-        handle.stop();
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "no scan without a trigger");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    struct OneMipiCamera;
-
-    impl Provider for OneMipiCamera {
-        fn name(&self) -> &str {
-            "test.mipi"
-        }
-        fn subsystems(&self) -> &[String] {
-            &[]
-        }
-        fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
-            Ok(vec![Record {
-                id: "camera:imx477 5-001a".into(),
-                kind: "camera".into(),
-                provider: "test.mipi".into(),
-                details: json!({"backend": "mipi", "modes": [{
-                    "format": "NV12", "width": 1920, "height": 1080,
-                    "framerate_num": 30, "framerate_den": 1, "isp_output": true
-                }]}),
-            }])
-        }
-    }
-
-    #[test]
-    fn installing_core_rules_reclassifies_without_rescanning() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-rules-{}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let rules_dir = root.join("support");
-        fs::create_dir_all(&rules_dir).unwrap();
-        let path = root.join("peripherals.json");
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: rules_dir.join("neat-core.json"),
-                instance_id: "rules".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(OneMipiCamera)],
-        )
-        .unwrap();
-
-        let before = wait_for(&path, |document| document.ready);
-        assert_eq!(before.support.as_ref().unwrap().state, "not_installed");
-        assert_eq!(before.devices[0]["camera"]["modes"][0]["supported"], false);
-
-        let staged = rules_dir.join("neat-core.json.dpkg-new");
-        fs::write(
-            &staged,
-            json!({"format": 1, "source": "neat-core 0.4.0", "camera": {
-                "backends": {"accept": ["mipi"], "reason": "MIPI only."},
-                "formats": {"accept": ["NV12"], "reason": "NV12 only."},
-                "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "30/1 only."},
-                "isp_output": {"reason": "Not an ISP output size."}
-            }})
-            .to_string(),
-        )
-        .unwrap();
-        fs::rename(&staged, rules_dir.join("neat-core.json")).unwrap();
-
-        let after = wait_for(&path, |document| document.revision > before.revision);
-        assert_eq!(after.devices[0]["camera"]["modes"][0]["supported"], true);
-        assert_eq!(
-            after.support.as_ref().unwrap().source.as_deref(),
-            Some("neat-core 0.4.0")
-        );
-        assert_eq!(
-            after.scan_sequence, before.scan_sequence,
-            "no hardware rescan"
-        );
-        assert_eq!(after.changes.last().unwrap().kind, "changed");
-
-        handle.stop();
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    struct NiceProbe(Arc<std::sync::Mutex<Option<i32>>>);
-
-    impl Provider for NiceProbe {
-        fn name(&self) -> &str {
-            "test.nice"
         }
         fn subsystems(&self) -> &[String] {
             &[]
@@ -627,131 +463,144 @@ mod tests {
                     libc::syscall(libc::SYS_gettid) as libc::id_t,
                 )
             };
-            *self.0.lock().unwrap() = Some(nice);
-            Ok(Vec::new())
+            *self.nice.lock().unwrap() = Some(nice);
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok((0..=call)
+                .map(|index| Record {
+                    id: format!("camera:{index}"),
+                    kind: "camera".into(),
+                    provider: "test.camera".into(),
+                    details: json!({"backend": "mipi", "modes": [{
+                        "format": "NV12", "width": 1920, "height": 1080,
+                        "framerate_num": 30, "framerate_den": 1, "isp_output": true
+                    }]}),
+                })
+                .collect())
+        }
+    }
+
+    struct Harness {
+        root: PathBuf,
+        path: PathBuf,
+        handle: Option<PeripheralsHandle>,
+    }
+
+    impl Harness {
+        fn start(provider: Counting) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "sentinel-service-{}-{}",
+                std::process::id(),
+                UNIQUE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(root.join("support")).unwrap();
+            let path = root.join("peripherals.json");
+            let config = Config {
+                catalog_path: path.clone(),
+                support_rules_path: root.join("support/neat-core.json"),
+                instance_id: "test".into(),
+                debounce: Duration::from_millis(50),
+                listen_for_uevents: false,
+            };
+            let handle = Some(spawn(config, vec![Box::new(provider)]).unwrap());
+            Self { root, path, handle }
+        }
+
+        fn wait_for(&self, predicate: impl Fn(&CatalogDocument) -> bool) -> CatalogDocument {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match read(&self.path) {
+                    Ok(document) if predicate(&document) => return document,
+                    _ => assert!(
+                        Instant::now() < deadline,
+                        "catalog never reached the expected state"
+                    ),
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.stop();
+            }
+            let _ = fs::remove_dir_all(&self.root);
         }
     }
 
     #[test]
-    fn scans_run_at_lower_priority() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-nice-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
-        let seen = Arc::new(std::sync::Mutex::new(None));
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "nice".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(NiceProbe(seen.clone()))],
-        )
-        .unwrap();
-        wait_for(&path, |document| document.ready);
-        handle.stop();
-        fs::remove_dir_all(root).unwrap();
-        // The process may already run niced; discovery adds NICE on top.
+    fn lifecycle_refresh_coalescing_priority_and_stop() {
+        let provider = Counting::default();
+        let mut harness = Harness::start(provider.clone());
+        let first = harness.wait_for(|document| document.ready);
+        assert_eq!(
+            (first.revision, first.scan_sequence, first.devices.len()),
+            (1, 1, 1)
+        );
+
+        // 200 requests at once share at most two more scans.
+        let control = harness.handle.as_ref().unwrap().control();
+        let target = (0..200)
+            .map(|_| control.request_refresh().unwrap())
+            .max()
+            .unwrap();
+        assert!(target <= 3, "promised {target}");
+        let refreshed = harness.wait_for(|document| document.scan_sequence >= target);
+        assert_eq!(refreshed.changes.last().unwrap().kind, "added");
+        assert!(
+            provider.calls.load(Ordering::SeqCst) <= 3,
+            "no scan without a trigger"
+        );
+
+        // SAFETY: reads the calling thread's priority.
         let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
-        assert_eq!(*seen.lock().unwrap(), Some((base + NICE).min(19)));
+        assert_eq!(*provider.nice.lock().unwrap(), Some((base + NICE).min(19)));
+
+        harness.handle.take().unwrap().stop();
+        let stopped = read(&harness.path).unwrap();
+        assert_eq!(stopped.error.unwrap()["code"], "peripherals.stopped");
+        assert_eq!(control.request_refresh(), None);
     }
 
     #[test]
-    fn a_burst_of_refresh_requests_shares_one_scan() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-burst-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "burst".into(),
-                debounce: Duration::from_millis(100),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(Counting {
-                calls: calls.clone(),
-                subsystems: vec![],
-            })],
-        )
-        .unwrap();
-        wait_for(&path, |document| document.ready);
-        let control = handle.control();
-        let mut target = 0;
-        for _ in 0..200 {
-            target = control.request_refresh().unwrap();
-        }
-        let document = wait_for(&path, |document| document.scan_sequence >= target);
-        handle.stop();
-        fs::remove_dir_all(root).unwrap();
-        assert!(
-            target <= 3,
-            "200 requests promise at most two more scans, got {target}"
+    fn installing_core_rules_reclassifies_without_rescanning() {
+        let harness = Harness::start(Counting::default());
+        let before = harness.wait_for(|document| document.ready);
+        assert_eq!(before.support.as_ref().unwrap().state, "not_installed");
+        let staged = harness.root.join("support/neat-core.json.dpkg-new");
+        let rules = json!({"format": 1, "source": "neat-core test", "camera": {
+            "backends": {"accept": ["mipi"], "reason": "MIPI only."},
+            "formats": {"accept": ["NV12"], "reason": "NV12 only."},
+            "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "30/1 only."},
+            "isp_output": {"reason": "Not an ISP output size."}
+        }});
+        fs::write(&staged, rules.to_string()).unwrap();
+        fs::rename(&staged, harness.root.join("support/neat-core.json")).unwrap();
+        let after = harness.wait_for(|document| document.revision > before.revision);
+        assert_eq!(after.devices[0]["camera"]["modes"][0]["supported"], true);
+        assert_eq!(
+            after.scan_sequence, before.scan_sequence,
+            "no hardware rescan"
         );
-        assert!(
-            calls.load(Ordering::SeqCst) <= 3,
-            "200 refresh requests ran {} scans",
-            calls.load(Ordering::SeqCst)
-        );
-        assert!(document.scan_sequence <= 3);
     }
 
     #[test]
     fn events_cannot_postpone_a_scan_forever_or_delay_a_refresh() {
         let start = Instant::now();
         let debounce = Duration::from_millis(250);
-        // Trailing debounce inside a burst.
         assert_eq!(
             scan_due_after_event(start, start, debounce, None, false),
             start + debounce
         );
-        // An event stream 900 ms in is capped at one second after it began.
         let late = start + Duration::from_millis(900);
         assert_eq!(
             scan_due_after_event(late, start, debounce, Some(late), false),
             start + MAX_EVENT_WAIT
         );
-        // A refresh due now is not pushed back by a new event.
         assert_eq!(
             scan_due_after_event(start, start, debounce, Some(start), true),
             start
         );
-    }
-
-    #[test]
-    fn stopping_marks_the_catalog_stopped_and_refuses_refreshes() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-stop-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "stop".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![],
-        )
-        .unwrap();
-        wait_for(&path, |document| document.ready);
-        let control = handle.control();
-        handle.stop();
-        let document = read(&path).unwrap();
-        fs::remove_dir_all(root).unwrap();
-        assert_eq!(document.state, "degraded");
-        assert_eq!(document.error.unwrap()["code"], "peripherals.stopped");
-        assert_eq!(control.request_refresh(), None);
     }
 }

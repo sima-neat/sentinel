@@ -561,28 +561,18 @@ mod tests {
 
     #[test]
     fn peripheral_catalog_is_served_as_written() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-api-peripherals-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("sentinel-api-peripherals-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let catalog_path = root.join("peripherals.json");
-        let mut catalog = crate::peripherals::catalog::Catalog::new("instance-a", 8);
-        catalog
-            .apply_success(
-                vec![crate::peripherals::model::Record {
-                    id: "camera:imx477 5-001a".into(),
-                    kind: "camera".into(),
-                    provider: "daemon.camera.mipi".into(),
-                    details: json!({"modes": []}),
-                }],
-                vec![],
-            )
-            .unwrap();
+        let mut catalog = crate::peripherals::catalog::Catalog::new("instance-a");
+        let camera = crate::peripherals::model::Record {
+            id: "camera:imx477 5-001a".into(),
+            kind: "camera".into(),
+            provider: "daemon.camera.mipi".into(),
+            details: json!({}),
+        };
+        catalog.apply_success(vec![camera], vec![]).unwrap();
         crate::peripherals::service::publish(&catalog_path, &catalog.document()).unwrap();
         let socket_path = root.join("api.sock");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -598,39 +588,35 @@ mod tests {
         )
         .unwrap();
 
-        let full = request(
-            &socket_path,
-            "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        let get = |query: &str| {
+            let response = request(
+                &socket_path,
+                &format!("GET /v1/peripherals{query} HTTP/1.1\r\nHost: x\r\n\r\n"),
+            );
+            let (head, body) = response.split_once("\r\n\r\n").unwrap().to_owned();
+            (head.to_string(), body.to_string())
+        };
+        assert_eq!(
+            get("").1.as_bytes(),
+            fs::read(&catalog_path).unwrap(),
+            "served as written"
         );
-        let body = full.split_once("\r\n\r\n").unwrap().1;
-        assert_eq!(body.as_bytes(), fs::read(&catalog_path).unwrap());
-
-        let current = response_json(&request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=1&instance_id=instance-a HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
-        assert_eq!(current["unchanged"], true);
-        let other_instance = response_json(&request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=1&instance_id=instance-b HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
-        assert_eq!(other_instance["devices"][0]["id"], "camera:imx477 5-001a");
-        let invalid = request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=x HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        );
-        assert!(invalid.starts_with("HTTP/1.1 400"));
-        let no_instance = request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        );
-        assert!(no_instance.starts_with("HTTP/1.1 400"), "{no_instance}");
-        let refresh = request(
-            &socket_path,
-            "POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-        );
+        assert!(get("?since_revision=1&instance_id=instance-a")
+            .1
+            .contains("\"unchanged\": true"));
         assert!(
-            refresh.starts_with("HTTP/1.1 503"),
+            get("?since_revision=1&instance_id=instance-b")
+                .1
+                .contains("imx477"),
+            "restarted daemon"
+        );
+        for invalid in ["?since_revision=x", "?since_revision=1"] {
+            assert!(get(invalid).0.starts_with("HTTP/1.1 400"), "{invalid}");
+        }
+        let refresh =
+            "POST /v1/peripherals/refresh HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n";
+        assert!(
+            request(&socket_path, refresh).starts_with("HTTP/1.1 503"),
             "no control, no refresh"
         );
 

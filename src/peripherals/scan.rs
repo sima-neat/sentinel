@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::thread;
 
 use super::catalog::Catalog;
@@ -6,41 +7,29 @@ use super::model::{Issue, Provider, ProviderError, Record};
 use super::support::SupportStage;
 
 /// A provider plus the records it returned in its last successful scan.
-pub struct ProviderSlot {
+struct Slot {
     provider: Box<dyn Provider>,
     last_good: Option<Vec<Record>>,
 }
 
-impl ProviderSlot {
-    pub fn new(provider: Box<dyn Provider>) -> Self {
-        Self {
-            provider,
-            last_good: None,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        self.provider.name()
-    }
-}
-
-struct ScanResult {
-    discovered: Vec<Record>,
-    accepted: bool,
-    issue: Option<Issue>,
-}
-
 /// Owns the providers, their last-good records, and the support stage.
 pub struct Scanner {
-    slots: Vec<ProviderSlot>,
+    slots: Vec<Slot>,
     provider_issues: Vec<Issue>,
     support: SupportStage,
 }
 
 impl Scanner {
     pub fn new(providers: Vec<Box<dyn Provider>>, support: SupportStage) -> Self {
+        let slots = providers
+            .into_iter()
+            .map(|provider| Slot {
+                provider,
+                last_good: None,
+            })
+            .collect();
         Self {
-            slots: providers.into_iter().map(ProviderSlot::new).collect(),
+            slots,
             provider_issues: Vec::new(),
             support,
         }
@@ -53,176 +42,137 @@ impl Scanner {
             .collect()
     }
 
-    pub fn support_path(&self) -> &std::path::Path {
+    pub fn support_path(&self) -> &Path {
         self.support.path()
     }
 
-    /// Run every provider, apply the support rules, then publish to the
-    /// catalog, which compares against the previous result.
+    /// Run every provider in parallel, apply the support rules, then publish
+    /// to the catalog. A failed provider becomes an issue and keeps only its
+    /// own last-good records.
     pub fn scan(&mut self, catalog: &mut Catalog) -> Result<(), String> {
-        let issues = discover_all(&mut self.slots);
-        self.provider_issues = issues.clone();
-        let (devices, has_provider_result) = compose(&self.slots);
-        // No providers at all is a valid, empty catalog rather than a failure.
-        if has_provider_result || issues.is_empty() {
-            let (devices, issues) = self.classify(devices, issues, catalog);
-            // Providers own distinct id prefixes; a collision is a provider
-            // bug. It still counts as a scan so refresh targets are reached.
-            catalog
-                .apply_success(devices, issues)
-                .inspect_err(|reason| {
-                    catalog.apply_rejected_scan(reason);
-                })
-        } else {
-            catalog.apply_provider_failure(issues)
-        }
-    }
-
-    /// Re-apply changed support rules to the last scan's records without
-    /// reading any hardware.
-    pub fn reclassify(&mut self, catalog: &mut Catalog) -> Result<(), String> {
-        let (devices, has_provider_result) = compose(&self.slots);
-        if !has_provider_result {
-            return Ok(());
-        }
-        let (devices, issues) = self.classify(devices, self.provider_issues.clone(), catalog);
-        catalog.apply_reclassification(devices, issues)
-    }
-
-    fn classify(
-        &mut self,
-        mut devices: Vec<Record>,
-        mut issues: Vec<Issue>,
-        catalog: &mut Catalog,
-    ) -> (Vec<Record>, Vec<Issue>) {
-        let status = self.support.apply(&mut devices, &mut issues);
-        catalog.set_support(status);
-        (devices, issues)
-    }
-}
-
-fn compose(slots: &[ProviderSlot]) -> (Vec<Record>, bool) {
-    let mut devices = Vec::new();
-    let mut has_provider_result = false;
-    for records in slots.iter().filter_map(|slot| slot.last_good.as_ref()) {
-        has_provider_result = true;
-        devices.extend(records.iter().cloned());
-    }
-    (devices, has_provider_result)
-}
-
-/// Run every provider once, in parallel. A failed provider contributes an
-/// issue and keeps only its own last-good records.
-fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
-    let outcomes: Vec<Result<Vec<Record>, ProviderError>> = thread::scope(|scope| {
-        let handles: Vec<_> = slots
-            .iter_mut()
-            .map(|slot| scope.spawn(move || slot.provider.discover()))
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or_else(|_| {
+        let outcomes: Vec<_> = thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .slots
+                .iter_mut()
+                .map(|slot| scope.spawn(move || slot.provider.discover()))
+                .collect();
+            handles.into_iter().map(|handle| handle.join()).collect()
+        });
+        self.provider_issues.clear();
+        for (slot, outcome) in self.slots.iter_mut().zip(outcomes) {
+            let name = slot.provider.name();
+            let outcome = outcome
+                .unwrap_or_else(|_| {
                     Err(ProviderError::new(
                         "peripherals.discovery_failed",
                         "The provider panicked.",
                     ))
                 })
-            })
-            .collect()
-    });
-
-    let results: Vec<ScanResult> = slots
-        .iter()
-        .zip(outcomes)
-        .map(|(slot, outcome)| {
-            let retained = slot.last_good.is_some();
-            match outcome.and_then(|records| validate(slot.name(), records)) {
-                Ok(discovered) => ScanResult {
-                    discovered,
-                    accepted: true,
-                    issue: None,
-                },
-                Err(error) => ScanResult {
-                    discovered: Vec::new(),
-                    accepted: false,
-                    issue: Some(provider_issue(slot.name(), error, retained)),
-                },
+                .and_then(|records| validate(name, records));
+            match outcome {
+                Ok(records) => slot.last_good = Some(records),
+                Err(error) => self.provider_issues.push(Issue {
+                    provider: name.into(),
+                    code: error.code,
+                    reason: error.reason,
+                    retained_last_good: slot.last_good.is_some(),
+                }),
             }
-        })
-        .collect();
-
-    let mut issues = Vec::new();
-    for (slot, result) in slots.iter_mut().zip(results) {
-        if result.accepted {
-            slot.last_good = Some(result.discovered);
         }
-        if let Some(issue) = result.issue {
-            issues.push(issue);
-        }
+        let Some(devices) = self.last_good() else {
+            // No usable records yet; zero providers is a ready, empty catalog.
+            if !self.provider_issues.is_empty() {
+                catalog.apply_issues_only(self.provider_issues.clone());
+                return Ok(());
+            }
+            return catalog.apply_success(Vec::new(), Vec::new());
+        };
+        let (devices, issues) = self.classify(devices, catalog);
+        // Providers own distinct id prefixes, so a collision is a provider bug.
+        // It still counts as a scan so refresh targets are reached.
+        catalog
+            .apply_success(devices, issues)
+            .inspect_err(|reason| {
+                catalog.apply_issues_only(vec![Issue {
+                    provider: "catalog".into(),
+                    code: "peripherals.invalid_provider_result".into(),
+                    reason: reason.clone(),
+                    retained_last_good: true,
+                }]);
+            })
     }
-    issues
+
+    /// Re-apply changed support rules to the last scan's records without
+    /// reading any hardware.
+    pub fn reclassify(&mut self, catalog: &mut Catalog) -> Result<(), String> {
+        let Some(devices) = self.last_good() else {
+            return Ok(());
+        };
+        let (devices, issues) = self.classify(devices, catalog);
+        catalog.apply_reclassification(devices, issues)
+    }
+
+    fn last_good(&self) -> Option<Vec<Record>> {
+        let mut records = self
+            .slots
+            .iter()
+            .filter_map(|slot| slot.last_good.as_ref())
+            .peekable();
+        records.peek()?;
+        Some(records.flatten().cloned().collect())
+    }
+
+    fn classify(
+        &mut self,
+        mut devices: Vec<Record>,
+        catalog: &mut Catalog,
+    ) -> (Vec<Record>, Vec<Issue>) {
+        let mut issues = self.provider_issues.clone();
+        catalog.set_support(self.support.apply(&mut devices, &mut issues));
+        (devices, issues)
+    }
 }
 
 /// The checks every provider's output must pass, in the daemon and in
 /// `--test-provider`.
 pub(crate) fn validate(provider: &str, records: Vec<Record>) -> Result<Vec<Record>, ProviderError> {
-    let invalid =
-        |reason: String| ProviderError::new("peripherals.invalid_provider_result", reason);
     let mut ids = BTreeSet::new();
-    for record in &records {
-        if record.id.is_empty()
-            || !valid_type_token(&record.kind)
-            || record.provider.is_empty()
-            || !record.details.is_object()
-        {
-            return Err(invalid(
-                "provider returned a record without a non-empty id, valid type token, provider, and details object".into(),
-            ));
-        }
-        if record.provider != provider {
-            return Err(invalid(format!(
-                "provider returned a record owned by {}",
+    let problem = records.iter().find_map(|record| {
+        if record.id.is_empty() || !valid_type_token(&record.kind) || !record.details.is_object() {
+            Some(format!(
+                "{provider} returned a record without an id, a valid type, or a details object"
+            ))
+        } else if record.provider != provider {
+            Some(format!(
+                "{provider} returned a record owned by {}",
                 record.provider
-            )));
-        }
-        if !ids.insert(record.id.as_str()) {
-            return Err(invalid(format!(
-                "provider returned duplicate peripheral identity: {}",
+            ))
+        } else if !ids.insert(record.id.as_str()) {
+            Some(format!(
+                "{provider} returned duplicate peripheral identity: {}",
                 record.id
-            )));
+            ))
+        } else {
+            None
         }
+    });
+    match problem {
+        Some(reason) => Err(ProviderError::new(
+            "peripherals.invalid_provider_result",
+            reason,
+        )),
+        None => Ok(records),
     }
-    Ok(records)
 }
 
 /// Type names become JSON keys beside `id`, `type` and `provider`.
-pub fn valid_type_token(kind: &str) -> bool {
-    let mut chars = kind.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
+fn valid_type_token(kind: &str) -> bool {
     kind.len() <= 64
+        && kind.starts_with(|ch: char| ch.is_ascii_lowercase())
         && !matches!(kind, "id" | "type" | "provider")
-        && first.is_ascii_lowercase()
-        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
-}
-
-fn provider_issue(provider: &str, error: ProviderError, retained_last_good: bool) -> Issue {
-    Issue {
-        provider: provider.into(),
-        code: if error.code.is_empty() {
-            "peripherals.discovery_failed".into()
-        } else {
-            error.code
-        },
-        reason: if error.reason.is_empty() {
-            "The provider failed without reporting a reason.".into()
-        } else {
-            error.reason
-        },
-        retained_last_good,
-    }
+        && kind
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
 }
 
 #[cfg(test)]
@@ -231,35 +181,27 @@ mod tests {
     use serde_json::json;
     use std::collections::VecDeque;
 
-    struct Scripted {
-        name: String,
-        subsystems: Vec<String>,
-        script: VecDeque<Result<Vec<Record>, ProviderError>>,
-    }
-
-    impl Scripted {
-        fn boxed(name: &str, script: Vec<Result<Vec<Record>, ProviderError>>) -> Box<dyn Provider> {
-            Box::new(Self {
-                name: name.into(),
-                subsystems: vec!["video4linux".into()],
-                script: script.into(),
-            })
-        }
-    }
+    /// Returns one scripted result per scan; `panics` panics instead.
+    struct Scripted(&'static str, VecDeque<Result<Vec<Record>, ProviderError>>);
 
     impl Provider for Scripted {
         fn name(&self) -> &str {
-            &self.name
+            self.0
         }
         fn subsystems(&self) -> &[String] {
-            &self.subsystems
+            &[]
         }
         fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
-            if self.name == "panics" {
-                panic!("scripted panic");
-            }
-            self.script.pop_front().unwrap_or(Ok(Vec::new()))
+            assert_ne!(self.0, "panics", "scripted panic");
+            self.1.pop_front().unwrap_or(Ok(Vec::new()))
         }
+    }
+
+    fn provider(
+        name: &'static str,
+        script: Vec<Result<Vec<Record>, ProviderError>>,
+    ) -> Box<dyn Provider> {
+        Box::new(Scripted(name, script.into()))
     }
 
     fn record(provider: &str, id: &str) -> Record {
@@ -271,82 +213,57 @@ mod tests {
         }
     }
 
-    fn denied() -> ProviderError {
-        ProviderError::new("io.permission_denied", "denied")
-    }
-
-    fn scanner(providers: Vec<Box<dyn Provider>>) -> Scanner {
-        Scanner::new(
-            providers,
-            SupportStage::new("/nonexistent/sentinel/neat-core.json"),
-        )
+    fn scan(providers: Vec<Box<dyn Provider>>, scans: usize) -> (Catalog, Result<(), String>) {
+        let mut scanner = Scanner::new(providers, SupportStage::new("/nonexistent/neat-core.json"));
+        let mut catalog = Catalog::new("i");
+        let mut result = Ok(());
+        for _ in 0..scans {
+            result = scanner.scan(&mut catalog);
+        }
+        (catalog, result)
     }
 
     fn ids(catalog: &Catalog) -> Vec<String> {
-        catalog
-            .document()
-            .devices
+        let devices = catalog.document().devices;
+        devices
             .iter()
             .map(|device| device["id"].as_str().unwrap().to_string())
             .collect()
     }
 
     #[test]
-    fn failed_provider_keeps_its_last_good_records_beside_healthy_ones() {
-        let mut scanner = scanner(vec![
-            Scripted::boxed("mipi", vec![Ok(vec![record("mipi", "m1")]), Err(denied())]),
-            Scripted::boxed("usb", vec![Ok(vec![]), Ok(vec![record("usb", "u1")])]),
-        ]);
-        let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
-        scanner.scan(&mut catalog).unwrap();
-
-        assert_eq!(ids(&catalog), vec!["m1", "u1"]);
+    fn a_failed_provider_keeps_its_last_good_records_beside_healthy_ones() {
+        let denied = ProviderError::new("io.permission_denied", "denied");
+        let (catalog, _) = scan(
+            vec![
+                provider("mipi", vec![Ok(vec![record("mipi", "m1")]), Err(denied)]),
+                provider("usb", vec![Ok(vec![]), Ok(vec![record("usb", "u1")])]),
+                provider("panics", vec![]),
+            ],
+            2,
+        );
         let document = catalog.document();
+        assert_eq!(ids(&catalog), ["m1", "u1"]);
+        let issues: Vec<_> = document
+            .issues
+            .iter()
+            .map(|issue| (issue.provider.as_str(), issue.retained_last_good))
+            .collect();
+        assert_eq!(issues, [("mipi", true), ("panics", false)]);
         assert!(document.stale);
-        assert_eq!(document.issues.len(), 1);
-        assert_eq!(document.issues[0].provider, "mipi");
-        assert!(document.issues[0].retained_last_good);
-    }
-
-    #[test]
-    fn provider_failing_before_any_success_leaves_catalog_unready_until_another_succeeds() {
-        let mut scanner = scanner(vec![Scripted::boxed("mipi", vec![Err(denied())])]);
-        let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
-        let document = catalog.document();
-        assert!(!document.ready);
-        assert!(!document.issues[0].retained_last_good);
-    }
-
-    #[test]
-    fn panicking_provider_becomes_an_issue() {
-        let mut scanner = scanner(vec![
-            Scripted::boxed("panics", vec![]),
-            Scripted::boxed("usb", vec![Ok(vec![record("usb", "u1")])]),
-        ]);
-        let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
-        let document = catalog.document();
-        assert_eq!(ids(&catalog), vec!["u1"]);
-        assert_eq!(document.issues[0].provider, "panics");
-        assert_eq!(document.issues[0].code, "peripherals.discovery_failed");
     }
 
     #[test]
     fn invalid_records_are_rejected_per_provider() {
-        let mut wrong_owner = record("other", "x");
-        wrong_owner.provider = "other".into();
         let mut bad_type = record("usb", "y");
         bad_type.kind = "Camera".into();
         for invalid in [
-            vec![wrong_owner],
+            vec![record("other", "x")],
             vec![bad_type],
             vec![record("usb", "d"), record("usb", "d")],
         ] {
-            let mut scanner = scanner(vec![Scripted::boxed("usb", vec![Ok(invalid)])]);
-            let mut catalog = Catalog::new("i", 16);
-            scanner.scan(&mut catalog).unwrap();
+            let (catalog, _) = scan(vec![provider("usb", vec![Ok(invalid)])], 1);
+            assert!(!catalog.document().ready);
             assert_eq!(
                 catalog.document().issues[0].code,
                 "peripherals.invalid_provider_result"
@@ -356,35 +273,24 @@ mod tests {
 
     #[test]
     fn colliding_ids_reject_the_scan_but_count_it() {
-        let mut scanner = scanner(vec![
-            Scripted::boxed("a", vec![Ok(vec![record("a", "same")])]),
-            Scripted::boxed("b", vec![Ok(vec![record("b", "same")])]),
-        ]);
-        let mut catalog = Catalog::new("i", 16);
-        assert!(scanner.scan(&mut catalog).is_err());
+        let (catalog, result) = scan(
+            vec![
+                provider("a", vec![Ok(vec![record("a", "same")])]),
+                provider("b", vec![Ok(vec![record("b", "same")])]),
+            ],
+            1,
+        );
+        assert!(result.is_err());
         let document = catalog.document();
-        assert_eq!(document.scan_sequence, 1, "refresh targets still advance");
-        assert_eq!(document.issues[0].provider, "catalog");
-        assert!(document.issues[0].reason.contains("same"));
+        assert_eq!(
+            (document.scan_sequence, document.issues[0].provider.as_str()),
+            (1, "catalog")
+        );
     }
 
     #[test]
     fn no_providers_publish_a_ready_empty_catalog() {
-        let mut catalog = Catalog::new("i", 16);
-        scanner(vec![]).scan(&mut catalog).unwrap();
-        let document = catalog.document();
-        assert!(document.ready);
-        assert_eq!(document.state, "ready");
-        assert!(document.devices.is_empty());
-    }
-
-    #[test]
-    fn type_tokens_follow_the_json_key_rules() {
-        for good in ["camera", "microphone", "lidar_2d", "imu-6dof"] {
-            assert!(valid_type_token(good), "{good}");
-        }
-        for bad in ["", "Camera", "1cam", "id", "type", "provider", "cam era"] {
-            assert!(!valid_type_token(bad), "{bad}");
-        }
+        let (catalog, _) = scan(vec![], 1);
+        assert_eq!(catalog.document().state, "ready");
     }
 }

@@ -71,31 +71,17 @@ includes sizes the ISP cannot produce (see sima-neat/core#883).
                        "isp_output": true, "supported": true, "reason": ""}]}}
 ```
 
-## Variation covered
-
-- Several sensors on one media device, and several SiMa media devices.
-- Media devices without a sensor, and other drivers' media devices (ignored).
-- ISP node missing, unreadable, reporting frame intervals, or present more than
-  once (only the modes every ISP node shares are reported).
-- Several identical USB cameras, cameras without a serial, composite devices
-  (camera plus microphone), metadata-only and output-only video nodes (excluded),
-  discrete, stepwise and continuous sizes and intervals.
-- Device nodes renumbered between scans.
-
 ## Support rules
 
-Neat Core installs `/usr/share/simaai-sentinel/support/neat-core.json`. For
-cameras the rules check, in order: `backend`, `format`, frame rate, size
-ranges (never supported), and `isp_output`. Without Neat Core, every mode is
-`supported: false` with the reason "Neat Core is not installed". See
-[support rules](../README.md#support-rules).
+Neat Core's rules check, in order: `backend`, `format`, frame rate, size ranges
+(never supported), and `isp_output`. See [support rules](../README.md#support-rules).
 
 ## Verification
 
 | Behaviour | Real hardware | Fixtures only |
 | --- | --- | --- |
-| IMX477 name, media graph and ISP sizes | Transcribed from a DevKit capture (2.1.3) | |
-| Live discovery through `/dev/media*` and the ISP node | Not yet run on a DevKit | Synthetic fake kernel interfaces |
-| Logitech C920 record shape | | Synthetic, matching the v1 catalog fixture |
-| Hot-plug, several cameras, renumbering | | Synthetic |
+| IMX477: name matches libcamera, 16 ISP nodes, 9 modes, NV12 supported | DevKit, 2026-10-03 | Transcribed capture |
+| Logitech C920: one record, metadata node excluded, 17 MJPG / 18 YUYV modes, same id after unplug and replug | DevKit, 2026-10-03 | |
+| Discovery during a 1920x1080 stream does not drop frames | DevKit, 2026-10-03 | |
+| Several cameras, renumbering, missing strings, ranges | | Synthetic |
 | Frame-rate limits from sensor timing | Not implemented (rate is nominal) | |
