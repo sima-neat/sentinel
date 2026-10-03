@@ -46,6 +46,12 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
     let document = read(catalog_path).with_context(|| {
         "peripheral catalog unavailable; check `systemctl status simaai-sentinel`"
     })?;
+    if !daemon_running(api_socket) {
+        eprintln!(
+            "Warning: the Sentinel daemon is not running, so this catalog may be out of date; \
+check `systemctl status simaai-sentinel`."
+        );
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&document)?);
     } else {
@@ -93,6 +99,12 @@ fn test_provider(target: &str, settings: &Settings) -> Result<()> {
             bail!("provider '{name}' failed; see \"error\" above")
         }
     }
+}
+
+/// The catalog file outlives the daemon (a stop by SIGTERM leaves it as it
+/// was), so the CLI checks the daemon's socket before trusting it.
+fn daemon_running(api_socket: &Path) -> bool {
+    UnixStream::connect(api_socket).is_ok()
 }
 
 fn request_refresh(api_socket: &Path) -> Result<u64> {
@@ -248,6 +260,22 @@ mod tests {
             "{text:?}"
         );
         assert!(text.contains("evil?]0;owned?cam"));
+    }
+
+    #[test]
+    fn a_missing_or_dead_socket_means_the_daemon_is_not_running() {
+        assert!(!daemon_running(Path::new("/nonexistent/sentinel/api.sock")));
+        let dir = std::env::temp_dir().join(format!("sentinel-cli-socket-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("api.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(daemon_running(&path));
+        drop(listener);
+        assert!(
+            !daemon_running(&path),
+            "a stale socket file is not a running daemon"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
