@@ -1295,6 +1295,44 @@ fn endless_enumeration_is_capped() {
 }
 
 #[test]
+fn per_device_enumeration_budget_is_enforced() {
+    // Every list stays under MAX_ENUMERATION_ENTRIES, but five formats of 900
+    // sizes each need about 9000 queries in total.
+    let fixture = TempDir::new();
+    let sys = fixture.path().join("sys");
+    let dev = fixture.path().join("dev");
+    plain_usb_camera(&sys, "1-1", &[("video0", "0")]);
+    let mut node = FakeVideoNode {
+        capability: capability("busy", V4L2_CAP_VIDEO_CAPTURE),
+        ..FakeVideoNode::default()
+    };
+    for code in [b"MJPG", b"YUYV", b"NV12", b"GREY", b"H264"] {
+        node = node.format(V4L2_BUF_TYPE_VIDEO_CAPTURE, fourcc(code));
+        for width in 1..=900 {
+            node = node.size(fourcc(code), raw_size_discrete(width, 480));
+        }
+    }
+    let calls = node.calls.clone();
+    let backend = FakeBackend::default().node(dev.join("video0"), node);
+    let error = discover(&sys, &dev, &backend).unwrap_err();
+    assert_eq!(error.code, "io.open");
+    assert_eq!(
+        error.reason,
+        format!(
+            "V4L2 camera {} returned a malformed enumeration (more than 4096 queries)",
+            dev.join("video0").display()
+        )
+    );
+    let enumerations = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|op| **op != VideoOp::QueryCap)
+        .count();
+    assert_eq!(enumerations, MAX_DEVICE_ENUMERATIONS as usize);
+}
+
+#[test]
 fn usb_interface_without_interface_number_fails_discovery() {
     let fixture = TempDir::new();
     let sys = fixture.path().join("sys");

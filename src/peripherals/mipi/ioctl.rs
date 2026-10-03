@@ -160,9 +160,12 @@ impl MediaNode for SystemNode {
     ) -> io::Result<()> {
         // The kernel writes at most `num_entities` entries to `ptr_entities`
         // (and fails with ENOSPC if more exist), so tying both to the slice
-        // keeps the write in bounds. All other arrays stay null.
+        // keeps the write in bounds. All other arrays stay null. A slice too
+        // long to describe is refused rather than silently understated.
+        let num_entities = u32::try_from(entities.len())
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
         *value = MediaV2Topology {
-            num_entities: u32::try_from(entities.len()).unwrap_or(u32::MAX),
+            num_entities,
             ptr_entities: if entities.is_empty() {
                 0
             } else {

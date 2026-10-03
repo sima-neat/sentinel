@@ -33,8 +33,8 @@ use super::sysutil::{
     CODE_DISCOVERY_FAILED, CODE_IO_OPEN, CODE_PERMISSION_DENIED,
 };
 use super::videodev2::{
-    effective_capabilities, fourcc_string, Capability, FmtDesc, FrmIvalEnum, FrmSizeEnum,
-    VideoNode, MAX_ENUMERATION_ENTRIES, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    effective_capabilities, fourcc_string, Capability, EnumerationBudget, FmtDesc, FrmIvalEnum,
+    FrmSizeEnum, VideoNode, MAX_ENUMERATION_ENTRIES, V4L2_BUF_TYPE_VIDEO_CAPTURE,
     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_FRMIVAL_TYPE_DISCRETE,
     V4L2_FRMSIZE_TYPE_DISCRETE,
 };
@@ -348,6 +348,7 @@ fn malformed_isp(what: &str, path: &Path) -> String {
 /// not implement the ioctl) or reports only a stepwise/continuous range.
 fn enumerate_rates(
     node: &mut dyn VideoNode,
+    budget: &mut EnumerationBudget,
     path: &Path,
     pixel_format: u32,
     width: u32,
@@ -366,6 +367,7 @@ fn enumerate_rates(
             height,
             ..FrmIvalEnum::default()
         };
+        budget.spend().map_err(|what| malformed_isp(&what, path))?;
         if let Err(error) = node.enum_frame_interval(&mut value) {
             let errno = errno_of(&error);
             if errno == libc::EINVAL || errno == libc::ENOTTY {
@@ -412,6 +414,7 @@ fn enumerate_isp_node(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<Isp
     if bounded_string(&capability.card) != ISP_CARD_NAME {
         return Ok(modes);
     }
+    let budget = &mut EnumerationBudget::new();
     let buffer_type = if effective_capabilities(&capability) & V4L2_CAP_VIDEO_CAPTURE_MPLANE != 0 {
         V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
     } else {
@@ -427,6 +430,7 @@ fn enumerate_isp_node(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<Isp
             buf_type: buffer_type,
             ..FmtDesc::default()
         };
+        budget.spend().map_err(|what| malformed_isp(&what, path))?;
         if let Err(error) = node.enum_format(&mut format) {
             if errno_of(&error) == libc::EINVAL {
                 break;
@@ -447,6 +451,7 @@ fn enumerate_isp_node(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<Isp
                 pixel_format: format.pixelformat,
                 ..FrmSizeEnum::default()
             };
+            budget.spend().map_err(|what| malformed_isp(&what, path))?;
             if let Err(error) = node.enum_frame_size(&mut size) {
                 if errno_of(&error) == libc::EINVAL {
                     break;
@@ -463,7 +468,7 @@ fn enumerate_isp_node(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<Isp
         }
         let token = fourcc_string(format.pixelformat);
         for (width, height) in sizes {
-            let rates = enumerate_rates(node, path, format.pixelformat, width, height)?;
+            let rates = enumerate_rates(node, budget, path, format.pixelformat, width, height)?;
             let mode = |(framerate_num, framerate_den), source| IspMode {
                 format: token.clone(),
                 width,

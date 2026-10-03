@@ -28,8 +28,8 @@ use super::sysutil::{
     CODE_DISCOVERY_FAILED, CODE_IO_OPEN, CODE_PERMISSION_DENIED,
 };
 use super::videodev2::{
-    effective_capabilities, fourcc_string, Capability, FmtDesc, FrmIvalEnum, FrmSizeEnum,
-    VideoNode, MAX_ENUMERATION_ENTRIES, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    effective_capabilities, fourcc_string, Capability, EnumerationBudget, FmtDesc, FrmIvalEnum,
+    FrmSizeEnum, VideoNode, MAX_ENUMERATION_ENTRIES, V4L2_BUF_TYPE_VIDEO_CAPTURE,
     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE, V4L2_CAP_VIDEO_CAPTURE_MPLANE,
     V4L2_CAP_VIDEO_M2M, V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_FRMIVAL_TYPE_CONTINUOUS,
     V4L2_FRMIVAL_TYPE_DISCRETE, V4L2_FRMIVAL_TYPE_STEPWISE, V4L2_FRMSIZE_TYPE_CONTINUOUS,
@@ -693,6 +693,7 @@ fn usb_identity(class_entry: &Path, sys_root: &Path) -> Result<Option<UsbIdentit
 
 fn enumerate_intervals(
     node: &mut dyn VideoNode,
+    budget: &mut EnumerationBudget,
     device_path: &Path,
     pixel_format: u32,
     width: u32,
@@ -711,6 +712,9 @@ fn enumerate_intervals(
             height,
             ..FrmIvalEnum::default()
         };
+        budget
+            .spend()
+            .map_err(|what| malformed_probe_result(&what, device_path))?;
         if let Err(error) = node.enum_frame_interval(&mut value) {
             if errno_of(&error) == libc::EINVAL {
                 break;
@@ -734,6 +738,7 @@ fn enumerate_intervals(
 
 fn enumerate_sizes(
     node: &mut dyn VideoNode,
+    budget: &mut EnumerationBudget,
     device_path: &Path,
     pixel_format: u32,
 ) -> Result<Vec<FrameSize>, ProbeError> {
@@ -748,6 +753,9 @@ fn enumerate_sizes(
             pixel_format,
             ..FrmSizeEnum::default()
         };
+        budget
+            .spend()
+            .map_err(|what| malformed_probe_result(&what, device_path))?;
         if let Err(error) = node.enum_frame_size(&mut value) {
             if errno_of(&error) == libc::EINVAL {
                 break;
@@ -771,7 +779,8 @@ fn enumerate_sizes(
             }
         }
         for (width, height) in probes {
-            let intervals = enumerate_intervals(node, device_path, pixel_format, width, height)?;
+            let intervals =
+                enumerate_intervals(node, budget, device_path, pixel_format, width, height)?;
             decoded.interval_sets.push(IntervalSet {
                 width,
                 height,
@@ -789,6 +798,7 @@ fn enumerate_sizes(
 
 fn enumerate_formats(
     node: &mut dyn VideoNode,
+    budget: &mut EnumerationBudget,
     device_path: &Path,
     buffer_type: u32,
 ) -> Result<Vec<Format>, ProbeError> {
@@ -803,6 +813,9 @@ fn enumerate_formats(
             buf_type: buffer_type,
             ..FmtDesc::default()
         };
+        budget
+            .spend()
+            .map_err(|what| malformed_probe_result(&what, device_path))?;
         if let Err(error) = node.enum_format(&mut value) {
             if errno_of(&error) == libc::EINVAL {
                 break;
@@ -815,7 +828,7 @@ fn enumerate_formats(
         }
         let format = Format {
             fourcc: fourcc_string(value.pixelformat),
-            sizes: enumerate_sizes(node, device_path, value.pixelformat)?,
+            sizes: enumerate_sizes(node, budget, device_path, value.pixelformat)?,
         };
         match formats
             .iter_mut()
@@ -852,6 +865,7 @@ fn probe_device(
         return Ok(None);
     }
 
+    let mut budget = EnumerationBudget::new();
     if identity.model.is_empty() {
         identity.model = trim_c_space(&bounded_string(&capability.card)).to_string();
     }
@@ -861,11 +875,17 @@ fn probe_device(
         formats: Vec::new(),
     };
     if captures {
-        let formats = enumerate_formats(node, device_path, V4L2_BUF_TYPE_VIDEO_CAPTURE)?;
+        let formats =
+            enumerate_formats(node, &mut budget, device_path, V4L2_BUF_TYPE_VIDEO_CAPTURE)?;
         merge_formats(&mut device.formats, formats);
     }
     if captures_multiplanar {
-        let formats = enumerate_formats(node, device_path, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)?;
+        let formats = enumerate_formats(
+            node,
+            &mut budget,
+            device_path,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+        )?;
         merge_formats(&mut device.formats, formats);
     }
     canonicalize_formats(&mut device.formats);

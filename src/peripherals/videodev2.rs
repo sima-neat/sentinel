@@ -40,6 +40,41 @@ pub(crate) const V4L2_FRMIVAL_TYPE_STEPWISE: u32 = 3;
 /// the in-process peripherals thread busy forever.
 pub(crate) const MAX_ENUMERATION_ENTRIES: u32 = 1024;
 
+/// Enumeration ioctls one device may answer in one scan. The per-list cap
+/// alone still lets formats x sizes x intervals reach about 10^9 queries on a
+/// broken or hostile device, stalling the peripherals thread. A large UVC
+/// camera (a few formats, tens of sizes, a handful of rates each) needs on the
+/// order of 1000 queries and the Modalix ISP about 100. Every reported format,
+/// size, mode and frame interval costs at least one query, so the budget also
+/// bounds what one device can add to the catalog.
+pub(crate) const MAX_DEVICE_ENUMERATIONS: u32 = 4096;
+
+/// The enumeration ioctls left for one device.
+pub(crate) struct EnumerationBudget {
+    remaining: u32,
+}
+
+impl EnumerationBudget {
+    pub(crate) fn new() -> Self {
+        Self {
+            remaining: MAX_DEVICE_ENUMERATIONS,
+        }
+    }
+
+    /// Account for one enumeration ioctl. Once the budget is spent, the error
+    /// names what the device returned too much of, for the provider's
+    /// malformed-result message.
+    pub(crate) fn spend(&mut self) -> Result<(), String> {
+        if self.remaining == 0 {
+            return Err(format!(
+                "enumeration (more than {MAX_DEVICE_ENUMERATIONS} queries)"
+            ));
+        }
+        self.remaining -= 1;
+        Ok(())
+    }
+}
+
 /// `struct v4l2_capability`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -427,6 +462,18 @@ mod tests {
         assert_eq!(VIDIOC_ENUM_FMT, 0xc040_5602);
         assert_eq!(VIDIOC_ENUM_FRAMESIZES, 0xc02c_564a);
         assert_eq!(VIDIOC_ENUM_FRAMEINTERVALS, 0xc034_564b);
+    }
+
+    #[test]
+    fn enumeration_budget_allows_exactly_its_limit() {
+        let mut budget = EnumerationBudget::new();
+        for _ in 0..MAX_DEVICE_ENUMERATIONS {
+            budget.spend().unwrap();
+        }
+        assert_eq!(
+            budget.spend().unwrap_err(),
+            "enumeration (more than 4096 queries)"
+        );
     }
 
     #[test]

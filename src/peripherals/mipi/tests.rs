@@ -938,6 +938,40 @@ fn enumerations_are_capped() {
     }
 }
 
+/// Synthetic: an ISP node whose lists each stay under
+/// `MAX_ENUMERATION_ENTRIES` but need more than `MAX_DEVICE_ENUMERATIONS`
+/// queries in total degrades the records instead of stalling the scan.
+#[test]
+fn isp_enumeration_budget_is_enforced() {
+    let mut node = mplane_isp_node();
+    for code in [b"AR24", b"RGB3", b"NV12", b"GREY", b"YUYV"] {
+        node = node.format(MPLANE, fourcc(code));
+        for width in 1..=900 {
+            node = node.size(fourcc(code), raw_size_discrete(width, 480));
+        }
+    }
+    let calls = node.calls.clone();
+    let board = Board::new()
+        .media("media0", real_imx477_media())
+        .isp("video1", node);
+    let records = board.discover().unwrap();
+    assert_eq!(records[0].details["modes"], json!([]));
+    assert_eq!(
+        records[0].details["isp"]["reason"],
+        format!(
+            "ISP node {} returned a malformed enumeration (more than 4096 queries)",
+            board.dev_string("video1")
+        )
+    );
+    let enumerations = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|op| **op != VideoOp::QueryCap)
+        .count();
+    assert_eq!(enumerations, MAX_DEVICE_ENUMERATIONS as usize);
+}
+
 /// Synthetic: no `/dev`, or a `/dev` without `mediaN` nodes, is not an error.
 #[test]
 fn no_media_devices_is_an_empty_result() {
