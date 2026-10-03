@@ -15,46 +15,17 @@
 
 use super::ioctl::*;
 use super::*;
+use crate::peripherals::sysutil::testing::{write_file, TempDir};
+use crate::peripherals::videodev2::testing::*;
+use crate::peripherals::videodev2::*;
 
 use std::collections::HashMap;
 use std::os::unix::fs::symlink;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "sentinel-v4l2-provider-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, AtomicOrdering::SeqCst)
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("create fixture directory");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn write_file(path: &Path, value: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, value).unwrap();
-}
 
 /// Port of the C++ `add_usb_node` helper (same tree shape and values).
 fn add_usb_node(
@@ -177,116 +148,14 @@ fn add_platform_node(sys: &Path, parent: &str, video: &str) {
 // Fake ioctl backend
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Op {
-    QueryCap,
-    EnumFmt,
-    EnumFrameSizes,
-    EnumFrameIntervals,
-}
-
-#[derive(Debug, Clone, Default)]
-struct FakeNode {
-    capability: Capability,
-    /// `(buffer type, pixel format)` in driver order.
-    formats: Vec<(u32, u32)>,
-    /// `(pixel format, frame size)` in driver order.
-    sizes: Vec<(u32, FrmSizeEnum)>,
-    /// `((pixel format, width, height), interval)` in driver order.
-    intervals: Vec<((u32, u32, u32), FrmIvalEnum)>,
-    fail: Option<(Op, i32)>,
-    calls: Arc<Mutex<Vec<Op>>>,
-}
-
-impl FakeNode {
-    fn check(&self, op: Op) -> io::Result<()> {
-        self.calls.lock().unwrap().push(op);
-        match self.fail {
-            Some((failing, errno)) if failing == op => Err(io::Error::from_raw_os_error(errno)),
-            _ => Ok(()),
-        }
-    }
-
-    fn format(mut self, buffer_type: u32, pixel_format: u32) -> Self {
-        self.formats.push((buffer_type, pixel_format));
-        self
-    }
-
-    fn size(mut self, pixel_format: u32, size: FrmSizeEnum) -> Self {
-        self.sizes.push((pixel_format, size));
-        self
-    }
-
-    fn interval(mut self, pixel_format: u32, width: u32, height: u32, value: FrmIvalEnum) -> Self {
-        self.intervals.push(((pixel_format, width, height), value));
-        self
-    }
-
-    fn failing(mut self, op: Op, errno: i32) -> Self {
-        self.fail = Some((op, errno));
-        self
-    }
-}
-
-fn einval() -> io::Error {
-    io::Error::from_raw_os_error(libc::EINVAL)
-}
-
-impl Node for FakeNode {
-    fn query_capability(&mut self, value: &mut Capability) -> io::Result<()> {
-        self.check(Op::QueryCap)?;
-        *value = self.capability;
-        Ok(())
-    }
-
-    fn enum_format(&mut self, value: &mut FmtDesc) -> io::Result<()> {
-        self.check(Op::EnumFmt)?;
-        let found = self
-            .formats
-            .iter()
-            .filter(|(buffer_type, _)| *buffer_type == value.buf_type)
-            .nth(value.index as usize)
-            .ok_or_else(einval)?;
-        value.pixelformat = found.1;
-        Ok(())
-    }
-
-    fn enum_frame_size(&mut self, value: &mut FrmSizeEnum) -> io::Result<()> {
-        self.check(Op::EnumFrameSizes)?;
-        let found = self
-            .sizes
-            .iter()
-            .filter(|(pixel_format, _)| *pixel_format == value.pixel_format)
-            .nth(value.index as usize)
-            .ok_or_else(einval)?;
-        value.kind = found.1.kind;
-        value.data = found.1.data;
-        Ok(())
-    }
-
-    fn enum_frame_interval(&mut self, value: &mut FrmIvalEnum) -> io::Result<()> {
-        self.check(Op::EnumFrameIntervals)?;
-        let key = (value.pixel_format, value.width, value.height);
-        let found = self
-            .intervals
-            .iter()
-            .filter(|(candidate, _)| *candidate == key)
-            .nth(value.index as usize)
-            .ok_or_else(einval)?;
-        value.kind = found.1.kind;
-        value.data = found.1.data;
-        Ok(())
-    }
-}
-
 #[derive(Clone, Default)]
 struct FakeBackend {
-    nodes: HashMap<PathBuf, Result<FakeNode, i32>>,
+    nodes: HashMap<PathBuf, Result<FakeVideoNode, i32>>,
     opened: Arc<Mutex<Vec<PathBuf>>>,
 }
 
 impl FakeBackend {
-    fn node(mut self, path: PathBuf, node: FakeNode) -> Self {
+    fn node(mut self, path: PathBuf, node: FakeVideoNode) -> Self {
         self.nodes.insert(path, Ok(node));
         self
     }
@@ -298,7 +167,7 @@ impl FakeBackend {
 }
 
 impl Backend for FakeBackend {
-    fn open(&self, path: &Path) -> io::Result<Box<dyn Node>> {
+    fn open(&self, path: &Path) -> io::Result<Box<dyn VideoNode>> {
         self.opened.lock().unwrap().push(path.to_path_buf());
         match self.nodes.get(path) {
             Some(Ok(node)) => Ok(Box::new(node.clone())),
@@ -306,10 +175,6 @@ impl Backend for FakeBackend {
             None => Err(io::Error::from_raw_os_error(libc::ENOENT)),
         }
     }
-}
-
-fn fourcc(code: &[u8; 4]) -> u32 {
-    u32::from_le_bytes(*code)
 }
 
 fn capability(card: &str, device_caps: u32) -> Capability {
@@ -322,14 +187,6 @@ fn capability(card: &str, device_caps: u32) -> Capability {
     value
 }
 
-fn raw_size_discrete(width: u32, height: u32) -> FrmSizeEnum {
-    FrmSizeEnum {
-        kind: V4L2_FRMSIZE_TYPE_DISCRETE,
-        data: [width, height, 0, 0, 0, 0],
-        ..FrmSizeEnum::default()
-    }
-}
-
 /// `stepwise` member order: min_width, max_width, step_width, min_height,
 /// max_height, step_height (as in `<linux/videodev2.h>`).
 fn raw_size_range(kind: u32, stepwise: [u32; 6]) -> FrmSizeEnum {
@@ -337,14 +194,6 @@ fn raw_size_range(kind: u32, stepwise: [u32; 6]) -> FrmSizeEnum {
         kind,
         data: stepwise,
         ..FrmSizeEnum::default()
-    }
-}
-
-fn raw_interval_discrete(numerator: u32, denominator: u32) -> FrmIvalEnum {
-    FrmIvalEnum {
-        kind: V4L2_FRMIVAL_TYPE_DISCRETE,
-        data: [numerator, denominator, 0, 0, 0, 0],
-        ..FrmIvalEnum::default()
     }
 }
 
@@ -363,12 +212,12 @@ fn raw_interval_range(
 
 /// A typical UVC webcam: MJPG 1920x1080 and 640x480, YUYV 640x480, listed in
 /// non-canonical driver order.
-fn uvc_camera(card: &str) -> FakeNode {
+fn uvc_camera(card: &str) -> FakeVideoNode {
     let mjpg = fourcc(b"MJPG");
     let yuyv = fourcc(b"YUYV");
-    FakeNode {
+    FakeVideoNode {
         capability: capability(card, V4L2_CAP_VIDEO_CAPTURE),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     }
     .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, yuyv)
     .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, mjpg)
@@ -381,10 +230,10 @@ fn uvc_camera(card: &str) -> FakeNode {
     .interval(yuyv, 640, 480, raw_interval_discrete(1, 30))
 }
 
-fn uvc_metadata_node() -> FakeNode {
-    FakeNode {
+fn uvc_metadata_node() -> FakeVideoNode {
+    FakeVideoNode {
         capability: capability("Fixture Camera", V4L2_CAP_META_CAPTURE),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     }
 }
 
@@ -923,20 +772,6 @@ fn provider_metadata() {
 }
 
 #[test]
-fn ioctl_abi_matches_linux_videodev2() {
-    // Values from <linux/videodev2.h> (generic _IOC encoding, identical on
-    // aarch64 and x86_64).
-    assert_eq!(std::mem::size_of::<Capability>(), 104);
-    assert_eq!(std::mem::size_of::<FmtDesc>(), 64);
-    assert_eq!(std::mem::size_of::<FrmSizeEnum>(), 44);
-    assert_eq!(std::mem::size_of::<FrmIvalEnum>(), 52);
-    assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
-    assert_eq!(VIDIOC_ENUM_FMT, 0xc040_5602);
-    assert_eq!(VIDIOC_ENUM_FRAMESIZES, 0xc02c_564a);
-    assert_eq!(VIDIOC_ENUM_FRAMEINTERVALS, 0xc034_564b);
-}
-
-#[test]
 fn several_identical_cameras_at_once_get_distinct_topology_ids() {
     let fixture = TempDir::new();
     let sys = fixture.path().join("sys");
@@ -1102,15 +937,15 @@ fn output_only_and_m2m_nodes_are_excluded() {
     usb.video("1-3:1.0", "video0", "0");
     usb.video("1-3:1.0", "video1", "1");
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let output = FakeNode {
+    let output = FakeVideoNode {
         capability: capability("Gadget output", V4L2_CAP_VIDEO_OUTPUT),
         calls: calls.clone(),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     };
-    let m2m = FakeNode {
+    let m2m = FakeVideoNode {
         capability: capability("Encoder", V4L2_CAP_VIDEO_M2M | V4L2_CAP_VIDEO_CAPTURE),
         calls: calls.clone(),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     };
     let backend = FakeBackend::default()
         .node(dev.join("video0"), output)
@@ -1118,7 +953,7 @@ fn output_only_and_m2m_nodes_are_excluded() {
     assert!(discover(&sys, &dev, &backend).unwrap().is_empty());
     assert_eq!(
         *calls.lock().unwrap(),
-        [Op::QueryCap, Op::QueryCap],
+        [VideoOp::QueryCap, VideoOp::QueryCap],
         "excluded nodes are not enumerated"
     );
 }
@@ -1221,9 +1056,9 @@ fn stepwise_and_continuous_sizes_probe_min_and_max_intervals() {
     usb.video("1-1:1.0", "video0", "0");
     let grey = fourcc(b"GREY");
     let nv12 = fourcc(b"NV12");
-    let node = FakeNode {
+    let node = FakeVideoNode {
         capability: capability("Range Camera", V4L2_CAP_VIDEO_CAPTURE),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     }
     .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, grey)
     .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, nv12)
@@ -1304,9 +1139,9 @@ fn size_without_intervals_is_omitted_and_unprintable_fourcc_is_hex() {
     let dev = fixture.path().join("dev");
     plain_usb_camera(&sys, "1-1", &[("video0", "0")]);
     let odd = 0x0000_0001;
-    let node = FakeNode {
+    let node = FakeVideoNode {
         capability: capability("Odd", V4L2_CAP_VIDEO_CAPTURE),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     }
     .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, odd)
     .size(odd, raw_size_discrete(640, 480))
@@ -1327,12 +1162,12 @@ fn multiplanar_formats_merge_with_single_planar() {
     let dev = fixture.path().join("dev");
     plain_usb_camera(&sys, "1-1", &[("video0", "0")]);
     let nv12 = fourcc(b"NV12");
-    let node = FakeNode {
+    let node = FakeVideoNode {
         capability: capability(
             "Both",
             V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE,
         ),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     }
     .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, nv12)
     .format(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, nv12)
@@ -1382,7 +1217,7 @@ fn node_that_vanishes_during_probe_is_skipped() {
         .open_error(dev.join("video0"), libc::ENODEV)
         .node(
             dev.join("video1"),
-            uvc_camera("C920").failing(Op::EnumFrameSizes, libc::ENXIO),
+            uvc_camera("C920").failing(VideoOp::EnumFrameSizes, libc::ENXIO),
         )
         .node(dev.join("video2"), uvc_camera("C920"));
     let records = discover(&sys, &dev, &backend).unwrap();
@@ -1401,14 +1236,14 @@ fn ioctl_error_fails_the_whole_scan_with_io_open() {
     plain_usb_camera(&sys, "1-1", &[("video0", "0")]);
     plain_usb_camera(&sys, "1-2", &[("video1", "0")]);
     for (op, action) in [
-        (Op::QueryCap, "failed to query V4L2 capabilities for"),
-        (Op::EnumFmt, "failed to enumerate V4L2 formats for"),
+        (VideoOp::QueryCap, "failed to query V4L2 capabilities for"),
+        (VideoOp::EnumFmt, "failed to enumerate V4L2 formats for"),
         (
-            Op::EnumFrameSizes,
+            VideoOp::EnumFrameSizes,
             "failed to enumerate V4L2 frame sizes for",
         ),
         (
-            Op::EnumFrameIntervals,
+            VideoOp::EnumFrameIntervals,
             "failed to enumerate V4L2 frame intervals for",
         ),
     ] {
@@ -1436,9 +1271,9 @@ fn malformed_driver_answers_fail_with_io_open() {
     plain_usb_camera(&sys, "1-1", &[("video0", "0")]);
     let mjpg = fourcc(b"MJPG");
     let base = || {
-        FakeNode {
+        FakeVideoNode {
             capability: capability("bad", V4L2_CAP_VIDEO_CAPTURE),
-            ..FakeNode::default()
+            ..FakeVideoNode::default()
         }
         .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, mjpg)
     };
@@ -1470,9 +1305,9 @@ fn endless_enumeration_is_capped() {
     let dev = fixture.path().join("dev");
     plain_usb_camera(&sys, "1-1", &[("video0", "0")]);
     let mjpg = fourcc(b"MJPG");
-    let mut node = FakeNode {
+    let mut node = FakeVideoNode {
         capability: capability("endless", V4L2_CAP_VIDEO_CAPTURE),
-        ..FakeNode::default()
+        ..FakeVideoNode::default()
     };
     for _ in 0..=MAX_ENUMERATION_ENTRIES {
         node = node.format(V4L2_BUF_TYPE_VIDEO_CAPTURE, mjpg);

@@ -7,15 +7,15 @@
 //! on the ISP video node. Nothing in this module can set up media links, set a
 //! subdevice or video format, request buffers, or start streaming.
 //!
-//! The structures mirror `<linux/media.h>` and `<linux/videodev2.h>` byte for
-//! byte. The V4L2 declarations repeat those of the `v4l2` provider, whose ioctl
-//! module is private to it.
+//! The structures mirror `<linux/media.h>` byte for byte. The V4L2 video-node
+//! queries are the shared surface in `peripherals::videodev2`.
 
-use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+
+use crate::peripherals::videodev2::{
+    ioc, open_read_only, SystemNode, VideoNode, IOC_READ, IOC_WRITE,
+};
 
 /// `MEDIA_ENT_F_CAM_SENSOR`.
 pub const MEDIA_ENT_F_CAM_SENSOR: u32 = 0x0002_0001;
@@ -23,19 +23,6 @@ pub const MEDIA_ENT_F_CAM_SENSOR: u32 = 0x0002_0001;
 pub const MEDIA_ENT_F_IO_V4L: u32 = 0x0001_0001;
 #[cfg(test)]
 pub const MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN: u32 = 0x0002_0000;
-
-#[cfg(test)]
-pub const V4L2_CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
-pub const V4L2_CAP_VIDEO_CAPTURE_MPLANE: u32 = 0x0000_1000;
-
-pub const V4L2_BUF_TYPE_VIDEO_CAPTURE: u32 = 1;
-pub const V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: u32 = 9;
-
-pub const V4L2_FRMSIZE_TYPE_DISCRETE: u32 = 1;
-
-pub const V4L2_FRMIVAL_TYPE_DISCRETE: u32 = 1;
-#[cfg(test)]
-pub const V4L2_FRMIVAL_TYPE_CONTINUOUS: u32 = 2;
 
 /// `struct media_device_info`.
 #[repr(C)]
@@ -50,6 +37,7 @@ pub struct MediaDeviceInfo {
     pub driver_version: u32,
     pub reserved: [u32; 31],
 }
+const _: () = assert!(std::mem::size_of::<MediaDeviceInfo>() == 256);
 
 impl Default for MediaDeviceInfo {
     fn default() -> Self {
@@ -85,6 +73,7 @@ pub struct MediaV2Topology {
     pub reserved4: u32,
     pub ptr_links: u64,
 }
+const _: () = assert!(std::mem::size_of::<MediaV2Topology>() == 72);
 
 /// `struct media_v2_entity` (declared `packed` in the header; every member is
 /// 4-byte aligned, so the `repr(C)` layout is identical).
@@ -97,6 +86,7 @@ pub struct MediaV2Entity {
     pub flags: u32,
     pub reserved: [u32; 5],
 }
+const _: () = assert!(std::mem::size_of::<MediaV2Entity>() == 96);
 
 impl Default for MediaV2Entity {
     fn default() -> Self {
@@ -110,80 +100,6 @@ impl Default for MediaV2Entity {
     }
 }
 
-/// `struct v4l2_capability`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Capability {
-    pub driver: [u8; 16],
-    pub card: [u8; 32],
-    pub bus_info: [u8; 32],
-    pub version: u32,
-    pub capabilities: u32,
-    pub device_caps: u32,
-    pub reserved: [u32; 3],
-}
-
-/// `struct v4l2_fmtdesc`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FmtDesc {
-    pub index: u32,
-    pub buf_type: u32,
-    pub flags: u32,
-    pub description: [u8; 32],
-    pub pixelformat: u32,
-    pub mbus_code: u32,
-    pub reserved: [u32; 3],
-}
-
-/// `struct v4l2_frmsizeenum`; `data` holds the `discrete` or `stepwise` union
-/// member.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FrmSizeEnum {
-    pub index: u32,
-    pub pixel_format: u32,
-    pub kind: u32,
-    pub data: [u32; 6],
-    pub reserved: [u32; 2],
-}
-
-impl FrmSizeEnum {
-    pub fn discrete_width(&self) -> u32 {
-        self.data[0]
-    }
-    pub fn discrete_height(&self) -> u32 {
-        self.data[1]
-    }
-}
-
-/// `struct v4l2_frmivalenum`; `data` holds the `discrete` fraction or the
-/// `stepwise` fractions.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct FrmIvalEnum {
-    pub index: u32,
-    pub pixel_format: u32,
-    pub width: u32,
-    pub height: u32,
-    pub kind: u32,
-    pub data: [u32; 6],
-    pub reserved: [u32; 2],
-}
-
-impl FrmIvalEnum {
-    pub fn discrete(&self) -> (u32, u32) {
-        (self.data[0], self.data[1])
-    }
-}
-
-const IOC_WRITE: u32 = 1;
-const IOC_READ: u32 = 2;
-
-const fn ioc(direction: u32, kind: u8, number: u32, size: usize) -> u32 {
-    (direction << 30) | ((size as u32) << 16) | ((kind as u32) << 8) | number
-}
-
 pub const MEDIA_IOC_DEVICE_INFO: u32 = ioc(
     IOC_READ | IOC_WRITE,
     b'|',
@@ -195,26 +111,6 @@ pub const MEDIA_IOC_G_TOPOLOGY: u32 = ioc(
     b'|',
     0x04,
     std::mem::size_of::<MediaV2Topology>(),
-);
-
-pub const VIDIOC_QUERYCAP: u32 = ioc(IOC_READ, b'V', 0, std::mem::size_of::<Capability>());
-pub const VIDIOC_ENUM_FMT: u32 = ioc(
-    IOC_READ | IOC_WRITE,
-    b'V',
-    2,
-    std::mem::size_of::<FmtDesc>(),
-);
-pub const VIDIOC_ENUM_FRAMESIZES: u32 = ioc(
-    IOC_READ | IOC_WRITE,
-    b'V',
-    74,
-    std::mem::size_of::<FrmSizeEnum>(),
-);
-pub const VIDIOC_ENUM_FRAMEINTERVALS: u32 = ioc(
-    IOC_READ | IOC_WRITE,
-    b'V',
-    75,
-    std::mem::size_of::<FrmIvalEnum>(),
 );
 
 /// Opens media and video nodes. The production implementation opens character
@@ -237,29 +133,9 @@ pub trait MediaNode {
     ) -> io::Result<()>;
 }
 
-/// The query ioctls of one open V4L2 video node. Every method fills its
-/// argument in place and returns the raw OS error on failure (`EINVAL` ends an
-/// enumeration).
-pub trait VideoNode {
-    fn query_capability(&mut self, value: &mut Capability) -> io::Result<()>;
-    fn enum_format(&mut self, value: &mut FmtDesc) -> io::Result<()>;
-    fn enum_frame_size(&mut self, value: &mut FrmSizeEnum) -> io::Result<()>;
-    fn enum_frame_interval(&mut self, value: &mut FrmIvalEnum) -> io::Result<()>;
-}
-
 /// Character-device backend: `open(O_RDONLY | O_NONBLOCK | O_CLOEXEC)` and
 /// query ioctls only.
 pub struct SystemBackend;
-
-fn open_read_only(path: &Path) -> io::Result<SystemNode> {
-    // `read(true)` without write selects O_RDONLY; std always adds O_CLOEXEC,
-    // which is repeated here so the contract is explicit.
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)?;
-    Ok(SystemNode { file })
-}
 
 impl Backend for SystemBackend {
     fn open_media(&self, path: &Path) -> io::Result<Box<dyn MediaNode>> {
@@ -271,38 +147,10 @@ impl Backend for SystemBackend {
     }
 }
 
-struct SystemNode {
-    file: File,
-}
-
-impl SystemNode {
-    fn ioctl<T>(&mut self, request: u32, argument: &mut T) -> io::Result<()> {
-        loop {
-            // SAFETY: `request` encodes the size of `T`, `T` is a `repr(C)`
-            // mirror of the kernel structure, and the descriptor is open for
-            // the duration of the call. Any user pointer inside `T` is set up
-            // by the caller to reference memory that outlives the call.
-            let result = unsafe {
-                libc::ioctl(
-                    self.file.as_raw_fd(),
-                    request as _,
-                    argument as *mut T as *mut libc::c_void,
-                )
-            };
-            if result >= 0 {
-                return Ok(());
-            }
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EINTR) {
-                return Err(error);
-            }
-        }
-    }
-}
-
 impl MediaNode for SystemNode {
     fn device_info(&mut self, value: &mut MediaDeviceInfo) -> io::Result<()> {
-        self.ioctl(MEDIA_IOC_DEVICE_INFO, value)
+        // SAFETY: MEDIA_IOC_DEVICE_INFO encodes `struct media_device_info`.
+        unsafe { self.ioctl(MEDIA_IOC_DEVICE_INFO, value) }
     }
 
     fn topology(
@@ -322,21 +170,9 @@ impl MediaNode for SystemNode {
             },
             ..MediaV2Topology::default()
         };
-        self.ioctl(MEDIA_IOC_G_TOPOLOGY, value)
-    }
-}
-
-impl VideoNode for SystemNode {
-    fn query_capability(&mut self, value: &mut Capability) -> io::Result<()> {
-        self.ioctl(VIDIOC_QUERYCAP, value)
-    }
-    fn enum_format(&mut self, value: &mut FmtDesc) -> io::Result<()> {
-        self.ioctl(VIDIOC_ENUM_FMT, value)
-    }
-    fn enum_frame_size(&mut self, value: &mut FrmSizeEnum) -> io::Result<()> {
-        self.ioctl(VIDIOC_ENUM_FRAMESIZES, value)
-    }
-    fn enum_frame_interval(&mut self, value: &mut FrmIvalEnum) -> io::Result<()> {
-        self.ioctl(VIDIOC_ENUM_FRAMEINTERVALS, value)
+        // SAFETY: MEDIA_IOC_G_TOPOLOGY encodes `struct media_v2_topology`;
+        // `ptr_entities` is null or points to `num_entities` entries of
+        // `entities`, which outlives the call, and every other array is null.
+        unsafe { self.ioctl(MEDIA_IOC_G_TOPOLOGY, value) }
     }
 }

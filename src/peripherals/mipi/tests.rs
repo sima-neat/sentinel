@@ -14,41 +14,16 @@
 
 use super::ioctl::*;
 use super::*;
+use crate::peripherals::sysutil::testing::{write_file, TempDir};
+use crate::peripherals::videodev2::testing::*;
+use crate::peripherals::videodev2::*;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "sentinel-mipi-provider-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, AtomicOrdering::SeqCst)
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("create fixture directory");
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn write_file(path: &Path, value: &str) {
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, value).unwrap();
-}
 
 fn copy_into(destination: &mut [u8], value: &str) {
     destination[..value.len()].copy_from_slice(value.as_bytes());
@@ -182,143 +157,25 @@ fn real_imx477_media() -> FakeMedia {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Fake video node
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VideoOp {
-    QueryCap,
-    EnumFmt,
-    EnumFrameSizes,
-    EnumFrameIntervals,
-}
-
-#[derive(Debug, Clone, Default)]
-struct FakeVideo {
-    capability: Capability,
-    /// `(buffer type, pixel format)` in driver order.
-    formats: Vec<(u32, u32)>,
-    /// `(pixel format, frame size)` in driver order.
-    sizes: Vec<(u32, FrmSizeEnum)>,
-    /// `((pixel format, width, height), interval)` in driver order.
-    intervals: Vec<((u32, u32, u32), FrmIvalEnum)>,
-    fail: Option<(VideoOp, i32)>,
-}
-
-fn einval() -> io::Error {
-    io::Error::from_raw_os_error(libc::EINVAL)
-}
-
-impl FakeVideo {
-    fn new(card: &str, capabilities: u32, device_caps: u32) -> Self {
-        let mut capability = Capability {
-            capabilities,
-            device_caps,
-            ..Capability::default()
-        };
-        copy_into(&mut capability.card, card);
-        Self {
-            capability,
-            ..Self::default()
-        }
-    }
-
-    fn format(mut self, buffer_type: u32, pixel_format: u32) -> Self {
-        self.formats.push((buffer_type, pixel_format));
-        self
-    }
-
-    fn size(mut self, pixel_format: u32, width: u32, height: u32) -> Self {
-        self.sizes.push((
-            pixel_format,
-            FrmSizeEnum {
-                kind: V4L2_FRMSIZE_TYPE_DISCRETE,
-                data: [width, height, 0, 0, 0, 0],
-                ..FrmSizeEnum::default()
-            },
-        ));
-        self
-    }
-
-    fn interval(mut self, pixel_format: u32, width: u32, height: u32, value: FrmIvalEnum) -> Self {
-        self.intervals.push(((pixel_format, width, height), value));
-        self
-    }
-
-    fn failing(mut self, op: VideoOp, errno: i32) -> Self {
-        self.fail = Some((op, errno));
-        self
-    }
-
-    fn check(&self, op: VideoOp) -> io::Result<()> {
-        match self.fail {
-            Some((failing, errno)) if failing == op => Err(io::Error::from_raw_os_error(errno)),
-            _ => Ok(()),
-        }
-    }
-}
-
-impl VideoNode for FakeVideo {
-    fn query_capability(&mut self, value: &mut Capability) -> io::Result<()> {
-        self.check(VideoOp::QueryCap)?;
-        *value = self.capability;
-        Ok(())
-    }
-
-    fn enum_format(&mut self, value: &mut FmtDesc) -> io::Result<()> {
-        self.check(VideoOp::EnumFmt)?;
-        let found = self
-            .formats
-            .iter()
-            .filter(|(buffer_type, _)| *buffer_type == value.buf_type)
-            .nth(value.index as usize)
-            .ok_or_else(einval)?;
-        value.pixelformat = found.1;
-        Ok(())
-    }
-
-    fn enum_frame_size(&mut self, value: &mut FrmSizeEnum) -> io::Result<()> {
-        self.check(VideoOp::EnumFrameSizes)?;
-        let found = self
-            .sizes
-            .iter()
-            .filter(|(pixel_format, _)| *pixel_format == value.pixel_format)
-            .nth(value.index as usize)
-            .ok_or_else(einval)?;
-        value.kind = found.1.kind;
-        value.data = found.1.data;
-        Ok(())
-    }
-
-    fn enum_frame_interval(&mut self, value: &mut FrmIvalEnum) -> io::Result<()> {
-        self.check(VideoOp::EnumFrameIntervals)?;
-        let key = (value.pixel_format, value.width, value.height);
-        let found = self
-            .intervals
-            .iter()
-            .filter(|(candidate, _)| *candidate == key)
-            .nth(value.index as usize)
-            .ok_or_else(einval)?;
-        value.kind = found.1.kind;
-        value.data = found.1.data;
-        Ok(())
-    }
-}
-
-fn fourcc(code: &[u8; 4]) -> u32 {
-    u32::from_le_bytes(*code)
-}
-
 const MPLANE: u32 = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+
+/// Synthetic: an ISP output node with multiplanar capture device caps and no
+/// formats yet.
+fn mplane_isp_node() -> FakeVideoNode {
+    FakeVideoNode::new(
+        ISP_CARD_NAME,
+        V4L2_CAP_DEVICE_CAPS | V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+        V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+    )
+}
 const REAL_ISP_SIZES: [(u32, u32); 3] = [(1920, 1080), (2048, 1080), (2432, 2048)];
 
 /// `v4l2_isp_out_real.txt` (transcribed): card `arm-isp-out`, capabilities
 /// 0x85201000 / device caps 0x05201000 (multiplanar capture), formats AR24,
 /// RGB3 and NV12 in that order, each listing every discrete size eight times,
 /// and no frame intervals.
-fn real_isp_node() -> FakeVideo {
-    let mut node = FakeVideo::new(ISP_CARD_NAME, 0x8520_1000, 0x0520_1000);
+fn real_isp_node() -> FakeVideoNode {
+    let mut node = FakeVideoNode::new(ISP_CARD_NAME, 0x8520_1000, 0x0520_1000);
     copy_into(&mut node.capability.driver, "arm-camera-isp");
     copy_into(&mut node.capability.bus_info, "platform: isp-v4l2-0-0-1");
     for code in [b"AR24", b"RGB3", b"NV12"] {
@@ -326,19 +183,11 @@ fn real_isp_node() -> FakeVideo {
         node = node.format(MPLANE, format);
         for (width, height) in REAL_ISP_SIZES {
             for _ in 0..8 {
-                node = node.size(format, width, height);
+                node = node.size(format, raw_size_discrete(width, height));
             }
         }
     }
     node
-}
-
-fn discrete_interval(numerator: u32, denominator: u32) -> FrmIvalEnum {
-    FrmIvalEnum {
-        kind: V4L2_FRMIVAL_TYPE_DISCRETE,
-        data: [numerator, denominator, 0, 0, 0, 0],
-        ..FrmIvalEnum::default()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +197,7 @@ fn discrete_interval(numerator: u32, denominator: u32) -> FrmIvalEnum {
 #[derive(Clone, Default)]
 struct FakeBackend {
     media: HashMap<PathBuf, Result<FakeMedia, i32>>,
-    video: HashMap<PathBuf, Result<FakeVideo, i32>>,
+    video: HashMap<PathBuf, Result<FakeVideoNode, i32>>,
     opened: Arc<Mutex<Vec<PathBuf>>>,
 }
 
@@ -386,8 +235,8 @@ struct Board {
 impl Board {
     fn new() -> Self {
         let directory = TempDir::new();
-        let sys = directory.0.join("sys");
-        let dev = directory.0.join("dev");
+        let sys = directory.path().join("sys");
+        let dev = directory.path().join("dev");
         fs::create_dir_all(sys.join("class/video4linux")).unwrap();
         fs::create_dir_all(&dev).unwrap();
         Self {
@@ -420,7 +269,7 @@ impl Board {
 
     /// A `/sys/class/video4linux/<entry>` with the given sysfs `name`, plus its
     /// `/dev` node served by `node` (or failing to open with `errno`).
-    fn video(mut self, entry: &str, sysfs_name: &str, node: Result<FakeVideo, i32>) -> Self {
+    fn video(mut self, entry: &str, sysfs_name: &str, node: Result<FakeVideoNode, i32>) -> Self {
         write_file(
             &self.sys.join("class/video4linux").join(entry).join("name"),
             &format!("{sysfs_name}\n"),
@@ -430,7 +279,7 @@ impl Board {
         self
     }
 
-    fn isp(self, entry: &str, node: FakeVideo) -> Self {
+    fn isp(self, entry: &str, node: FakeVideoNode) -> Self {
         self.video(entry, ISP_SYSFS_NAME, Ok(node))
     }
 
@@ -493,7 +342,7 @@ fn real_imx477_devkit_board_produces_one_camera_with_isp_modes() {
         .video(
             "video0",
             "raw-capture.1.0",
-            Ok(FakeVideo::new("raw-capture", 0, 0)),
+            Ok(FakeVideoNode::new("raw-capture", 0, 0)),
         )
         .isp("video1", real_isp_node());
     let records = board.discover().unwrap();
@@ -655,7 +504,7 @@ fn missing_isp_node_degrades_to_empty_modes() {
     let board = Board::new().media("media0", real_imx477_media()).video(
         "video0",
         "raw-capture.1.0",
-        Ok(FakeVideo::new("raw-capture", 0, 0)),
+        Ok(FakeVideoNode::new("raw-capture", 0, 0)),
     );
     let records = board.discover().unwrap();
     assert_eq!(records.len(), 1);
@@ -682,7 +531,7 @@ fn missing_isp_node_degrades_to_empty_modes() {
 #[test]
 fn unreadable_isp_node_degrades_to_empty_modes() {
     let eio = os_message(&io::Error::from_raw_os_error(libc::EIO));
-    let cases: Vec<(Result<FakeVideo, i32>, String)> = vec![
+    let cases: Vec<(Result<FakeVideoNode, i32>, String)> = vec![
         (
             Err(libc::EACCES),
             format!(
@@ -731,14 +580,14 @@ fn unreadable_isp_node_degrades_to_empty_modes() {
 #[test]
 fn isp_frame_intervals_replace_the_nominal_rate() {
     let nv12 = fourcc(b"NV12");
-    let node = FakeVideo::new(ISP_CARD_NAME, 0, V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+    let node = mplane_isp_node()
         .format(MPLANE, nv12)
-        .size(nv12, 1920, 1080)
-        .size(nv12, 2048, 1080)
-        .size(nv12, 2432, 2048)
-        .interval(nv12, 1920, 1080, discrete_interval(1, 60))
-        .interval(nv12, 1920, 1080, discrete_interval(1001, 30000))
-        .interval(nv12, 1920, 1080, discrete_interval(1, 30))
+        .size(nv12, raw_size_discrete(1920, 1080))
+        .size(nv12, raw_size_discrete(2048, 1080))
+        .size(nv12, raw_size_discrete(2432, 2048))
+        .interval(nv12, 1920, 1080, raw_interval_discrete(1, 60))
+        .interval(nv12, 1920, 1080, raw_interval_discrete(1001, 30000))
+        .interval(nv12, 1920, 1080, raw_interval_discrete(1, 30))
         .interval(
             nv12,
             2432,
@@ -788,10 +637,10 @@ fn isp_frame_intervals_replace_the_nominal_rate() {
         ]
     );
 
-    let malformed = FakeVideo::new(ISP_CARD_NAME, 0, V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+    let malformed = mplane_isp_node()
         .format(MPLANE, nv12)
-        .size(nv12, 1920, 1080)
-        .interval(nv12, 1920, 1080, discrete_interval(0, 30));
+        .size(nv12, raw_size_discrete(1920, 1080))
+        .interval(nv12, 1920, 1080, raw_interval_discrete(0, 30));
     let board = Board::new()
         .media("media0", real_imx477_media())
         .isp("video1", malformed);
@@ -812,15 +661,15 @@ fn isp_frame_intervals_replace_the_nominal_rate() {
 #[test]
 fn multiple_isp_nodes_report_the_modes_they_share() {
     let nv12 = fourcc(b"NV12");
-    let second = FakeVideo::new(ISP_CARD_NAME, 0, V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+    let second = mplane_isp_node()
         .format(MPLANE, nv12)
-        .size(nv12, 3840, 2160)
-        .size(nv12, 2048, 1080)
-        .size(nv12, 1920, 1080);
+        .size(nv12, raw_size_discrete(3840, 2160))
+        .size(nv12, raw_size_discrete(2048, 1080))
+        .size(nv12, raw_size_discrete(1920, 1080));
     let mut wrong_card = real_isp_node();
     wrong_card.capability.card = [0; 32];
     copy_into(&mut wrong_card.capability.card, "arm-isp-raw");
-    let no_formats = FakeVideo::new(ISP_CARD_NAME, 0, V4L2_CAP_VIDEO_CAPTURE_MPLANE);
+    let no_formats = mplane_isp_node();
 
     let board = Board::new()
         .media("media0", real_imx477_media())
@@ -844,9 +693,9 @@ fn multiple_isp_nodes_report_the_modes_they_share() {
     // All four ISP-named nodes were opened; the rejected ones contribute nothing.
     assert_eq!(board.opened().len(), 5);
 
-    let disjoint = FakeVideo::new(ISP_CARD_NAME, 0, V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+    let disjoint = mplane_isp_node()
         .format(MPLANE, nv12)
-        .size(nv12, 640, 480);
+        .size(nv12, raw_size_discrete(640, 480));
     let board = Board::new()
         .media("media0", real_imx477_media())
         .isp("video1", real_isp_node())
@@ -871,18 +720,18 @@ fn multiple_isp_nodes_report_the_modes_they_share() {
 }
 
 /// Synthetic: a single-planar ISP uses the single-planar buffer type (and
-/// `capabilities` when `device_caps` is zero, as the C++ does); fourccs are
-/// printed as the v4l2 provider prints them, without NV12M -> NV12 mapping.
+/// `capabilities` when `V4L2_CAP_DEVICE_CAPS` is not set); fourccs are printed
+/// as the v4l2 provider prints them, without NV12M -> NV12 mapping.
 #[test]
 fn single_planar_isp_and_fourcc_spelling() {
     let nm12 = fourcc(b"NM12");
     let unprintable = 0x0000_0001;
-    let node = FakeVideo::new(ISP_CARD_NAME, V4L2_CAP_VIDEO_CAPTURE, 0)
+    let node = FakeVideoNode::new(ISP_CARD_NAME, V4L2_CAP_VIDEO_CAPTURE, 0)
         .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, nm12)
         .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, unprintable)
         .format(MPLANE, fourcc(b"NV12"))
-        .size(nm12, 1920, 1080)
-        .size(unprintable, 640, 480);
+        .size(nm12, raw_size_discrete(1920, 1080))
+        .size(unprintable, raw_size_discrete(640, 480));
     let board = Board::new()
         .media("media0", real_imx477_media())
         .isp("video1", node);
@@ -1058,14 +907,17 @@ fn enumerations_are_capped() {
     );
 
     let nv12 = fourcc(b"NV12");
-    let base = || FakeVideo::new(ISP_CARD_NAME, 0, V4L2_CAP_VIDEO_CAPTURE_MPLANE);
+    let base = mplane_isp_node;
     let mut endless_formats = base();
     let mut endless_sizes = base().format(MPLANE, nv12);
-    let mut endless_intervals = base().format(MPLANE, nv12).size(nv12, 1920, 1080);
+    let mut endless_intervals = base()
+        .format(MPLANE, nv12)
+        .size(nv12, raw_size_discrete(1920, 1080));
     for _ in 0..=MAX_ENUMERATION_ENTRIES {
         endless_formats = endless_formats.format(MPLANE, nv12);
-        endless_sizes = endless_sizes.size(nv12, 1920, 1080);
-        endless_intervals = endless_intervals.interval(nv12, 1920, 1080, discrete_interval(1, 30));
+        endless_sizes = endless_sizes.size(nv12, raw_size_discrete(1920, 1080));
+        endless_intervals =
+            endless_intervals.interval(nv12, 1920, 1080, raw_interval_discrete(1, 30));
     }
     for (node, what) in [
         (endless_formats, "format list"),
@@ -1090,9 +942,12 @@ fn enumerations_are_capped() {
 #[test]
 fn no_media_devices_is_an_empty_result() {
     let directory = TempDir::new();
-    let missing = MipiProvider::with_roots(directory.0.join("no-sys"), directory.0.join("no-dev"))
-        .discover()
-        .unwrap();
+    let missing = MipiProvider::with_roots(
+        directory.path().join("no-sys"),
+        directory.path().join("no-dev"),
+    )
+    .discover()
+    .unwrap();
     assert!(missing.is_empty());
 
     let board = Board::new().isp("video1", real_isp_node());
@@ -1115,11 +970,9 @@ fn provider_metadata() {
 
 #[test]
 fn ioctl_abi_matches_linux_media_h() {
-    // Values computed from <linux/media.h> and <linux/videodev2.h> with a C
-    // program (generic _IOC encoding, identical on aarch64 and x86_64).
-    assert_eq!(std::mem::size_of::<MediaDeviceInfo>(), 256);
-    assert_eq!(std::mem::size_of::<MediaV2Topology>(), 72);
-    assert_eq!(std::mem::size_of::<MediaV2Entity>(), 96);
+    // Values computed from <linux/media.h> with a C program (generic _IOC
+    // encoding, identical on aarch64 and x86_64). Structure sizes are checked
+    // at compile time; the V4L2 ioctls are checked in `videodev2`.
     assert_eq!(std::mem::offset_of!(MediaDeviceInfo, bus_info), 88);
     assert_eq!(std::mem::offset_of!(MediaV2Topology, num_entities), 8);
     assert_eq!(std::mem::offset_of!(MediaV2Topology, ptr_entities), 16);
@@ -1130,14 +983,6 @@ fn ioctl_abi_matches_linux_media_h() {
     assert_eq!(MEDIA_ENT_F_CAM_SENSOR, 0x0002_0001);
     assert_eq!(MEDIA_ENT_F_IO_V4L, 0x0001_0001);
     assert_eq!(MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN, 0x0002_0000);
-    assert_eq!(std::mem::size_of::<Capability>(), 104);
-    assert_eq!(std::mem::size_of::<FmtDesc>(), 64);
-    assert_eq!(std::mem::size_of::<FrmSizeEnum>(), 44);
-    assert_eq!(std::mem::size_of::<FrmIvalEnum>(), 52);
-    assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
-    assert_eq!(VIDIOC_ENUM_FMT, 0xc040_5602);
-    assert_eq!(VIDIOC_ENUM_FRAMESIZES, 0xc02c_564a);
-    assert_eq!(VIDIOC_ENUM_FRAMEINTERVALS, 0xc034_564b);
 }
 
 #[test]
@@ -1145,9 +990,9 @@ fn system_backend_reports_non_media_file_as_unreadable() {
     // Exercises the real open/ioctl path: a regular file opens read-only but
     // rejects MEDIA_IOC_DEVICE_INFO with ENOTTY.
     let directory = TempDir::new();
-    let dev = directory.0.join("dev");
+    let dev = directory.path().join("dev");
     write_file(&dev.join("media0"), "not a device");
-    let error = MipiProvider::with_roots(directory.0.join("sys"), &dev)
+    let error = MipiProvider::with_roots(directory.path().join("sys"), &dev)
         .discover()
         .unwrap_err();
     assert_eq!(error.code, "io.open");
@@ -1170,12 +1015,12 @@ fn real_imx477_modes_classified_by_core_rules() {
         .video(
             "video0",
             "raw-capture.1.0",
-            Ok(FakeVideo::new("raw-capture", 0, 0)),
+            Ok(FakeVideoNode::new("raw-capture", 0, 0)),
         )
         .isp("video1", real_isp_node());
     let mut records = board.discover().unwrap();
     let dir = TempDir::new();
-    let rules = dir.0.join("neat-core.json");
+    let rules = dir.path().join("neat-core.json");
     fs::write(
         &rules,
         crate::peripherals::support::core_rules().to_string(),

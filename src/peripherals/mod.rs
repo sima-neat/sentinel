@@ -9,8 +9,10 @@ pub mod model;
 pub mod scan;
 pub mod service;
 pub mod support;
+mod sysutil;
 pub mod uevent;
 pub mod v4l2;
+mod videodev2;
 
 use std::path::{Path, PathBuf};
 

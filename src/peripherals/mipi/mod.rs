@@ -29,18 +29,22 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::model::{Provider, ProviderError, Record};
+use super::sysutil::{
+    bounded_string, disappeared, errno_of, os_message, read_text_file, trim_c_space,
+    CODE_DISCOVERY_FAILED, CODE_IO_OPEN, CODE_PERMISSION_DENIED,
+};
+use super::videodev2::{
+    effective_capabilities, fourcc_string, Capability, FmtDesc, FrmIvalEnum, FrmSizeEnum,
+    VideoNode, MAX_ENUMERATION_ENTRIES, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_FRMIVAL_TYPE_DISCRETE,
+    V4L2_FRMSIZE_TYPE_DISCRETE,
+};
 use ioctl::{
-    Backend, Capability, FmtDesc, FrmIvalEnum, FrmSizeEnum, MediaDeviceInfo, MediaNode,
-    MediaV2Entity, MediaV2Topology, SystemBackend, VideoNode, MEDIA_ENT_F_CAM_SENSOR,
-    V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE_MPLANE,
-    V4L2_FRMIVAL_TYPE_DISCRETE, V4L2_FRMSIZE_TYPE_DISCRETE,
+    Backend, MediaDeviceInfo, MediaNode, MediaV2Entity, MediaV2Topology, SystemBackend,
+    MEDIA_ENT_F_CAM_SENSOR,
 };
 
 pub const PROVIDER_NAME: &str = "daemon.camera.mipi";
-
-const CODE_IO_OPEN: &str = "io.open";
-const CODE_PERMISSION_DENIED: &str = "io.permission_denied";
-const CODE_DISCOVERY_FAILED: &str = "peripherals.discovery_failed";
 
 /// `media_device_info.driver` of the SiMa capture media device.
 const SIMA_MEDIA_DRIVER: &str = "simaai-v4l2-vid";
@@ -51,9 +55,6 @@ const ISP_CARD_NAME: &str = "arm-isp-out";
 /// previous provider did (`kDefaultFramerateNum` / `kDefaultFramerateDen`).
 const NOMINAL_FRAMERATE: (u32, u32) = (30, 1);
 
-/// A driver that never ends an enumeration with EINVAL would otherwise keep
-/// the in-process peripherals thread busy forever.
-const MAX_ENUMERATION_ENTRIES: u32 = 1024;
 /// `MEDIA_IOC_G_TOPOLOGY` is read twice (count, then fill); a graph that keeps
 /// changing between the two calls is retried this many times.
 const MAX_TOPOLOGY_ATTEMPTS: u32 = 4;
@@ -116,64 +117,6 @@ impl Provider for MipiProvider {
         }
         let isp = probe_isp(&self.sys_root, &self.dev_root, self.backend.as_ref());
         build_records(&sensors, &isp)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// `std::isspace` in the C locale.
-fn is_c_space(character: char) -> bool {
-    matches!(character, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r')
-}
-
-fn read_text_file(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    Some(
-        String::from_utf8_lossy(&bytes)
-            .trim_matches(is_c_space)
-            .to_string(),
-    )
-}
-
-/// A NUL-terminated kernel string, untrimmed.
-fn bounded_string(data: &[u8]) -> String {
-    let length = data
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(data.len());
-    String::from_utf8_lossy(&data[..length]).into_owned()
-}
-
-/// The OS error text without Rust's ` (os error N)` suffix (`strerror`).
-fn os_message(error: &io::Error) -> String {
-    let text = error.to_string();
-    match error.raw_os_error() {
-        Some(code) => text
-            .strip_suffix(&format!(" (os error {code})"))
-            .map(str::to_owned)
-            .unwrap_or(text),
-        None => text,
-    }
-}
-
-fn errno_of(error: &io::Error) -> i32 {
-    error.raw_os_error().unwrap_or(0)
-}
-
-fn disappeared(errno: i32) -> bool {
-    errno == libc::ENOENT || errno == libc::ENODEV || errno == libc::ENXIO
-}
-
-/// The fourcc as the `v4l2` provider prints it: four printable characters, or
-/// `0x%08x` otherwise.
-fn fourcc_string(value: u32) -> String {
-    let bytes = value.to_le_bytes();
-    if bytes.iter().all(|byte| (0x20..=0x7e).contains(byte)) {
-        bytes.iter().map(|&byte| char::from(byte)).collect()
-    } else {
-        format!("0x{value:08x}")
     }
 }
 
@@ -314,9 +257,7 @@ fn probe_media_device(backend: &dyn Backend, path: &Path) -> Result<Vec<Sensor>,
     if bounded_string(&info.driver) != SIMA_MEDIA_DRIVER {
         return Ok(Vec::new());
     }
-    let bus_info = bounded_string(&info.bus_info)
-        .trim_matches(is_c_space)
-        .to_string();
+    let bus_info = trim_c_space(&bounded_string(&info.bus_info)).to_string();
 
     let mut sensors = Vec::new();
     for entity in read_entities(node, path)? {
@@ -472,12 +413,7 @@ fn enumerate_isp_node(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<Isp
     if bounded_string(&capability.card) != ISP_CARD_NAME {
         return Ok(modes);
     }
-    let capabilities = if capability.device_caps != 0 {
-        capability.device_caps
-    } else {
-        capability.capabilities
-    };
-    let buffer_type = if capabilities & V4L2_CAP_VIDEO_CAPTURE_MPLANE != 0 {
+    let buffer_type = if effective_capabilities(&capability) & V4L2_CAP_VIDEO_CAPTURE_MPLANE != 0 {
         V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
     } else {
         V4L2_BUF_TYPE_VIDEO_CAPTURE

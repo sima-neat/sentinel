@@ -24,20 +24,21 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use super::model::{Provider, ProviderError, Record};
-use ioctl::{
-    Backend, Capability, FmtDesc, FrmIvalEnum, FrmSizeEnum, Node, SystemBackend,
-    V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_DEVICE_CAPS,
-    V4L2_CAP_VIDEO_CAPTURE, V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_M2M,
-    V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_FRMIVAL_TYPE_CONTINUOUS, V4L2_FRMIVAL_TYPE_DISCRETE,
-    V4L2_FRMIVAL_TYPE_STEPWISE, V4L2_FRMSIZE_TYPE_CONTINUOUS, V4L2_FRMSIZE_TYPE_DISCRETE,
-    V4L2_FRMSIZE_TYPE_STEPWISE,
+use super::sysutil::{
+    bounded_string, disappeared, errno_of, os_message, read_text_file, trim_c_space,
+    CODE_DISCOVERY_FAILED, CODE_IO_OPEN, CODE_PERMISSION_DENIED,
 };
+use super::videodev2::{
+    effective_capabilities, fourcc_string, Capability, FmtDesc, FrmIvalEnum, FrmSizeEnum,
+    VideoNode, MAX_ENUMERATION_ENTRIES, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+    V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE, V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+    V4L2_CAP_VIDEO_M2M, V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_FRMIVAL_TYPE_CONTINUOUS,
+    V4L2_FRMIVAL_TYPE_DISCRETE, V4L2_FRMIVAL_TYPE_STEPWISE, V4L2_FRMSIZE_TYPE_CONTINUOUS,
+    V4L2_FRMSIZE_TYPE_DISCRETE, V4L2_FRMSIZE_TYPE_STEPWISE,
+};
+use ioctl::{Backend, SystemBackend};
 
 pub const PROVIDER_NAME: &str = "daemon.camera.v4l2";
-
-const CODE_IO_OPEN: &str = "io.open";
-const CODE_PERMISSION_DENIED: &str = "io.permission_denied";
-const CODE_DISCOVERY_FAILED: &str = "peripherals.discovery_failed";
 
 const AVAILABILITY_REASON: &str = "V4L2 does not expose a reliable read-only ownership state; \
 discovery does not acquire, configure, or stream from the camera.";
@@ -224,37 +225,6 @@ impl ProbeError {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// `std::isspace` in the C locale.
-fn is_c_space(character: char) -> bool {
-    matches!(character, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r')
-}
-
-fn trim(value: &str) -> String {
-    value.trim_matches(is_c_space).to_string()
-}
-
-fn read_text_file(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    Some(trim(&String::from_utf8_lossy(&bytes)))
-}
-
-/// The OS error text without Rust's ` (os error N)` suffix, matching
-/// `strerror` as used by the C++ provider.
-fn os_message(error: &io::Error) -> String {
-    let text = error.to_string();
-    match error.raw_os_error() {
-        Some(code) => text
-            .strip_suffix(&format!(" (os error {code})"))
-            .map(str::to_owned)
-            .unwrap_or(text),
-        None => text,
-    }
-}
-
-fn errno_of(error: &io::Error) -> i32 {
-    error.raw_os_error().unwrap_or(0)
-}
-
 /// Failure class for `std::filesystem` errors (`errc::permission_denied`).
 fn filesystem_failure(errno: i32) -> ProbeFailure {
     if errno == libc::EACCES {
@@ -262,10 +232,6 @@ fn filesystem_failure(errno: i32) -> ProbeFailure {
     } else {
         ProbeFailure::Unreadable
     }
-}
-
-fn disappeared(errno: i32) -> bool {
-    errno == libc::ENOENT || errno == libc::ENODEV || errno == libc::ENXIO
 }
 
 fn probe_io_error(action: &str, path: &Path, error: &io::Error) -> ProbeError {
@@ -321,31 +287,6 @@ fn stable_id(identity: &UsbIdentity) -> String {
         hash = hash.wrapping_mul(1_099_511_628_211);
     }
     format!("camera:v4l2:{hash:016x}")
-}
-
-fn bounded_string(data: &[u8]) -> String {
-    let length = data
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(data.len());
-    trim(&String::from_utf8_lossy(&data[..length]))
-}
-
-fn fourcc_string(value: u32) -> String {
-    let bytes = value.to_le_bytes();
-    if bytes.iter().all(|byte| (0x20..=0x7e).contains(byte)) {
-        bytes.iter().map(|&byte| char::from(byte)).collect()
-    } else {
-        format!("0x{value:08x}")
-    }
-}
-
-fn effective_capabilities(capability: &Capability) -> u32 {
-    if capability.capabilities & V4L2_CAP_DEVICE_CAPS != 0 {
-        capability.device_caps
-    } else {
-        capability.capabilities
-    }
 }
 
 fn is_capture_node(capability: &Capability) -> bool {
@@ -750,12 +691,8 @@ fn usb_identity(class_entry: &Path, sys_root: &Path) -> Result<Option<UsbIdentit
 // ioctl enumeration
 // ---------------------------------------------------------------------------
 
-/// A driver that never ends an enumeration with EINVAL would otherwise keep
-/// the in-process peripherals thread busy forever.
-const MAX_ENUMERATION_ENTRIES: u32 = 1024;
-
 fn enumerate_intervals(
-    node: &mut dyn Node,
+    node: &mut dyn VideoNode,
     device_path: &Path,
     pixel_format: u32,
     width: u32,
@@ -796,7 +733,7 @@ fn enumerate_intervals(
 }
 
 fn enumerate_sizes(
-    node: &mut dyn Node,
+    node: &mut dyn VideoNode,
     device_path: &Path,
     pixel_format: u32,
 ) -> Result<Vec<FrameSize>, ProbeError> {
@@ -851,7 +788,7 @@ fn enumerate_sizes(
 }
 
 fn enumerate_formats(
-    node: &mut dyn Node,
+    node: &mut dyn VideoNode,
     device_path: &Path,
     buffer_type: u32,
 ) -> Result<Vec<Format>, ProbeError> {
@@ -916,7 +853,7 @@ fn probe_device(
     }
 
     if identity.model.is_empty() {
-        identity.model = bounded_string(&capability.card);
+        identity.model = trim_c_space(&bounded_string(&capability.card)).to_string();
     }
     let mut device = Device {
         identity,
