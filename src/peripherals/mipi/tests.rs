@@ -2,7 +2,8 @@
 //! **Transcribed** answers come from a Modalix DevKit (kernel 6.18.3,
 //! `media-ctl -p` and `v4l2-ctl --list-formats-ext`, kept in Insight's
 //! `tests/fixtures/peripherals/`; re-checked live on 2026-10-03). Everything
-//! else is synthetic, including which `/dev/videoN` the ISP is.
+//! else is synthetic, including which `/dev/videoN` the ISP is, graph object
+//! ids, and the sensor sub-device's device number.
 
 use super::ioctl::*;
 use super::*;
@@ -28,7 +29,21 @@ fn copy_into(destination: &mut [u8], value: &str) {
 }
 
 #[derive(Clone, Default)]
-struct FakeMedia(MediaDeviceInfo, Vec<MediaV2Entity>);
+struct FakeMedia(MediaDeviceInfo, Graph);
+
+/// Fills `room` with `items` (left alone when not requested); `ENOSPC` when
+/// they do not fit.
+fn fill<T: Copy>(room: &mut Vec<T>, items: &[T]) -> io::Result<()> {
+    if room.is_empty() {
+        return Ok(());
+    }
+    let enospc = io::Error::from_raw_os_error(libc::ENOSPC);
+    room.get_mut(..items.len())
+        .ok_or(enospc)?
+        .copy_from_slice(items);
+    room.truncate(items.len());
+    Ok(())
+}
 
 impl MediaNode for FakeMedia {
     fn device_info(&mut self, value: &mut MediaDeviceInfo) -> io::Result<()> {
@@ -36,34 +51,168 @@ impl MediaNode for FakeMedia {
         Ok(())
     }
 
-    fn entities(&mut self, entities: &mut [MediaV2Entity]) -> io::Result<usize> {
-        let enospc = io::Error::from_raw_os_error(libc::ENOSPC);
-        let slots = entities.get_mut(..self.1.len()).ok_or(enospc)?;
-        slots.copy_from_slice(&self.1);
-        Ok(slots.len())
+    fn topology(&mut self, graph: &mut Graph) -> io::Result<()> {
+        let mut read = graph.clone();
+        fill(&mut read.entities, &self.1.entities)?;
+        fill(&mut read.interfaces, &self.1.interfaces)?;
+        fill(&mut read.pads, &self.1.pads)?;
+        fill(&mut read.links, &self.1.links)?;
+        *graph = read; // As the kernel: nothing is copied back on failure.
+        Ok(())
     }
 }
+
+/// Media API 6.18.3, as the DevKit reports it.
+const MEDIA_VERSION: u32 = 0x0006_1203;
 
 /// A media device with `(id, name, function)` entities.
 fn media(driver: &str, bus_info: &str, entities: &[(u32, &str, u32)]) -> Node<FakeMedia> {
     let mut fake = FakeMedia::default();
     copy_into(&mut fake.0.driver, driver);
     copy_into(&mut fake.0.bus_info, bus_info);
+    fake.0.versions[0] = MEDIA_VERSION;
     for &(id, name, function) in entities {
         let mut entity = MediaV2Entity::default();
         (entity.id, entity.function) = (id, function);
         copy_into(&mut entity.name, name);
-        fake.1.push(entity);
+        fake.1.entities.push(entity);
     }
     Ok(fake)
 }
 
+/// The pad id of `(entity, index)` (synthetic numbering).
+fn pad_id(entity: u32, index: u32) -> u32 {
+    1000 + entity * 16 + index
+}
+
+impl FakeMedia {
+    fn pad(mut self, entity: u32, index: u32, source: bool) -> Self {
+        let flags = if source { MEDIA_PAD_FL_SOURCE } else { 1 };
+        let (id, entity_id) = (pad_id(entity, index), entity);
+        let pad = MediaV2Pad {
+            id,
+            entity_id,
+            flags,
+            index,
+            ..MediaV2Pad::default()
+        };
+        self.1.pads.push(pad);
+        self
+    }
+
+    /// A data link from `(entity, pad index)` to `(entity, pad index)`.
+    fn link(mut self, source: (u32, u32), sink: (u32, u32), enabled: bool) -> Self {
+        let link = MediaV2Link {
+            id: 5000 + self.1.links.len() as u32,
+            source_id: pad_id(source.0, source.1),
+            sink_id: pad_id(sink.0, sink.1),
+            flags: if enabled { MEDIA_LNK_FL_ENABLED } else { 0 },
+            ..MediaV2Link::default()
+        };
+        self.1.links.push(link);
+        self
+    }
+
+    /// An interface of `kind` for `entity`, with device number `devnode`.
+    fn interface(mut self, entity: u32, kind: u32, (major, minor): (u32, u32)) -> Self {
+        let id = 9000 + self.1.interfaces.len() as u32;
+        let mut interface = MediaV2Interface {
+            id,
+            intf_type: kind,
+            ..MediaV2Interface::default()
+        };
+        interface.data[..2].copy_from_slice(&[major, minor]);
+        self.1.interfaces.push(interface);
+        self.1.links.push(MediaV2Link {
+            id: 5000 + self.1.links.len() as u32,
+            source_id: id,
+            sink_id: entity,
+            flags: MEDIA_LNK_FL_INTERFACE_LINK | MEDIA_LNK_FL_ENABLED,
+            ..MediaV2Link::default()
+        });
+        self
+    }
+}
+
+/// The device number of the IMX477 sub-device (synthetic; V4L2's major).
+const IMX477_DEVNODE: (u32, u32) = (81, 2);
+
 /// Transcribed (`media_ctl_imx477_real.txt`): the SiMa media device and its
-/// capture path (entities 1, 5 and 16), with `sensors` bound.
+/// capture path (entities 1, 5 and 16) with their data links, with `sensors`
+/// bound. The IMX477 (entity 33) has image pad 0 linked to the CSI-2
+/// receiver's pad 0, an unlinked pad 1, and sub-device `/dev/v4l-subdev2`.
 fn real_media(sensors: &[(u32, &str, u32)]) -> Node<FakeMedia> {
     let path = [(1, "raw-capture.1.0", 0x0001_0001), (5, "vdma.1", SUBDEV)];
     let path = [&path[..], &[(16, "csidev-40c3000.csi", SUBDEV)], sensors];
-    media(SIMA_MEDIA_DRIVER, "platform:csi2video@1", &path.concat())
+    let mut fake = media(SIMA_MEDIA_DRIVER, "platform:csi2video@1", &path.concat())?;
+    fake = fake.pad(1, 0, false).pad(5, 0, false).pad(5, 4, true);
+    fake = fake.pad(16, 0, false).pad(16, 1, true);
+    fake = fake.link((16, 1), (5, 0), true).link((5, 4), (1, 0), true);
+    fake = fake.interface(16, MEDIA_INTF_T_V4L_SUBDEV, (81, 1));
+    if sensors.iter().any(|&(id, ..)| id == IMX477.0) {
+        fake = fake.pad(33, 0, true).pad(33, 1, true);
+        fake = fake.link((33, 0), (16, 0), true);
+        fake = fake.interface(33, MEDIA_INTF_T_V4L_SUBDEV, IMX477_DEVNODE);
+    }
+    Ok(fake)
+}
+
+/// A sensor sub-device: the active format of one pad, control minimums with
+/// their flags, and current control values.
+#[derive(Clone, Default)]
+struct FakeSubdev {
+    format: Option<(u32, u32, u32)>,
+    controls: Vec<(u32, i64, u32)>,
+    values: Vec<(u32, i64)>,
+}
+
+impl SubdevNode for FakeSubdev {
+    fn format(&mut self, value: &mut SubdevFormat) -> io::Result<()> {
+        let active = value.which == V4L2_SUBDEV_FORMAT_ACTIVE;
+        let found = self.format.filter(|&(pad, ..)| active && pad == value.pad);
+        let (_, width, height) = found.ok_or(io::Error::from_raw_os_error(libc::EINVAL))?;
+        (value.format.width, value.format.height) = (width, height);
+        Ok(())
+    }
+
+    fn query_control(&mut self, value: &mut QueryExtCtrl) -> io::Result<()> {
+        let found = self.controls.iter().find(|(id, ..)| *id == value.id);
+        let &(_, minimum, flags) = found.ok_or(io::Error::from_raw_os_error(libc::EINVAL))?;
+        (value.minimum, value.flags) = (minimum, flags);
+        Ok(())
+    }
+
+    fn control_value(&mut self, id: u32) -> io::Result<i64> {
+        let found = self.values.iter().find(|(control, _)| *control == id);
+        found
+            .map(|&(_, value)| value)
+            .ok_or(io::Error::from_raw_os_error(libc::EINVAL))
+    }
+}
+
+/// A sensor with the given pixel rate, minimum blanking and pad 0 format.
+fn subdev(
+    pixel_rate: i64,
+    (hblank, vblank): (i64, i64),
+    (width, height): (u32, u32),
+) -> FakeSubdev {
+    FakeSubdev {
+        format: Some((0, width, height)),
+        controls: vec![
+            (V4L2_CID_HBLANK, hblank, 0),
+            (V4L2_CID_VBLANK, vblank, 0),
+            (V4L2_CID_PIXEL_RATE, pixel_rate, V4L2_CTRL_FLAG_READ_ONLY),
+        ],
+        values: vec![(V4L2_CID_PIXEL_RATE, pixel_rate)],
+    }
+}
+
+const V4L2_CTRL_FLAG_READ_ONLY: u32 = 0x0004;
+
+/// The IMX477 at 1920x1080 as the DevKit reports it: pixel rate 840 MHz,
+/// minimum HBLANK 9332 and VBLANK 48, measured at 65-66 fps.
+fn imx477_subdev() -> FakeSubdev {
+    subdev(840_000_000, (9332, 48), (1920, 1080))
 }
 
 /// Transcribed (`v4l2_isp_out_real.txt`): multiplanar capture, formats AR24,
@@ -96,7 +245,7 @@ fn isp(node: FakeVideoNode) -> Video<'static> {
 type Nodes<T> = HashMap<PathBuf, Node<T>>;
 
 #[derive(Clone, Default)]
-struct Fakes(Nodes<FakeMedia>, Nodes<FakeVideoNode>);
+struct Fakes(Nodes<FakeMedia>, Nodes<FakeVideoNode>, Nodes<FakeSubdev>);
 
 /// Opening a node the test did not declare is a test failure.
 fn open<T: Clone>(nodes: &Nodes<T>, path: &Path) -> io::Result<T> {
@@ -112,7 +261,15 @@ impl Backend for Fakes {
     fn open_video(&self, path: &Path) -> io::Result<Box<dyn VideoNode>> {
         Ok(Box::new(open(&self.1, path)?))
     }
+
+    fn open_subdev(&self, path: &Path) -> io::Result<Box<dyn SubdevNode>> {
+        Ok(Box::new(open(&self.2, path)?))
+    }
 }
+
+/// A sensor sub-device: its `/dev` name, device number and node. The
+/// `/sys/dev/char` link names it as the kernel does.
+type Subdev<'a> = (&'a str, (u32, u32), Node<FakeSubdev>);
 
 /// Scan a board with `/dev/media<index>` for each of `media` (beside the
 /// decoys `/dev/media` and `/dev/media0x`), and `/dev/video<index>` with a
@@ -121,6 +278,15 @@ impl Backend for Fakes {
 fn scan<'a>(
     media: impl IntoIterator<Item = Node<FakeMedia>>,
     video: impl IntoIterator<Item = Video<'a>>,
+) -> Result<Vec<Record>, ProviderError> {
+    scan_with(media, video, [])
+}
+
+/// `scan` with sensor sub-devices.
+fn scan_with<'a>(
+    media: impl IntoIterator<Item = Node<FakeMedia>>,
+    video: impl IntoIterator<Item = Video<'a>>,
+    subdevs: impl IntoIterator<Item = Subdev<'a>>,
 ) -> Result<Vec<Record>, ProviderError> {
     let directory = TempDir::new();
     let (root, mut fakes) = (directory.path(), Fakes::default());
@@ -135,6 +301,13 @@ fn scan<'a>(
         let sysfs = root.join(format!("sys/class/video4linux/video{index}/name"));
         write_file(&sysfs, &format!("{name}\n"));
         fakes.1.insert(root.join(format!("dev/video{index}")), node);
+    }
+    for (name, (major, minor), node) in subdevs {
+        let link = root.join(format!("sys/dev/char/{major}:{minor}"));
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let target = format!("../../devices/platform/csi/video4linux/{name}");
+        std::os::unix::fs::symlink(target, link).unwrap();
+        fakes.2.insert(root.join("dev").join(name), node);
     }
     let mut provider = MipiProvider::with_roots(root.join("sys"), root.join("dev"));
     provider.backend = Box::new(fakes);
@@ -198,6 +371,7 @@ fn real_imx477_devkit_board_produces_one_camera_with_isp_modes() {
             "connection": "mipi-csi2",
             "media_device": "/dev/media0",
             "bus_info": "platform:csi2video@1",
+            "csi_receiver": "csidev-40c3000.csi",
             "availability": {"state": "unknown", "reason": AVAILABILITY_REASON},
             "modes": modes.concat(),
             "isp": {"state": "available", "device_path": "/dev/video1",
@@ -407,4 +581,219 @@ fn listing_dev_maps_only_eacces_to_permission_denied() {
         let error = io::Error::from_raw_os_error(errno);
         assert_eq!(listing_failure(dev, &error).code, code);
     }
+}
+
+/// The IMX477 board with its sensor sub-device answering `sensor`.
+fn timed_imx477(sensor: Node<FakeSubdev>) -> Value {
+    let subdev = ("v4l-subdev2", IMX477_DEVNODE, sensor);
+    let records = scan_with([real_media(&[IMX477])], [isp(real_isp())], [subdev]);
+    records.unwrap()[0].details.clone()
+}
+
+/// Transcribed graph and ISP, with the sensor values the DevKit reports:
+/// the receiver, the timing, a 66.18 fps limit, and every ISP size offered at
+/// the sensor's rates instead of the nominal 30/1.
+#[test]
+fn imx477_sensor_timing_sets_max_fps_and_rates() {
+    let details = timed_imx477(Ok(imx477_subdev()));
+    assert_eq!(details["csi_receiver"], "csidev-40c3000.csi");
+    let timing = json!({"pixel_rate": 840_000_000_u64, "hblank_min": 9332,
+                        "vblank_min": 48, "width": 1920, "height": 1080});
+    assert_eq!(details["sensor_timing"], timing);
+    assert_eq!(details["max_fps"], json!(66.18));
+    let rates = [66, 60, 30, 25, 20, 15, 10, 5];
+    let mut expected = Vec::new();
+    for format in ["AR24", "NV12", "RGB3"] {
+        for size in SIZES {
+            let at = |rate| mode(format, size, (rate, 1), "sensor_timing");
+            expected.extend(rates.map(at));
+        }
+    }
+    assert_eq!(details["modes"], json!(expected));
+}
+
+/// Transcribed, then classified with Neat Core's rules: only NV12 at 30/1 is
+/// supported; the other rates get the frame-rate reason.
+#[test]
+fn sensor_timing_rates_classified_by_core_rules() {
+    let subdev = ("v4l-subdev2", IMX477_DEVNODE, Ok(imx477_subdev()));
+    let mut records = scan_with([real_media(&[IMX477])], [isp(real_isp())], [subdev]).unwrap();
+    let directory = TempDir::new();
+    let rules = directory.path().join("neat-core.json");
+    fs::write(&rules, core_rules().to_string()).unwrap();
+    SupportStage::new(&rules).apply(&mut records, &mut Vec::new());
+    let modes = records[0].details["modes"].as_array().unwrap();
+    let supported: Vec<_> = (modes.iter())
+        .filter(|mode| mode["supported"] == true)
+        .map(|mode| (mode["format"].clone(), mode["framerate_num"].clone()))
+        .collect();
+    assert_eq!(
+        json!(supported),
+        json!([["NV12", 30], ["NV12", 30], ["NV12", 30]])
+    );
+    let fast = modes
+        .iter()
+        .find(|mode| mode["framerate_num"] == 66)
+        .unwrap();
+    assert_eq!(fast["supported"], false);
+    let reason = fast["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("NV12 output only"),
+        "format is checked first: {reason}"
+    );
+    let nv12 = |mode: &&Value| mode["format"] == "NV12" && mode["framerate_num"] == 60;
+    let reason = modes.iter().find(nv12).unwrap()["reason"].as_str().unwrap();
+    assert!(reason.contains("30/1"), "{reason}");
+}
+
+/// Synthetic: a sensor without a readable sub-device, format or control
+/// keeps its receiver and the nominal modes, and the scan succeeds.
+#[test]
+fn sensor_without_timing_omits_it_without_failing() {
+    let without = |control| {
+        let mut sensor = imx477_subdev();
+        sensor.controls.retain(|(id, ..)| *id != control);
+        sensor.values.retain(|(id, _)| *id != control);
+        Ok(sensor)
+    };
+    let mut disabled = imx477_subdev();
+    disabled.controls[1].2 = V4L2_CTRL_FLAG_DISABLED;
+    let mut negative = imx477_subdev();
+    negative.controls[0].1 = -1;
+    let mut other_pad = imx477_subdev();
+    other_pad.format = Some((1, 1920, 1080));
+    let mut empty = imx477_subdev();
+    empty.format = Some((0, 0, 0));
+    let zero_rate = subdev(0, (9332, 48), (1920, 1080));
+    let cases = [
+        Err(libc::EACCES),
+        without(V4L2_CID_HBLANK),
+        without(V4L2_CID_VBLANK),
+        without(V4L2_CID_PIXEL_RATE),
+        Ok(disabled),
+        Ok(negative),
+        Ok(other_pad),
+        Ok(empty),
+        Ok(zero_rate),
+    ];
+    let nominal_modes = imx477([isp(real_isp())])["modes"].clone();
+    for (case, sensor) in cases.into_iter().enumerate() {
+        let details = timed_imx477(sensor);
+        assert_eq!(details["csi_receiver"], "csidev-40c3000.csi", "case {case}");
+        assert!(details.get("sensor_timing").is_none(), "case {case}");
+        assert!(details.get("max_fps").is_none(), "case {case}");
+        assert_eq!(details["modes"], nominal_modes, "case {case}");
+    }
+    // No `/sys/dev/char` entry for the sub-device: nothing is opened.
+    assert!(imx477([isp(real_isp())]).get("sensor_timing").is_none());
+    // The device number names a video node, not a sub-device: not opened.
+    let video = ("video5", IMX477_DEVNODE, Ok(imx477_subdev()));
+    let records = scan_with([real_media(&[IMX477])], [isp(real_isp())], [video]);
+    assert!(records.unwrap()[0].details.get("sensor_timing").is_none());
+}
+
+/// Synthetic: a graph without links or interfaces (or one whose links do not
+/// fit) has no receiver and no timing; a media API older than 4.19 has no pad
+/// index, so the receiver is reported but the timing is not.
+#[test]
+fn graph_without_links_or_pad_index_degrades() {
+    let bare = media(SIMA_MEDIA_DRIVER, "platform:csi2video@1", &[IMX477]);
+    let subdev = ("v4l-subdev2", IMX477_DEVNODE, Ok(imx477_subdev()));
+    let details = scan_with([bare], [isp(real_isp())], [subdev]).unwrap()[0]
+        .details
+        .clone();
+    assert!(details.get("csi_receiver").is_none());
+    assert!(details.get("sensor_timing").is_none());
+
+    let mut crowded = real_media(&[IMX477]).unwrap();
+    let filler = MediaV2Link::default();
+    crowded
+        .1
+        .links
+        .extend(vec![filler; MAX_ENUMERATION_ENTRIES as usize]);
+    let subdev = ("v4l-subdev2", IMX477_DEVNODE, Ok(imx477_subdev()));
+    let records = scan_with([Ok(crowded)], [isp(real_isp())], [subdev]).unwrap();
+    assert_eq!(
+        ids(&records),
+        ["camera:imx477 5-001a"],
+        "entities still read"
+    );
+    assert!(records[0].details.get("csi_receiver").is_none());
+
+    let mut old = real_media(&[IMX477]).unwrap();
+    old.0.versions[0] = (4 << 16) | (18 << 8);
+    let subdev = ("v4l-subdev2", IMX477_DEVNODE, Ok(imx477_subdev()));
+    let details = scan_with([Ok(old)], [isp(real_isp())], [subdev]).unwrap()[0]
+        .details
+        .clone();
+    assert_eq!(details["csi_receiver"], "csidev-40c3000.csi");
+    assert!(details.get("sensor_timing").is_none());
+}
+
+/// Synthetic: each sensor gets its own receiver, timing and rates; an
+/// enabled link wins over a disabled one from a lower pad.
+#[test]
+fn several_sensors_report_their_own_timing() {
+    let ov = (40, "ov5647 4-0036", SENSOR);
+    let receivers = [(17, "csidev-40d0000.csi", SUBDEV), (18, "unused", SUBDEV)];
+    let mut graph = real_media(&[&[IMX477, ov][..], &receivers].concat()).unwrap();
+    graph = graph.pad(17, 0, false).pad(18, 0, false);
+    graph = graph.pad(40, 0, true).pad(40, 1, true);
+    graph = graph
+        .link((40, 0), (18, 0), false)
+        .link((40, 1), (17, 0), true);
+    graph = graph.interface(40, MEDIA_INTF_T_V4L_SUBDEV, (81, 7));
+    let mut ov_sensor = subdev(58_333_000, (1896, 4), (640, 480));
+    ov_sensor.format = Some((1, 640, 480)); // The linked pad.
+    let subdevs = [
+        ("v4l-subdev2", IMX477_DEVNODE, Ok(imx477_subdev())),
+        ("v4l-subdev7", (81, 7), Ok(ov_sensor)),
+    ];
+    let records = scan_with([Ok(graph)], [isp(real_isp())], subdevs).unwrap();
+    assert_eq!(
+        ids(&records),
+        ["camera:imx477 5-001a", "camera:ov5647 4-0036"]
+    );
+    let field = |key| Vec::from_iter(records.iter().map(|r| r.details[key].clone()));
+    assert_eq!(
+        field("csi_receiver"),
+        ["csidev-40c3000.csi", "csidev-40d0000.csi"]
+    );
+    // 58333000 / ((640 + 1896) * (480 + 4)) = 47.52
+    assert_eq!(field("max_fps"), [json!(66.18), json!(47.52)]);
+    let first_rate = |r: &Record| r.details["modes"][0]["framerate_num"].clone();
+    assert_eq!(records.iter().map(first_rate).collect::<Vec<_>>(), [66, 48]);
+}
+
+/// Synthetic: rates the ISP reports are kept; only nominal sizes expand.
+#[test]
+fn isp_intervals_are_kept_when_timing_is_known() {
+    let nv12 = fourcc(b"NV12");
+    let node = nv12_isp(&SIZES[..2]).interval(nv12, 1920, 1080, raw_interval_discrete(1, 60));
+    let subdev = ("v4l-subdev2", IMX477_DEVNODE, Ok(imx477_subdev()));
+    let records = scan_with([real_media(&[IMX477])], [isp(node)], [subdev]).unwrap();
+    let mut expected = vec![mode("NV12", SIZES[0], (60, 1), "isp")];
+    let at = |rate| mode("NV12", SIZES[1], (rate, 1), "sensor_timing");
+    expected.extend([66, 60, 30, 25, 20, 15, 10, 5].map(at));
+    assert_eq!(records[0].details["modes"], json!(expected));
+}
+
+#[test]
+fn sensor_rates_follow_insight_rule() {
+    assert_eq!(sensor_rates(66.18), [66, 60, 30, 25, 20, 15, 10, 5]);
+    assert_eq!(sensor_rates(30.0), [30, 25, 20, 15, 10, 5]);
+    assert_eq!(sensor_rates(120.0), [120, 60, 30, 25, 20, 15, 10, 5]);
+    assert_eq!(sensor_rates(29.6), [30, 25, 20, 15, 10, 5], "snaps up");
+    assert_eq!(sensor_rates(29.4), [29, 25, 20, 15, 10, 5]);
+    assert_eq!(sensor_rates(7.0), [7, 5]);
+    assert_eq!(sensor_rates(0.2), [1], "at least 1");
+    let timing = |width, height| SensorTiming {
+        pixel_rate: 840_000_000,
+        hblank_min: 9332,
+        vblank_min: 48,
+        width,
+        height,
+    };
+    assert_eq!(timing(1920, 1080).max_fps(), 66.18);
+    assert_eq!(timing(4056, 3040).max_fps(), 20.32);
 }

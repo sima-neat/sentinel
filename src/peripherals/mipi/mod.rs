@@ -8,6 +8,11 @@
 //! name `isp_v4l2-vid-cap-out` and card `arm-isp-out` (enumeration ioctls only;
 //! several nodes report the modes they share). A missing or unreadable ISP
 //! leaves the cameras with `modes: []`.
+//!
+//! The same topology read names the CSI-2 receiver the sensor's source pad
+//! links to and the sensor's `/dev/v4l-subdevN`, whose active format and
+//! pixel-rate and blanking controls give the sensor's frame-rate limit. Both
+//! are optional: a graph or sub-device that does not provide them omits them.
 
 mod ioctl;
 #[cfg(test)]
@@ -33,7 +38,7 @@ use super::videodev2::{
     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_FRMIVAL_TYPE_DISCRETE,
     V4L2_FRMSIZE_TYPE_DISCRETE,
 };
-use ioctl::{Backend, MediaDeviceInfo, MediaV2Entity, SystemBackend, MEDIA_ENT_F_CAM_SENSOR};
+use ioctl::*;
 
 pub const PROVIDER_NAME: &str = "daemon.camera.mipi";
 
@@ -42,6 +47,8 @@ const ISP_SYSFS_NAME: &str = "isp_v4l2-vid-cap-out";
 const ISP_CARD_NAME: &str = "arm-isp-out";
 /// The `"nominal"` rate of a size without discrete ISP frame intervals.
 const NOMINAL_FRAMERATE: (u32, u32) = (30, 1);
+/// The rates offered below a sensor's frame-rate limit (Insight's rule).
+const STANDARD_FRAMERATES: [u32; 7] = [60, 30, 25, 20, 15, 10, 5];
 
 const AVAILABILITY_REASON: &str = "The media controller does not expose a reliable read-only \
 ownership state; discovery does not acquire, configure, or stream from the camera.";
@@ -98,9 +105,12 @@ impl Provider for MipiProvider {
         let (isp, modes) = match probe_isp(&self.sys_root, &self.dev_root, backend) {
             Ok((paths, modes)) => (
                 json!({"state": "available", "device_path": paths[0], "device_paths": paths}),
-                json!(modes),
+                modes,
             ),
-            Err(reason) => (json!({"state": "unavailable", "reason": reason}), json!([])),
+            Err(reason) => (
+                json!({"state": "unavailable", "reason": reason}),
+                BTreeSet::new(),
+            ),
         };
         // Name order is id order; the stable sort keeps the earlier device first.
         sensors.sort_by(|a, b| a.name.cmp(&b.name));
@@ -113,15 +123,24 @@ impl Provider for MipiProvider {
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
         let records = sensors.into_iter().map(|sensor| {
+            let timing =
+                (sensor.subdev).and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
             let mut details = json!({
                 "camera_name": sensor.name,
                 "backend": "mipi",
                 "connection": "mipi-csi2",
                 "media_device": sensor.media_device,
                 "availability": {"state": "unknown", "reason": AVAILABILITY_REASON},
-                "modes": modes,
+                "modes": sensor_modes(&modes, timing.as_ref()),
                 "isp": isp,
             });
+            if let Some(receiver) = &sensor.csi_receiver {
+                details["csi_receiver"] = json!(receiver);
+            }
+            if let Some(timing) = &timing {
+                details["sensor_timing"] = json!(timing);
+                details["max_fps"] = json!(timing.max_fps());
+            }
             let model = sensor.name.split(' ').next().unwrap_or_default();
             if !model.is_empty() {
                 details["model"] = json!(model);
@@ -144,6 +163,135 @@ struct Sensor {
     name: String,
     media_device: String,
     bus_info: String,
+    /// The entity the sensor's source pad links to.
+    csi_receiver: Option<String>,
+    /// The sensor's sub-device interface `(major, minor)` and source pad index.
+    subdev: Option<((u32, u32), u32)>,
+}
+
+/// The sensor's active source-pad format and the controls that bound its
+/// frame rate.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct SensorTiming {
+    pixel_rate: u64,
+    hblank_min: u32,
+    vblank_min: u32,
+    width: u32,
+    height: u32,
+}
+
+impl SensorTiming {
+    /// Pixels per second over pixels per frame at minimum blanking, to two
+    /// decimals.
+    fn max_fps(&self) -> f64 {
+        let line = f64::from(self.width) + f64::from(self.hblank_min);
+        let frame = line * (f64::from(self.height) + f64::from(self.vblank_min));
+        (self.pixel_rate as f64 / frame * 100.0).round() / 100.0
+    }
+}
+
+/// The frame rates offered up to `max_fps`, fastest first: its nearest whole
+/// rate (at least 1) and every standard rate below it.
+fn sensor_rates(max_fps: f64) -> Vec<u32> {
+    let limit = ((max_fps + 0.5) as u32).max(1);
+    let standard = STANDARD_FRAMERATES
+        .into_iter()
+        .filter(|&rate| rate <= limit);
+    let rates: BTreeSet<u32> = standard.chain([limit]).collect();
+    rates.into_iter().rev().collect()
+}
+
+/// A sensor's modes: with a known frame-rate limit, each nominal-rate ISP
+/// size is offered at `sensor_rates` instead; ISP-reported rates are kept.
+fn sensor_modes(modes: &BTreeSet<IspMode>, timing: Option<&SensorTiming>) -> Vec<IspMode> {
+    let Some(rates) = timing.map(|timing| sensor_rates(timing.max_fps())) else {
+        return modes.iter().cloned().collect();
+    };
+    let mut expanded = Vec::new();
+    for mode in modes {
+        if mode.framerate_source != "nominal" {
+            expanded.push(mode.clone());
+            continue;
+        }
+        expanded.extend(rates.iter().map(|&rate| IspMode {
+            framerate_num: rate,
+            framerate_den: 1,
+            framerate_source: "sensor_timing",
+            ..mode.clone()
+        }));
+    }
+    expanded
+}
+
+/// The data link from one of `entity`'s source pads: enabled links first,
+/// then the lowest pad index. Returns the source pad and the sink pad's entity.
+fn source_link(graph: &Graph, entity: u32) -> Option<(&MediaV2Pad, &MediaV2Entity)> {
+    let pad = |id: u32| graph.pads.iter().find(|pad| pad.id == id);
+    let links = graph.links.iter().filter(|link| {
+        link.flags & MEDIA_LNK_FL_LINK_TYPE == MEDIA_LNK_FL_DATA_LINK
+            && pad(link.source_id).is_some_and(|source| {
+                source.entity_id == entity && source.flags & MEDIA_PAD_FL_SOURCE != 0
+            })
+    });
+    let link = links.min_by_key(|link| {
+        let enabled = link.flags & MEDIA_LNK_FL_ENABLED != 0;
+        (!enabled, pad(link.source_id).map(|pad| pad.index))
+    })?;
+    let sink = pad(link.sink_id)?;
+    let receiver = graph.entities.iter().find(|e| e.id == sink.entity_id)?;
+    Some((pad(link.source_id)?, receiver))
+}
+
+/// The `(major, minor)` of `entity`'s V4L2 sub-device interface.
+fn subdev_devnode(graph: &Graph, entity: u32) -> Option<(u32, u32)> {
+    let links = graph.links.iter().filter(|link| {
+        link.flags & MEDIA_LNK_FL_LINK_TYPE == MEDIA_LNK_FL_INTERFACE_LINK && link.sink_id == entity
+    });
+    links
+        .filter_map(|link| graph.interfaces.iter().find(|i| i.id == link.source_id))
+        .find(|interface| interface.intf_type == MEDIA_INTF_T_V4L_SUBDEV)
+        .map(MediaV2Interface::devnode)
+}
+
+impl MipiProvider {
+    /// The timing of the sensor whose sub-device is `devnode`, read from
+    /// `/dev/v4l-subdevN` (named by `/sys/dev/char/<major>:<minor>`): the
+    /// active format of `pad`, the current pixel rate, and the minimum
+    /// horizontal and vertical blanking. `None` when any part is missing.
+    fn sensor_timing(&self, (major, minor): (u32, u32), pad: u32) -> Option<SensorTiming> {
+        let class = self.sys_root.join(format!("dev/char/{major}:{minor}"));
+        let name = fs::read_link(class).ok()?.file_name()?.to_owned();
+        if !name.to_string_lossy().starts_with("v4l-subdev") {
+            return None;
+        }
+        let mut node = self.backend.open_subdev(&self.dev_root.join(name)).ok()?;
+        let mut format = SubdevFormat {
+            which: V4L2_SUBDEV_FORMAT_ACTIVE,
+            pad,
+            ..SubdevFormat::default()
+        };
+        node.format(&mut format).ok()?;
+        let (width, height) = (format.format.width, format.format.height);
+        let mut minimum = |id| {
+            let mut control = QueryExtCtrl {
+                id,
+                ..QueryExtCtrl::default()
+            };
+            node.query_control(&mut control).ok()?;
+            let enabled = control.flags & V4L2_CTRL_FLAG_DISABLED == 0;
+            enabled.then(|| u32::try_from(control.minimum).ok())?
+        };
+        let (hblank_min, vblank_min) = (minimum(V4L2_CID_HBLANK)?, minimum(V4L2_CID_VBLANK)?);
+        let pixel_rate = node.control_value(V4L2_CID_PIXEL_RATE).ok()?;
+        let pixel_rate = u64::try_from(pixel_rate).ok().filter(|&rate| rate > 0)?;
+        (width > 0 && height > 0).then_some(SensorTiming {
+            pixel_rate,
+            hblank_min,
+            vblank_min,
+            width,
+            height,
+        })
+    }
 }
 
 fn describe(what: &str, path: &Path, error: &io::Error) -> String {
@@ -208,10 +356,28 @@ fn probe_media_device(backend: &dyn Backend, path: &Path) -> Result<Vec<Sensor>,
         return Ok(Vec::new());
     }
     // One call reads the whole graph atomically, so it cannot change between
-    // counting and filling; a graph larger than the cap is malformed.
-    let mut entities = vec![MediaV2Entity::default(); MAX_ENUMERATION_ENTRIES as usize];
-    match node.entities(&mut entities) {
-        Ok(count) => entities.truncate(count),
+    // counting and filling. Interfaces, pads or links beyond the cap only
+    // drop what they describe; more entities than the cap are malformed.
+    let room = MAX_ENUMERATION_ENTRIES as usize;
+    let mut graph = Graph {
+        entities: vec![MediaV2Entity::default(); room],
+        interfaces: vec![MediaV2Interface::default(); room],
+        pads: vec![MediaV2Pad::default(); room],
+        links: vec![MediaV2Link::default(); room],
+    };
+    let mut result = node.topology(&mut graph);
+    if result
+        .as_ref()
+        .is_err_and(|error| errno_of(error) == libc::ENOSPC)
+    {
+        graph = Graph {
+            entities: vec![MediaV2Entity::default(); room],
+            ..Graph::default()
+        };
+        result = node.topology(&mut graph);
+    }
+    match result {
+        Ok(()) => {}
         Err(error) if errno_of(&error) == libc::ENOSPC => {
             let shown = path.display();
             let reason = format!("media device {shown} returned a malformed entity list");
@@ -220,9 +386,10 @@ fn probe_media_device(backend: &dyn Backend, path: &Path) -> Result<Vec<Sensor>,
         Err(error) => return failed("failed to read the media topology of", error),
     }
     let bus_info = trim_c_space(&bounded_string(&info.bus_info)).to_string();
+    let pad_index_known = info.versions[0] >= MEDIA_V2_PAD_INDEX_VERSION;
     let mut sensors = Vec::new();
-    entities.retain(|entity| entity.function == MEDIA_ENT_F_CAM_SENSOR);
-    for entity in entities {
+    let entities = graph.entities.iter();
+    for entity in entities.filter(|entity| entity.function == MEDIA_ENT_F_CAM_SENSOR) {
         let name = bounded_string(&entity.name);
         if name.is_empty() {
             let (path, id) = (path.display(), entity.id);
@@ -230,10 +397,18 @@ fn probe_media_device(backend: &dyn Backend, path: &Path) -> Result<Vec<Sensor>,
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
         let (media_device, bus_info) = (path.to_string_lossy().into_owned(), bus_info.clone());
+        let link = source_link(&graph, entity.id);
+        let csi_receiver = link
+            .map(|(_, receiver)| bounded_string(&receiver.name))
+            .filter(|name| !name.is_empty());
+        let pad = link.map(|(pad, _)| pad.index).filter(|_| pad_index_known);
+        let subdev = subdev_devnode(&graph, entity.id).zip(pad);
         sensors.push(Sensor {
             name,
             media_device,
             bus_info,
+            csi_receiver,
+            subdev,
         });
     }
     Ok(sensors)
