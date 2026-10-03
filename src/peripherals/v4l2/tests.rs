@@ -382,6 +382,50 @@ fn driver_and_sysfs_errors_fail_the_scan() {
 }
 
 #[test]
+fn malformed_sysfs_identity_fails_the_scan() {
+    let (fixture, sys) = sysfs();
+    add_camera(&sys, USB, &[], &[("video0", "0")]);
+    fs::remove_file(sys.join(USB).join("idProduct")).unwrap();
+    let (code, reason) = failure(&sys, vec![("video0", Ok(uvc_camera("C920")))]);
+    assert_eq!(code, "io.open");
+    assert!(
+        reason.contains("incomplete vendor/product attributes"),
+        "{reason}"
+    );
+
+    // A class entry whose device resolves outside the sysfs root.
+    let (_other, outside) = one_camera(&[("video0", "0")]);
+    let class = sys.join("class/video4linux");
+    fs::remove_dir_all(&class).unwrap();
+    fs::create_dir_all(&class).unwrap();
+    symlink(
+        outside.join(USB).join("1-1:1.0/video4linux/video0"),
+        class.join("video0"),
+    )
+    .unwrap();
+    let (code, reason) = failure(&sys, vec![("video0", Ok(uvc_camera("C920")))]);
+    assert_eq!(code, "io.open");
+    assert!(
+        reason.contains("escaped the configured sysfs root"),
+        "{reason}"
+    );
+    drop(fixture);
+
+    // Only EACCES is a permission failure on sysfs; EPERM is `io.open`.
+    let path = Path::new("/sys/class/video4linux");
+    for (errno, code) in [
+        (libc::EACCES, "io.permission_denied"),
+        (libc::EPERM, "io.open"),
+    ] {
+        let error = io::Error::from_raw_os_error(errno);
+        assert_eq!(
+            sysfs_failure("failed to read", path, &error).error.code,
+            code
+        );
+    }
+}
+
+#[test]
 fn vanished_devices_are_skipped() {
     let (fixture, sys) = one_camera(&[("video0", "0"), ("video1", "1")]);
     assert!(records(&fixture.path().join("no-sysfs"), Vec::new()).is_empty());

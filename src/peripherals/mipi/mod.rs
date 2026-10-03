@@ -168,11 +168,20 @@ fn sorted_names(directory: &Path) -> io::Result<Vec<OsString>> {
     Ok(names)
 }
 
+/// Only `EACCES` is a permission failure when listing a directory.
+fn listing_failure(directory: &Path, error: &io::Error) -> ProviderError {
+    let code = match errno_of(error) {
+        libc::EACCES => CODE_PERMISSION_DENIED,
+        _ => CODE_IO_OPEN,
+    };
+    ProviderError::new(code, describe("failed to read", directory, error))
+}
+
 /// `/dev/mediaN`, sorted; a missing device directory means none.
 fn media_device_paths(dev_root: &Path) -> Result<Vec<PathBuf>, ProviderError> {
     let names = match sorted_names(dev_root) {
         Err(error) if errno_of(&error) == libc::ENOENT => return Ok(Vec::new()),
-        names => names.map_err(|error| io_failure("failed to read", dev_root, &error))?,
+        names => names.map_err(|error| listing_failure(dev_root, &error))?,
     };
     let number = |name: &OsString| name.to_str()?.strip_prefix("media").map(str::to_owned);
     let digits = |n: String| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());

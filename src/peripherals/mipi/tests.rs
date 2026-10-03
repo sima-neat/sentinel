@@ -396,3 +396,15 @@ fn enumerations_are_bounded() {
     let enumerations = calls.iter().filter(|op| **op != VideoOp::QueryCap);
     assert_eq!(enumerations.count(), MAX_DEVICE_ENUMERATIONS as usize);
 }
+
+#[test]
+fn listing_dev_maps_only_eacces_to_permission_denied() {
+    let dev = Path::new("/dev");
+    for (errno, code) in [
+        (libc::EACCES, "io.permission_denied"),
+        (libc::EPERM, "io.open"),
+    ] {
+        let error = io::Error::from_raw_os_error(errno);
+        assert_eq!(listing_failure(dev, &error).code, code);
+    }
+}

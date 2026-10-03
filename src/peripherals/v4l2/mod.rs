@@ -115,6 +115,35 @@ fn os_failure(action: &str, path: &Path, error: &io::Error) -> Failure {
     }
 }
 
+/// A sysfs read error: only `EACCES` is a permission failure there.
+fn sysfs_failure(action: &str, path: &Path, error: &io::Error) -> Failure {
+    let errno = errno_of(error);
+    let code = if errno == libc::EACCES {
+        CODE_PERMISSION_DENIED
+    } else {
+        CODE_IO_OPEN
+    };
+    let reason = format!("{action} {}: {}", path.display(), os_message(error));
+    Failure {
+        errno,
+        error: ProviderError::new(code, reason),
+    }
+}
+
+/// Whether a sysfs attribute exists; absence is ENOENT or ENOTDIR, and any
+/// other error is reported.
+fn attribute_exists(path: &Path) -> Result<bool, Failure> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if matches!(errno_of(&error), libc::ENOENT | libc::ENOTDIR) => Ok(false),
+        Err(error) => Err(sysfs_failure(
+            "failed to inspect V4L2 sysfs attribute",
+            path,
+            &error,
+        )),
+    }
+}
+
 /// The discrete, stepwise and continuous range types, in canonical order: a
 /// type's index here names it in `KIND_NAMES`, and 0 is discrete.
 const SIZE_KINDS: [u32; 3] = [
@@ -404,7 +433,7 @@ impl Enumerator<'_> {
 impl V4l2Provider {
     fn scan(&self) -> Result<Vec<Record>, Failure> {
         let class = self.sys_root.join("class/video4linux");
-        let read_failure = |error: io::Error| os_failure("failed to read", &class, &error);
+        let read_failure = |error: io::Error| sysfs_failure("failed to read", &class, &error);
         let mut names = Vec::new();
         match fs::read_dir(&class) {
             Err(error) if errno_of(&error) == libc::ENOENT => return Ok(Vec::new()),
@@ -419,7 +448,7 @@ impl V4l2Provider {
         }
         names.sort();
         let sys = fs::canonicalize(&self.sys_root).map_err(|error| {
-            os_failure("failed to resolve V4L2 sysfs root", &self.sys_root, &error)
+            sysfs_failure("failed to resolve V4L2 sysfs root", &self.sys_root, &error)
         })?;
         let mut records = Vec::new();
         for name in names {
@@ -443,19 +472,42 @@ impl V4l2Provider {
     ) -> Result<Option<Record>, Failure> {
         let link = entry.join("device");
         let device = fs::canonicalize(&link)
-            .map_err(|error| os_failure("failed to resolve V4L2 sysfs device", &link, &error))?;
-        // The nearest ancestor with `idVendor` is the USB device; the interface
-        // number is on the USB interface between it and the node.
-        let mut interface = None;
-        let usb = device
-            .ancestors()
-            .take_while(|path| path.starts_with(sys) && *path != sys)
-            .find(|path| {
-                if interface.is_none() {
-                    interface = read_text_file(&path.join("bInterfaceNumber"));
-                }
-                path.join("idVendor").exists()
+            .map_err(|error| sysfs_failure("failed to resolve V4L2 sysfs device", &link, &error))?;
+        if !device.starts_with(sys) {
+            let reason = format!(
+                "V4L2 sysfs device escaped the configured sysfs root: {}",
+                device.display()
+            );
+            return Err(Failure {
+                errno: libc::EXDEV,
+                error: ProviderError::new(CODE_IO_OPEN, reason),
             });
+        }
+        // The nearest ancestor with `idVendor` and `idProduct` is the USB
+        // device; the interface number is on the USB interface between it and
+        // the node.
+        let mut interface = None;
+        let mut usb = None;
+        for path in device.ancestors().take_while(|path| *path != sys) {
+            if interface.is_none() {
+                interface = read_text_file(&path.join("bInterfaceNumber"));
+            }
+            let vendor = attribute_exists(&path.join("idVendor"))?;
+            if vendor != attribute_exists(&path.join("idProduct"))? {
+                let reason = format!(
+                    "V4L2 USB ancestor has incomplete vendor/product attributes: {}",
+                    path.display()
+                );
+                return Err(Failure {
+                    errno: libc::EPROTO,
+                    error: ProviderError::new(CODE_IO_OPEN, reason),
+                });
+            }
+            if vendor {
+                usb = Some(path);
+                break;
+            }
+        }
         let Some(usb) = usb else {
             return Ok(None);
         };
