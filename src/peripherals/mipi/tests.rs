@@ -654,7 +654,7 @@ fn isp_frame_intervals_replace_the_nominal_rate() {
     );
 }
 
-/// Synthetic: the C++ `probe_isp_sizes` behaviour. Every node whose sysfs name
+/// Synthetic: every node whose sysfs name
 /// is the ISP output name is probed in sorted order; one with another card or
 /// no discrete size is skipped; the rest contribute only the modes they all
 /// share; any failing node makes the ISP unavailable.

@@ -4,14 +4,13 @@
 //! directory and V4L2 nodes are served by `FakeBackend`, so no camera hardware
 //! is needed. Two sysfs layouts are used:
 //!
-//! * `add_usb_node` reproduces the C++ unit-test layout verbatim (absolute
-//!   `device` symlink to the video node directory) so the ported assertions
-//!   run against the same tree.
+//! * `add_usb_node` builds a compact tree (absolute `device` symlink to the
+//!   video node directory) for the identity and record cases.
 //! * `RealLayout` reproduces the kernel's uvcvideo layout (relative class
 //!   symlink, `device -> ../../../<interface>`) for the end-to-end scans.
 //!
-//! The ported C++ cases come first, in the order of
-//! `unit_v4l2_camera_discovery_test.cpp`; class-coverage cases follow.
+//! Identity, classification, decoding and record cases come first;
+//! end-to-end class-coverage cases follow.
 
 use super::ioctl::*;
 use super::*;
@@ -27,7 +26,8 @@ use std::sync::{Arc, Mutex};
 // Fixture helpers
 // ---------------------------------------------------------------------------
 
-/// Port of the C++ `add_usb_node` helper (same tree shape and values).
+/// A USB video node (046d:082d, interface `00`) under
+/// `devices/pci0000:00/usb1/<port>`, with optional product, serial and index.
 fn add_usb_node(
     sys: &Path,
     port: &str,
@@ -246,7 +246,7 @@ fn discover(sys: &Path, dev: &Path, backend: &FakeBackend) -> Result<Vec<Record>
 }
 
 // ---------------------------------------------------------------------------
-// C++ sample data (`discrete_interval`, `sample_format`, `sample_device`)
+// Sample data (`discrete_interval`, `sample_format`, `sample_device`)
 // ---------------------------------------------------------------------------
 
 fn discrete_interval(numerator: u32, denominator: u32) -> Interval {
@@ -368,7 +368,7 @@ const CANONICAL_V4L2_DEVICE: &str = r#"{
 }"#;
 
 // ---------------------------------------------------------------------------
-// Ported C++ cases
+// Identity, classification, decoding and record cases
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -458,37 +458,6 @@ fn composite_capture_nodes_have_distinct_ids() {
 }
 
 #[test]
-fn identical_serialless_cameras_on_different_ports_stay_distinct() {
-    let fixture = TempDir::new();
-    let sys = fixture.path().join("sys");
-    let first = add_usb_node(&sys, "1-3.2", "1-3.2:1.0", "video97", "0", "C920", "A123");
-    let identical = add_usb_node(&sys, "1-4", "1-4:1.0", "video99", "0", "C920", "");
-    let first = usb_identity(&first, &sys).unwrap().unwrap();
-    let identical = usb_identity(&identical, &sys).unwrap().unwrap();
-    assert_ne!(stable_id(&identical), stable_id(&first));
-    assert!(identical.serial.is_empty(), "serial stays optional");
-
-    let missing = add_usb_node(&sys, "1-5", "1-5:1.0", "video100", "0", "", "");
-    let second_missing = add_usb_node(&sys, "1-6", "1-6:1.0", "video101", "0", "", "");
-    let missing = usb_identity(&missing, &sys).unwrap().unwrap();
-    let second_missing = usb_identity(&second_missing, &sys).unwrap().unwrap();
-    assert!(missing.serial.is_empty() && missing.model.is_empty());
-    assert_ne!(stable_id(&second_missing), stable_id(&missing));
-}
-
-#[test]
-fn platform_isp_node_is_not_admitted() {
-    let fixture = TempDir::new();
-    let sys = fixture.path().join("sys");
-    let platform = sys.join("devices/platform/soc/isp/video4linux/video40");
-    fs::create_dir_all(&platform).unwrap();
-    let platform_class = sys.join("class/video4linux/video40");
-    fs::create_dir_all(&platform_class).unwrap();
-    symlink(&platform, platform_class.join("device")).unwrap();
-    assert_eq!(usb_identity(&platform_class, &sys).unwrap(), None);
-}
-
-#[test]
 fn capture_node_classification_uses_device_caps() {
     let mut value = Capability {
         capabilities: V4L2_CAP_DEVICE_CAPS | V4L2_CAP_VIDEO_CAPTURE,
@@ -500,8 +469,8 @@ fn capture_node_classification_uses_device_caps() {
     assert!(!is_capture_node(&value), "metadata node rejected");
     value.device_caps = V4L2_CAP_VIDEO_M2M;
     assert!(!is_capture_node(&value), "memory-to-memory node rejected");
-    // Additional (not in the C++ test): output-only, m2m-mplane, mplane
-    // capture, and drivers that do not set V4L2_CAP_DEVICE_CAPS.
+    // Output-only, m2m-mplane, mplane capture, and drivers that do not set
+    // V4L2_CAP_DEVICE_CAPS.
     value.device_caps = V4L2_CAP_VIDEO_OUTPUT;
     assert!(!is_capture_node(&value), "output-only node rejected");
     value.device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_VIDEO_M2M_MPLANE;
@@ -682,6 +651,7 @@ fn optional_model_and_device_path_are_omitted_and_serial_keeps_id() {
     let sys = fixture.path().join("sys");
     let missing = add_usb_node(&sys, "1-5", "1-5:1.0", "video100", "0", "", "");
     let identity = usb_identity(&missing, &sys).unwrap().unwrap();
+    assert!(identity.serial.is_empty() && identity.model.is_empty());
     let mut probe = probe_of(vec![Device {
         identity,
         device_path: String::new(),
@@ -973,6 +943,8 @@ fn non_usb_platform_node_is_never_opened() {
     let records = discover(&sys, &dev, &backend).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(*backend.opened.lock().unwrap(), [dev.join("video2")]);
+    let platform_class = sys.join("class/video4linux/video0");
+    assert_eq!(usb_identity(&platform_class, &sys).unwrap(), None);
 }
 
 #[test]

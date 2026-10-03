@@ -1,8 +1,7 @@
 //! Read-only discovery of USB/UVC cameras exposed through V4L2
 //! (`daemon.camera.v4l2`).
 //!
-//! Ported from the Neat peripheral daemon's `V4l2CameraProvider.cpp`. The scan
-//! walks `/sys/class/video4linux`, admits only nodes whose sysfs device has a
+//! The scan walks `/sys/class/video4linux`, admits only nodes whose sysfs device has a
 //! USB ancestor (platform and ISP nodes are skipped), opens each candidate
 //! with `O_RDONLY | O_NONBLOCK | O_CLOEXEC`, and issues query ioctls only.
 //! Metadata-only, output-only and memory-to-memory nodes are dropped after
@@ -225,7 +224,8 @@ impl ProbeError {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Failure class for `std::filesystem` errors (`errc::permission_denied`).
+/// Failure class for a sysfs read error: only `EACCES` is a permission
+/// failure.
 fn filesystem_failure(errno: i32) -> ProbeFailure {
     if errno == libc::EACCES {
         ProbeFailure::PermissionDenied
@@ -565,8 +565,8 @@ fn merge_formats(destination: &mut Vec<Format>, source: Vec<Format>) {
 // sysfs identity
 // ---------------------------------------------------------------------------
 
-/// `std::filesystem::exists(path, ec)`: ENOENT and ENOTDIR mean "absent",
-/// any other error is reported.
+/// Whether `path` exists: ENOENT and ENOTDIR mean "absent", any other error is
+/// reported.
 fn path_exists(path: &Path) -> Result<bool, ProbeError> {
     match fs::metadata(path) {
         Ok(_) => Ok(true),

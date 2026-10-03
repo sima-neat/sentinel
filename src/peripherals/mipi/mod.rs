@@ -11,10 +11,9 @@
 //!
 //! The ISP is not part of that media graph. Its output modes come from the
 //! V4L2 node whose sysfs name is `isp_v4l2-vid-cap-out` and whose card is
-//! `arm-isp-out`, queried with enumeration ioctls only. Node selection and the
-//! multi-node intersection are ported from the Neat peripheral daemon's
-//! `CameraProvider.cpp` (`probe_isp_sizes`). An unreadable or missing ISP
-//! degrades the records to `modes: []`; it never fails the scan.
+//! `arm-isp-out`, queried with enumeration ioctls only; when several nodes
+//! qualify, only the modes they all share are reported. An unreadable or
+//! missing ISP degrades the records to `modes: []`; it never fails the scan.
 
 mod ioctl;
 #[cfg(test)]
@@ -51,8 +50,8 @@ const SIMA_MEDIA_DRIVER: &str = "simaai-v4l2-vid";
 /// sysfs `name` and V4L2 card of the ISP output node.
 const ISP_SYSFS_NAME: &str = "isp_v4l2-vid-cap-out";
 const ISP_CARD_NAME: &str = "arm-isp-out";
-/// The rate reported when the ISP advertises no frame intervals, as the
-/// previous provider did (`kDefaultFramerateNum` / `kDefaultFramerateDen`).
+/// The rate reported, with `framerate_source: "nominal"`, when the ISP
+/// advertises no discrete frame intervals for a size.
 const NOMINAL_FRAMERATE: (u32, u32) = (30, 1);
 
 /// `MEDIA_IOC_G_TOPOLOGY` is read twice (count, then fill); a graph that keeps
@@ -392,9 +391,9 @@ fn enumerate_rates(
     Ok(rates)
 }
 
-/// Port of `enumerate_node_sizes`: an empty set means the node is not the ISP
-/// output (wrong card) or advertises no discrete size. Unlike the C++, the
-/// node is opened read-only and frame intervals are queried.
+/// The modes of one candidate ISP node. An empty set means the node is not the
+/// ISP output (wrong card) or advertises no discrete size. The node is opened
+/// read-only and receives enumeration ioctls only.
 fn enumerate_isp_node(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, String> {
     let mut modes = BTreeSet::new();
     let mut node = backend
@@ -484,7 +483,7 @@ fn enumerate_isp_node(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<Isp
     Ok(modes)
 }
 
-/// Port of `probe_isp_sizes`: every `/sys/class/video4linux` entry whose
+/// Every `/sys/class/video4linux` entry whose
 /// `name` is the ISP output name is probed in sorted order; nodes with the
 /// wrong card or no discrete size are skipped; the first failing node makes
 /// the ISP unavailable; several ISP nodes contribute only the modes they all
