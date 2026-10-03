@@ -102,20 +102,32 @@ fn test_provider(target: &str, settings: &Settings) -> Result<()> {
 }
 
 /// The catalog file outlives the daemon (a stop by SIGTERM leaves it as it
-/// was), so the CLI checks the daemon's socket before trusting it.
+/// was), so the CLI asks the daemon for its health before trusting it. A
+/// complete request keeps the daemon from logging a dropped connection.
 fn daemon_running(api_socket: &Path) -> bool {
-    UnixStream::connect(api_socket).is_ok()
+    exchange(
+        api_socket,
+        b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .is_ok_and(|response| response.starts_with("HTTP/1.1 "))
 }
 
-fn request_refresh(api_socket: &Path) -> Result<u64> {
+/// Send one request to the daemon and read its whole response.
+fn exchange(api_socket: &Path, request: &[u8]) -> Result<String> {
     let mut stream = UnixStream::connect(api_socket)
         .with_context(|| format!("connect to {}", api_socket.display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.write_all(
-        b"POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-    )?;
+    stream.write_all(request)?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+fn request_refresh(api_socket: &Path) -> Result<u64> {
+    let response = exchange(
+        api_socket,
+        b"POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+    )?;
     let body = response
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
@@ -269,8 +281,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("api.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        // The daemon answers a complete health request, so it logs nothing.
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 256];
+            let length = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            String::from_utf8_lossy(&request[..length]).into_owned()
+        });
         assert!(daemon_running(&path));
-        drop(listener);
+        assert!(server
+            .join()
+            .unwrap()
+            .starts_with("GET /v1/health HTTP/1.1\r\n"));
         assert!(
             !daemon_running(&path),
             "a stale socket file is not a running daemon"
