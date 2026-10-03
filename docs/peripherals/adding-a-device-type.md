@@ -36,8 +36,12 @@ The camera providers are working examples: USB cameras in
 5. **Facts only.** Report what the device and kernel say. Whether a Neat
    component supports the device is decided by that component's support rules,
    not by the provider.
-6. **Bounded work.** Cap every enumeration loop at 1024 entries and never
-   block: a provider runs inside the daemon and cannot be killed.
+6. **Bounded work.** A provider runs inside the daemon and cannot be killed,
+   so it must never block, and a broken or hostile device must not be able to
+   make it work forever. Cap every enumeration loop at 1024 entries
+   (`MAX_ENUMERATION_ENTRIES`) and every device at 4096 queries per scan
+   (`EnumerationBudget`, `MAX_DEVICE_ENUMERATIONS` in
+   `src/peripherals/videodev2.rs`).
 
 ## 3. The record
 
