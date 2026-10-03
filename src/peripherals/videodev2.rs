@@ -321,6 +321,8 @@ pub(crate) mod testing {
         pub capability: Capability,
         /// `(buffer type, pixel format)` in driver order.
         pub formats: Vec<(u32, u32)>,
+        /// `VIDIOC_ENUM_FMT` descriptions by pixel format; none when absent.
+        pub descriptions: Vec<(u32, String)>,
         /// `(pixel format, frame size)` in driver order.
         pub sizes: Vec<(u32, FrmSizeEnum)>,
         /// `((pixel format, width, height), interval)` in driver order.
@@ -345,6 +347,12 @@ pub(crate) mod testing {
 
         pub(crate) fn format(mut self, buffer_type: u32, pixel_format: u32) -> Self {
             self.formats.push((buffer_type, pixel_format));
+            self
+        }
+
+        pub(crate) fn described(mut self, pixel_format: u32, description: &str) -> Self {
+            self.descriptions
+                .push((pixel_format, description.to_string()));
             self
         }
 
@@ -398,6 +406,13 @@ pub(crate) mod testing {
                 .nth(value.index as usize)
                 .ok_or_else(einval)?;
             value.pixelformat = found.1;
+            let description = self
+                .descriptions
+                .iter()
+                .find(|(format, _)| *format == found.1);
+            if let Some((_, text)) = description {
+                value.description[..text.len()].copy_from_slice(text.as_bytes());
+            }
             Ok(())
         }
 

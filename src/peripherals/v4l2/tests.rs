@@ -79,8 +79,17 @@ fn uvc_camera(card: &str) -> FakeVideoNode {
 /// Scan `sys` with `/dev/<name>` served by `nodes` (`Err` is the errno `open`
 /// fails with; unknown names fail with `ENOENT`). Also returns the opened paths.
 fn scan(sys: &Path, nodes: Nodes) -> (Result<Vec<Record>, ProviderError>, Vec<String>) {
+    scan_in(sys, Path::new("/dev"), nodes)
+}
+
+/// `scan` with `<dev>/<name>` as the device nodes.
+fn scan_in(
+    sys: &Path,
+    dev: &Path,
+    nodes: Nodes,
+) -> (Result<Vec<Record>, ProviderError>, Vec<String>) {
     let nodes: HashMap<String, _> = (nodes.into_iter())
-        .map(|(name, node)| (format!("/dev/{name}"), node))
+        .map(|(name, node)| (dev.join(name).display().to_string(), node))
         .collect();
     let opened = Arc::new(Mutex::new(Vec::new()));
     let log = opened.clone();
@@ -93,7 +102,7 @@ fn scan(sys: &Path, nodes: Nodes) -> (Result<Vec<Record>, ProviderError>, Vec<St
             None => Err(io::Error::from_raw_os_error(libc::ENOENT)),
         }
     });
-    let result = V4l2Provider::with_opener(sys, "/dev", open).discover();
+    let result = V4l2Provider::with_opener(sys, dev, open).discover();
     let opened = opened.lock().unwrap().clone();
     (result, opened)
 }
@@ -494,4 +503,136 @@ fn system_opener_rejects_a_file_that_is_not_a_v4l2_node() {
         error.reason,
         format!("{action} {}: {enotty}", dev.join("video1").display())
     );
+}
+
+/// Synthetic, in the kernel's sysfs and udev layout: manufacturer and speed
+/// come from the USB device, `by_id_path` from the udev link that resolves to
+/// the node, and `format_description` from `VIDIOC_ENUM_FMT`; each is
+/// omitted when the system does not provide it.
+#[test]
+fn optional_usb_details_are_reported_when_present() {
+    let (fixture, sys) = sysfs();
+    let dev = fixture.path().join("dev");
+    let c920 = [
+        ("manufacturer", "  Logitech \n"),
+        ("speed", "480"),
+        ("serial", "A1B2"),
+    ];
+    add_camera(
+        &sys,
+        "devices/platform/xhci/usb1/1-1",
+        &c920,
+        &[("video0", "0"), ("video1", "1")],
+    );
+    let bare = [("manufacturer", "   ")]; // Blank: omitted like an absent one.
+    add_camera(
+        &sys,
+        "devices/platform/xhci/usb1/1-2",
+        &bare,
+        &[("video2", "0")],
+    );
+    for video in ["video0", "video1", "video2"] {
+        write_file(&dev.join(video), "");
+    }
+    let by_id = dev.join("v4l/by-id");
+    fs::create_dir_all(&by_id).unwrap();
+    let links = [
+        (
+            "usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0",
+            "../../video0",
+        ),
+        (
+            "usb-046d_HD_Pro_Webcam_C920_A1B2-video-index1",
+            "../../video1",
+        ),
+        ("usb-dangling-video-index0", "../../video9"),
+    ];
+    for (name, target) in links {
+        symlink(target, by_id.join(name)).unwrap();
+    }
+    let (mjpg, yuyv) = (fourcc(b"MJPG"), fourcc(b"YUYV"));
+    let described = uvc_camera("C920")
+        .described(yuyv, "YUYV 4:2:2")
+        .described(mjpg, "Motion-JPEG");
+    let nodes = vec![
+        ("video0", Ok(described)),
+        ("video1", Ok(node("C920", V4L2_CAP_META_CAPTURE))),
+        ("video2", Ok(uvc_camera("C270"))),
+    ];
+    let found = scan_in(&sys, &dev, nodes).0.unwrap();
+    let path = |name: &str| dev.join(name).display().to_string();
+    let c920 = found
+        .iter()
+        .find(|r| r.details["device_path"] == path("video0"));
+    let c920 = &c920.unwrap().details;
+    assert_eq!(c920["identity"]["manufacturer"], "Logitech");
+    assert_eq!(c920["identity"]["speed"], "480");
+    let link = by_id.join(links[0].0).display().to_string();
+    assert_eq!(c920["by_id_path"], link);
+    let descriptions: Vec<_> = (c920["modes"].as_array().unwrap().iter())
+        .map(|mode| (mode["format"].clone(), mode["format_description"].clone()))
+        .collect();
+    let (motion, yuyv) = (
+        json!(["MJPG", "Motion-JPEG"]),
+        json!(["YUYV", "YUYV 4:2:2"]),
+    );
+    assert_eq!(json!(descriptions), json!([motion, motion, yuyv]));
+
+    let other = found
+        .iter()
+        .find(|r| r.details["device_path"] == path("video2"));
+    let other = &other.unwrap().details;
+    for key in ["manufacturer", "speed", "serial"] {
+        assert!(other["identity"].get(key).is_none(), "{key}");
+    }
+    assert!(
+        other.get("by_id_path").is_none(),
+        "no link resolves to video2"
+    );
+    let modes = other["modes"].as_array().unwrap();
+    assert!(modes
+        .iter()
+        .all(|mode| mode.get("format_description").is_none()));
+}
+
+/// Synthetic: without `/dev/v4l/by-id`, or when the node itself cannot be
+/// resolved, the scan succeeds without `by_id_path`.
+#[test]
+fn missing_by_id_directory_or_node_omits_the_link() {
+    let (fixture, sys) = one_camera(&[("video0", "0")]);
+    let dev = fixture.path().join("dev");
+    let scan_once = || {
+        let nodes = vec![("video0", Ok(uvc_camera("C920")))];
+        scan_in(&sys, &dev, nodes).0.unwrap().remove(0).details
+    };
+    write_file(&dev.join("video0"), "");
+    assert!(
+        scan_once().get("by_id_path").is_none(),
+        "no by-id directory"
+    );
+    let by_id = dev.join("v4l/by-id");
+    fs::create_dir_all(&by_id).unwrap();
+    symlink("../../video0", by_id.join("usb-cam-video-index0")).unwrap();
+    assert!(scan_once().get("by_id_path").is_some());
+    fs::remove_file(dev.join("video0")).unwrap(); // The fake opener still serves it.
+    assert!(scan_once().get("by_id_path").is_none(), "unresolvable node");
+}
+
+/// Synthetic: the single- and multi-planar listings of one format share the
+/// first non-empty description, trimmed.
+#[test]
+fn format_description_survives_planar_merge() {
+    let (_fixture, sys) = one_camera(&[("video0", "0")]);
+    let nv12 = fourcc(b"NV12");
+    let both = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE;
+    let camera = node("Planar", both)
+        .format(V4L2_BUF_TYPE_VIDEO_CAPTURE, nv12)
+        .format(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, nv12)
+        .described(nv12, " Y/UV 4:2:0 ")
+        .size(nv12, raw_size_discrete(640, 480))
+        .interval(nv12, 640, 480, raw_interval_discrete(1, 30));
+    let found = records(&sys, vec![("video0", Ok(camera))]);
+    let modes = found[0].details["modes"].as_array().unwrap();
+    assert_eq!(modes.len(), 1);
+    assert_eq!(modes[0]["format_description"], "Y/UV 4:2:0");
 }

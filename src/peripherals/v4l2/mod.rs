@@ -249,7 +249,8 @@ fn interval_json(interval: &Interval) -> Value {
 
 /// One mode per size, at its fastest advertised rate (the shortest discrete
 /// period or range minimum). A size without intervals has no mode.
-fn mode_json(fourcc: &str, size: &Size) -> Option<Value> {
+/// `description` is the driver's `VIDIOC_ENUM_FMT` text, omitted when empty.
+fn mode_json(fourcc: &str, description: &str, size: &Size) -> Option<Value> {
     let Fraction(numerator, denominator) = size
         .probes
         .iter()
@@ -270,6 +271,9 @@ fn mode_json(fourcc: &str, size: &Size) -> Option<Value> {
         "framerate_den": numerator,
         "frame_intervals": frame_intervals,
     });
+    if !description.is_empty() {
+        mode["format_description"] = json!(description);
+    }
     let [width, height, max_width, max_height, step_width, step_height] = size.dims;
     if size.kind == 0 {
         mode["width"] = json!(width);
@@ -327,9 +331,10 @@ impl Enumerator<'_> {
     }
 
     /// The modes of every capture format, by fourcc; the single- and
-    /// multi-planar listings of one format merge.
+    /// multi-planar listings of one format merge, keeping the first non-empty
+    /// description.
     fn modes(&mut self, capabilities: u32) -> Result<Vec<Value>, Failure> {
-        let mut formats: BTreeMap<String, Vec<Size>> = BTreeMap::new();
+        let mut formats: BTreeMap<String, (String, Vec<Size>)> = BTreeMap::new();
         for (capture, buf_type) in [
             (V4L2_CAP_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE),
             (
@@ -349,17 +354,20 @@ impl Enumerator<'_> {
                     break;
                 }
                 let sizes = self.sizes(value.pixelformat)?;
-                formats
-                    .entry(fourcc_string(value.pixelformat))
-                    .or_default()
-                    .extend(sizes);
+                let (description, known) =
+                    formats.entry(fourcc_string(value.pixelformat)).or_default();
+                if description.is_empty() {
+                    *description = trim_c_space(&bounded_string(&value.description)).to_string();
+                }
+                known.extend(sizes);
             }
         }
         let mut modes = Vec::new();
-        for (fourcc, sizes) in &mut formats {
+        for (fourcc, (description, sizes)) in &mut formats {
             sizes.sort();
             sizes.dedup();
-            modes.extend(sizes.iter().filter_map(|size| mode_json(fourcc, size)));
+            let mode = |size| mode_json(fourcc, description, size);
+            modes.extend(sizes.iter().filter_map(mode));
         }
         Ok(modes)
     }
@@ -430,6 +438,28 @@ impl Enumerator<'_> {
     }
 }
 
+/// The `/dev/v4l/by-id` links (udev's persistent names) by the node they
+/// resolve to; the first in name order wins. A missing directory or an
+/// unresolvable link contributes nothing.
+fn by_id_links(dev_root: &Path) -> BTreeMap<PathBuf, PathBuf> {
+    let directory = dev_root.join("v4l/by-id");
+    let mut names: Vec<_> = fs::read_dir(&directory)
+        .into_iter()
+        .flatten()
+        .take(MAX_ENUMERATION_ENTRIES as usize)
+        .filter_map(|entry| Some(entry.ok()?.file_name()))
+        .collect();
+    names.sort();
+    let mut links = BTreeMap::new();
+    for name in names {
+        let link = directory.join(name);
+        if let Ok(node) = fs::canonicalize(&link) {
+            links.entry(node).or_insert(link);
+        }
+    }
+    links
+}
+
 impl V4l2Provider {
     fn scan(&self) -> Result<Vec<Record>, Failure> {
         let class = self.sys_root.join("class/video4linux");
@@ -450,9 +480,11 @@ impl V4l2Provider {
         let sys = fs::canonicalize(&self.sys_root).map_err(|error| {
             sysfs_failure("failed to resolve V4L2 sysfs root", &self.sys_root, &error)
         })?;
+        let by_id = by_id_links(&self.dev_root);
         let mut records = Vec::new();
         for name in names {
-            match self.probe(&sys, &class.join(&name), &self.dev_root.join(&name)) {
+            let device_path = self.dev_root.join(&name);
+            match self.probe(&sys, &class.join(&name), &device_path, &by_id) {
                 Ok(record) => records.extend(record),
                 Err(failure) if disappeared(failure.errno) => {}
                 Err(failure) => return Err(failure),
@@ -469,6 +501,7 @@ impl V4l2Provider {
         sys: &Path,
         entry: &Path,
         device_path: &Path,
+        by_id: &BTreeMap<PathBuf, PathBuf>,
     ) -> Result<Option<Record>, Failure> {
         let link = entry.join("device");
         let device = fs::canonicalize(&link)
@@ -564,6 +597,8 @@ impl V4l2Provider {
             ("vendor_id", "idVendor"),
             ("product_id", "idProduct"),
             ("serial", "serial"),
+            ("manufacturer", "manufacturer"),
+            ("speed", "speed"),
         ] {
             if let Some(value) = attribute(name) {
                 identity[key] = json!(value);
@@ -581,6 +616,10 @@ impl V4l2Provider {
             .unwrap_or_else(|| trim_c_space(&bounded_string(&capability.card)).to_string());
         if !model.is_empty() {
             details["model"] = json!(model);
+        }
+        let node = fs::canonicalize(device_path).ok();
+        if let Some(link) = node.and_then(|node| by_id.get(&node)) {
+            details["by_id_path"] = json!(link.to_string_lossy());
         }
         Ok(Some(Record {
             id: format!("camera:v4l2:{fnv1a:016x}"),
