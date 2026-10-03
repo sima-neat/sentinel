@@ -120,37 +120,9 @@ document. After `POST /v1/peripherals/refresh`, re-read until `scan_sequence`
 reaches the returned `target_scan_sequence`. A missing or unreadable catalog
 returns HTTP 503.
 
-Cameras are discovered in-process from kernel interfaces only; Sentinel does
-not use libcamera or GStreamer. MIPI cameras come from the media-controller
-graph: every sensor entity on a `simaai-v4l2-vid` media device is a camera
-named exactly as the entity (for example `imx477 5-001a`, the name
-`CameraInput` accepts), with modes taken from the ISP output node's formats
-and sizes (`isp_output: true`). The ISP reports no frame intervals, so those
-modes carry a nominal 30/1 rate (`framerate_source: "nominal"`). USB/UVC
-cameras come from their V4L2 nodes and are identified by USB topology.
-
-Devices that need vendor code can be added as separate programs described by
-JSON manifests in `/usr/lib/simaai-sentinel/providers/`:
-
-```json
-{
-  "protocol": 1,
-  "name": "vendor.lidar.example",
-  "exec": "/usr/lib/simaai-sentinel/providers/example-lidar",
-  "args": [],
-  "subsystems": ["net"],
-  "timeout_ms": 4000,
-  "user": "sima"
-}
-```
-
-Manifests and executables must be owned by root and not writable by group or
-others. Sentinel runs each provider as the declared user, with its
-supplementary groups, closes its stdin, and kills it at the time limit. The
-provider prints one JSON document:
-`{"schema_version": 1, "ok": true, "records": [{"id", "type", "provider", "details"}]}`
-or `{"schema_version": 1, "ok": false, "error": {"code", "reason"}}`. A
-rejected manifest appears in `issues`.
+Cameras are discovered from kernel interfaces only. The record format of each
+device type, the external provider protocol, and how to add a device type are
+in [Peripherals](peripherals/README.md).
 
 ## Security and concurrency
 

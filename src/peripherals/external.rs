@@ -73,6 +73,21 @@ pub fn load_providers(dir: &Path, trust: Trust) -> (Vec<ExternalProvider>, Vec<(
 
 fn load_manifest(path: &Path, trust: Trust) -> Result<Manifest, String> {
     check_trusted(path, trust)?;
+    let manifest = read_manifest(path)?;
+    check_trusted(&manifest.exec, trust)?;
+    Ok(manifest)
+}
+
+/// Why the installed daemon would refuse this manifest, if it would.
+pub fn daemon_refusal(path: &Path, manifest: &Manifest) -> Option<String> {
+    check_trusted(path, Trust::root())
+        .and_then(|_| check_trusted(&manifest.exec, Trust::root()))
+        .err()
+}
+
+/// Parse and check a manifest's contents, without the ownership checks the
+/// daemon also applies.
+pub fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let data = fs::read(path).map_err(|error| format!("read failed: {error}"))?;
     let manifest: Manifest =
         serde_json::from_slice(&data).map_err(|error| format!("invalid manifest: {error}"))?;
@@ -88,7 +103,6 @@ fn load_manifest(path: &Path, trust: Trust) -> Result<Manifest, String> {
     if !manifest.exec.is_absolute() {
         return Err("exec must be an absolute path".into());
     }
-    check_trusted(&manifest.exec, trust)?;
     Ok(manifest)
 }
 
@@ -115,11 +129,24 @@ fn check_trusted(path: &Path, trust: Trust) -> Result<(), String> {
 /// bounded output. Its stdout must be one provider protocol v1 document.
 pub struct ExternalProvider {
     manifest: Manifest,
+    as_current_user: bool,
 }
 
 impl ExternalProvider {
     pub fn new(manifest: Manifest) -> Self {
-        Self { manifest }
+        Self {
+            manifest,
+            as_current_user: false,
+        }
+    }
+
+    /// For `--test-provider`: run as whoever runs the command instead of the
+    /// manifest's user, so developers can test without root.
+    pub fn for_testing(manifest: Manifest) -> Self {
+        Self {
+            manifest,
+            as_current_user: true,
+        }
     }
 
     fn timeout(&self) -> Duration {
@@ -132,7 +159,11 @@ impl ExternalProvider {
     }
 
     fn spawn(&self) -> Result<Child, ProviderError> {
-        let identity = resolve_user(&self.manifest.user)?;
+        let identity = if self.as_current_user {
+            resolve_user(&current_user_name()?)?
+        } else {
+            resolve_user(&self.manifest.user)?
+        };
         let mut command = Command::new(&self.manifest.exec);
         command
             .args(&self.manifest.args)
@@ -392,6 +423,20 @@ struct Identity {
     gid: libc::gid_t,
     groups: Vec<libc::gid_t>,
     home: String,
+}
+
+fn current_user_name() -> Result<String, ProviderError> {
+    // SAFETY: getpwuid returns static storage or null; the name is copied.
+    let entry = unsafe { libc::getpwuid(libc::getuid()) };
+    if entry.is_null() {
+        return Err(ProviderError::new(
+            "peripherals.provider_unavailable",
+            "the current user has no passwd entry",
+        ));
+    }
+    Ok(unsafe { CStr::from_ptr((*entry).pw_name) }
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn current_uid() -> libc::uid_t {

@@ -224,7 +224,9 @@ fn resolve_ownership(
     }
 }
 
-fn validate(provider: &str, records: Vec<Record>) -> Result<Vec<Record>, ProviderError> {
+/// The checks every provider's output must pass, in the daemon and in
+/// `--test-provider`.
+pub(crate) fn validate(provider: &str, records: Vec<Record>) -> Result<Vec<Record>, ProviderError> {
     let invalid =
         |reason: String| ProviderError::new("peripherals.invalid_provider_result", reason);
     let mut ids = BTreeSet::new();

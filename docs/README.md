@@ -26,3 +26,6 @@ calculated, and what its limitations are.
   daemon's Unix socket.
 - [Capturing and comparing runs](run-comparison.md) documents persistent
   checkpoints, the Compare Runs tab, retention, and CSV/JSON exports.
+- [Peripherals](peripherals/README.md) documents the catalog of connected
+  devices, the record format of each device type, and how to add support for
+  a new device type.
