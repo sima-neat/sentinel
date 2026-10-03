@@ -95,7 +95,8 @@ ranges (never supported), and `isp_output`. Without Neat Core, every mode is
 | Behaviour | Real hardware | Fixtures only |
 | --- | --- | --- |
 | IMX477 name, media graph and ISP sizes | Transcribed from a DevKit capture (2.1.3) | |
-| Live discovery through `/dev/media*` and the ISP node | Not yet run on a DevKit | Synthetic fake kernel interfaces |
-| Logitech C920 record shape | | Synthetic, matching the v1 catalog fixture |
+| Live discovery through `/dev/media*` and the ISP node: name matches libcamera, 16 ISP nodes, 9 modes, NV12 supported | DevKit, 2026-10-03 | Synthetic fake kernel interfaces |
+| Logitech C920: one record, metadata node excluded, 17 MJPG / 18 YUYV modes matching `v4l2-ctl`, same id after unplug and replug | DevKit, 2026-10-03 | Synthetic, matching the v1 catalog fixture |
+| Discovery during a 1920x1080 stream does not drop frames | DevKit, 2026-10-03 | |
 | Hot-plug, several cameras, renumbering | | Synthetic |
 | Frame-rate limits from sensor timing | Not implemented (rate is nominal) | |
