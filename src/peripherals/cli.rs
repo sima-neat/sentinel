@@ -7,14 +7,13 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use super::external::{daemon_refusal, read_manifest, ExternalProvider};
-use super::model::{CatalogDocument, Provider};
+use super::model::CatalogDocument;
 use super::scan::validate;
 use super::service::read;
 use super::support::SupportStage;
 use super::{builtin_providers, Settings};
 
-/// `simaai-sentinel peripherals [--json] [--refresh] [--test-provider NAME|MANIFEST]`
+/// `simaai-sentinel peripherals [--json] [--refresh] [--test-provider NAME]`
 pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()> {
     let catalog_path = settings.catalog_path.as_path();
     let mut json = false;
@@ -27,7 +26,7 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
             "--test-provider" => {
                 let target = args
                     .get(index + 1)
-                    .context("--test-provider needs a built-in provider name or a manifest path")?;
+                    .context("--test-provider needs a provider name, e.g. daemon.camera.mipi")?;
                 return test_provider(target, settings);
             }
             other => bail!("unknown peripherals option '{other}'"),
@@ -52,37 +51,19 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
 /// Run one provider once, as the daemon would, and print the records it
 /// would add to the catalog. Built for people adding a device type.
 fn test_provider(target: &str, settings: &Settings) -> Result<()> {
-    let mut warnings = Vec::new();
-    let mut provider: Box<dyn Provider> = if target.ends_with(".json") || Path::new(target).exists()
-    {
-        let path = Path::new(target);
-        let manifest = read_manifest(path)
-            .map_err(|reason| anyhow::anyhow!("{}: {reason}", path.display()))?;
-        if let Some(reason) = daemon_refusal(path, &manifest) {
-            warnings.push(format!(
-                "the installed daemon would refuse this provider until it is fixed: {reason}"
-            ));
-        }
-        warnings.push(format!(
-            "running as the current user; the daemon runs it as '{}'",
-            manifest.user
-        ));
-        Box::new(ExternalProvider::for_testing(manifest))
-    } else {
-        let names: Vec<String> = builtin_providers()
-            .iter()
-            .map(|provider| provider.name().to_string())
-            .collect();
-        builtin_providers()
-            .into_iter()
-            .find(|provider| provider.name() == target)
-            .with_context(|| {
-                format!(
-                    "no built-in provider '{target}'; built-in providers: {}",
-                    names.join(", ")
-                )
-            })?
-    };
+    let names: Vec<String> = builtin_providers()
+        .iter()
+        .map(|provider| provider.name().to_string())
+        .collect();
+    let mut provider = builtin_providers()
+        .into_iter()
+        .find(|provider| provider.name() == target)
+        .with_context(|| {
+            format!(
+                "no provider '{target}'; built-in providers: {}",
+                names.join(", ")
+            )
+        })?;
     let name = provider.name().to_string();
     let outcome = provider
         .discover()
@@ -91,7 +72,6 @@ fn test_provider(target: &str, settings: &Settings) -> Result<()> {
         "provider": name,
         "subsystems": provider.subsystems(),
         "ok": outcome.is_ok(),
-        "warnings": warnings,
     });
     match outcome {
         Ok(mut records) => {
@@ -218,63 +198,15 @@ mod tests {
     use crate::peripherals::model::Record;
     use serde_json::json;
 
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-
-    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    fn temp_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "sentinel-test-provider-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    fn settings(dir: &Path) -> Settings {
-        Settings {
-            catalog_path: dir.join("peripherals.json"),
-            providers_dir: dir.join("providers"),
-            support_rules_path: dir.join("support/neat-core.json"),
-        }
-    }
-
-    fn manifest(dir: &Path, exec: &Path) -> PathBuf {
-        let path = dir.join("provider.json");
-        let document = json!({
-            "protocol": 1, "name": "example.sensor", "exec": exec,
-            "subsystems": ["usb"], "user": "sima"
-        });
-        fs::write(&path, document.to_string()).unwrap();
-        path
-    }
-
     #[test]
-    fn shipped_example_provider_passes_the_test_command() {
-        let dir = temp_dir();
-        let example =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/peripherals/example-sensor.py");
-        let path = manifest(&dir, &example);
-        test_provider(path.to_str().unwrap(), &settings(&dir)).unwrap();
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn broken_provider_and_unknown_names_fail_clearly() {
-        let dir = temp_dir();
-        let script = dir.join("broken.sh");
-        fs::write(&script, "#!/bin/sh\necho not-json\n").unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = manifest(&dir, &script);
-        let error = test_provider(path.to_str().unwrap(), &settings(&dir)).unwrap_err();
-        assert!(error.to_string().contains("example.sensor"), "{error}");
-
-        let error = test_provider("no.such.provider", &settings(&dir)).unwrap_err();
+    fn unknown_provider_names_list_the_built_in_ones() {
+        let settings = Settings {
+            catalog_path: "/nonexistent/peripherals.json".into(),
+            support_rules_path: "/nonexistent/neat-core.json".into(),
+        };
+        let error = test_provider("no.such.provider", &settings).unwrap_err();
         assert!(error.to_string().contains("daemon.camera.mipi"), "{error}");
-        fs::remove_dir_all(dir).unwrap();
+        assert!(error.to_string().contains("daemon.camera.v4l2"), "{error}");
     }
 
     #[test]

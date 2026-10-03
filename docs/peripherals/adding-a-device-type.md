@@ -1,22 +1,19 @@
 # Adding a device type
 
 This page is for contributors who want Sentinel to discover a new kind of
-device. It covers choosing an approach, writing the provider, testing it, and
+device. It covers checking the kernel interface, writing the provider, testing it, and
 documenting the new type so application developers can use it.
 
-## 1. Choose built-in or external
+## 1. Check the kernel describes the device
 
-| | Built-in provider | External provider |
-| --- | --- | --- |
-| Use when | The Linux kernel describes the device: sysfs, `/proc`, V4L2, ALSA, IIO, media controller, ... | Only a vendor program or SDK can describe the device, or another team ships it separately |
-| Written in | Rust, inside Sentinel | Any language: a separate executable |
-| Ships with | Sentinel | Its own package; no Sentinel release needed |
-| Runs | In the peripherals thread | As a child process, as an unprivileged user, killed at a time limit |
-| Examples | USB cameras (`src/peripherals/v4l2/`), MIPI cameras (`src/peripherals/mipi/`) | [`examples/peripherals/example-sensor.py`](../../examples/peripherals/example-sensor.py) |
+Every provider is Rust code inside Sentinel that reads kernel interfaces:
+sysfs, `/proc`, uevents, and read-only ioctls (V4L2, ALSA, IIO, media
+controller, ...). Sentinel does not run other programs or load user-space
+stacks such as libcamera or GStreamer to discover devices. Before starting,
+confirm the kernel exposes what applications need to know about the device.
 
-Prefer built-in when the kernel exposes what you need. Sentinel reads devices
-at the kernel layer; it does not depend on user-space stacks such as libcamera
-or GStreamer.
+The camera providers are working examples: USB cameras in
+`src/peripherals/v4l2/` and MIPI cameras in `src/peripherals/mipi/`.
 
 ## 2. Rules every provider follows
 
@@ -39,9 +36,8 @@ or GStreamer.
 5. **Facts only.** Report what the device and kernel say. Whether a Neat
    component supports the device is decided by that component's support rules,
    not by the provider.
-6. **Bounded work.** Cap every enumeration loop (built-in providers use 1024
-   entries). Built-in providers must not block; external providers are killed
-   at their time limit.
+6. **Bounded work.** Cap every enumeration loop at 1024 entries and never
+   block: a provider runs inside the daemon and cannot be killed.
 
 ## 3. The record
 
@@ -56,7 +52,7 @@ A provider returns a list of records:
 | --- | --- |
 | `id` | Non-empty, unique across all providers, stable (see above) |
 | `type` | Lowercase letters, digits, `_` or `-`, starting with a letter; at most 64 characters; not `id`, `type` or `provider` |
-| `provider` | Your provider's name, for example `daemon.audio.alsa` or `vendor.lidar.acme` |
+| `provider` | Your provider's name, for example `daemon.audio.alsa` |
 | `details` | A JSON object. Its fields are the type's schema, documented in [device types](device-types/README.md) |
 
 In the catalog, `details` is published under a key named after the type:
@@ -64,7 +60,7 @@ In the catalog, `details` is published under a key named after the type:
 as JSON, so your type appears in the API, the CLI, Insight and Neat Core's
 `details` without changes to any of them.
 
-## 4a. Writing a built-in provider
+## 4. Write the provider
 
 1. Create `src/peripherals/<name>/` (or `<name>.rs`) and implement the
    `Provider` trait from `src/peripherals/model.rs`:
@@ -86,29 +82,19 @@ as JSON, so your type appears in the API, the CLI, Insight and Neat Core's
 4. Map failures to `ProviderError` codes: `io.permission_denied`, `io.open`,
    or `peripherals.discovery_failed`.
 
-## 4b. Writing an external provider
-
-Follow the [external provider protocol](provider-protocol.md). Start from the
-reference provider in `examples/peripherals/` and its manifest. Package the
-executable and the manifest with your product; install the manifest in
-`/usr/lib/simaai-sentinel/providers/`, owned by root.
-
 ## 5. Test it
 
 Run your provider once, as Sentinel would, and see exactly what it adds to the
 catalog:
 
 ```bash
-simaai-sentinel peripherals --test-provider daemon.audio.alsa         # built-in
-simaai-sentinel peripherals --test-provider ./my-provider.json        # external
+simaai-sentinel peripherals --test-provider daemon.audio.alsa
 ```
 
 The command validates your records with the same checks as the daemon, applies
-any support rules, prints the result, and exits non-zero on failure. For an
-external provider it runs as you instead of the manifest's user and warns if
-the installed daemon would refuse the manifest.
+any support rules, prints the result, and exits non-zero on failure.
 
-Unit tests are required for built-in providers:
+Unit tests are required:
 
 - one test per variation axis you listed in rule 3;
 - fixtures transcribed from real device captures where you have them, and
@@ -130,7 +116,7 @@ hardware and which only on fixtures.
 
 ## Checklist
 
-- [ ] Built-in or external chosen for a stated reason
+- [ ] The kernel exposes what applications need about the device
 - [ ] Read-only; no configuration, streaming or ownership
 - [ ] Stable `id` from stable attributes, prefixed with the type
 - [ ] Variation axes listed and each one tested

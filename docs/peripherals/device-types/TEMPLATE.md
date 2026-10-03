@@ -3,7 +3,7 @@
 <!-- One paragraph: what this type covers and which devices are in its class. -->
 
 - **Type token:** `<type>`
-- **Providers:** `<provider name>` (built-in or external)
+- **Providers:** `<provider name>`
 - **Rescan triggers:** `<uevent subsystems>`
 
 ## Identity

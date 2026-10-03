@@ -121,8 +121,8 @@ reaches the returned `target_scan_sequence`. A missing or unreadable catalog
 returns HTTP 503.
 
 Cameras are discovered from kernel interfaces only. The record format of each
-device type, the external provider protocol, and how to add a device type are
-in [Peripherals](peripherals/README.md).
+device type and how to add a device type are in
+[Peripherals](peripherals/README.md).
 
 ## Security and concurrency
 

@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_CATALOG_PATH: &str = "/run/simaai-sentinel/peripherals.json";
-pub const DEFAULT_PROVIDERS_DIR: &str = "/usr/lib/simaai-sentinel/providers";
 
 /// One peripheral as reported by a provider. `details` is type-specific and is
 /// published under a key named after `kind` (for example `"camera": {...}`).

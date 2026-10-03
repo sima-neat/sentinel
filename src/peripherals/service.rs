@@ -15,8 +15,8 @@ use super::support::{RulesWatch, SupportStage};
 use super::uevent::UeventSocket;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
-/// Discovery yields to camera pipelines on a busy board. Scan threads and
-/// external provider processes inherit this from the peripherals thread.
+/// Discovery yields to camera pipelines on a busy board. Scan threads inherit
+/// this from the peripherals thread.
 pub const NICE: libc::c_int = 10;
 
 #[derive(Default)]

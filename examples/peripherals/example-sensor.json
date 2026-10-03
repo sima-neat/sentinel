@@ -1,9 +1,0 @@
-{
-  "protocol": 1,
-  "name": "example.sensor",
-  "exec": "/usr/lib/simaai-sentinel/providers/example-sensor.py",
-  "args": [],
-  "subsystems": ["usb"],
-  "timeout_ms": 4000,
-  "user": "sima"
-}

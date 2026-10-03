@@ -25,8 +25,9 @@ refresh request ───────┤
             GET /v1/peripherals  ·  simaai-sentinel peripherals
 ```
 
-A **provider** discovers one family of devices and returns records. Sentinel
-does everything else: waking on hot-plug, debouncing, isolating failures,
+A **provider** is Rust code inside Sentinel that discovers one family of
+devices from kernel interfaces and returns records. Sentinel does everything
+else: waking on hot-plug, debouncing, isolating failures,
 keeping a failed provider's last good records, stable revisions, the change
 log, the API and the CLI.
 
@@ -39,7 +40,6 @@ requests into one scan.
 | Page | For |
 | --- | --- |
 | [Adding a device type](adding-a-device-type.md) | Contributors adding support for a new kind of device |
-| [External provider protocol](provider-protocol.md) | Writing a provider as a separate program (vendor SDKs, other teams) |
 | [Device types](device-types/README.md) | The record format of each supported type, starting with [cameras](device-types/camera.md) |
 | [Local agent API](../api.md) | `GET /v1/peripherals`, `POST /v1/peripherals/refresh`, polling with `since_revision` |
 
