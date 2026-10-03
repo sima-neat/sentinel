@@ -105,6 +105,16 @@ Rules are checked in that order and the first failure becomes the mode's
 `reason`. Size ranges are never marked supported; `isp_output`, when present,
 requires the mode to be an ISP output size.
 
+Sentinel creates `/usr/share/simaai-sentinel/support/` but never installs a
+file in it: each file there belongs to the package that provides it, so
+Sentinel and Neat Core never claim the same path and can be installed,
+upgraded, or removed independently. Sentinel keeps reading every rules
+format it has supported; a newer format makes Sentinel keep its previous rules
+and report that Sentinel needs an update.
+
+Discovery runs at nice +10, so a scan yields to camera pipelines on a busy
+board.
+
 Clients should poll with `since_revision` rather than re-read the full
 document. After `POST /v1/peripherals/refresh`, re-read until `scan_sequence`
 reaches the returned `target_scan_sequence`. A missing or unreadable catalog

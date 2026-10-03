@@ -137,8 +137,20 @@ fn load(path: &Path) -> Result<Option<RulesFile>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("read failed: {error}")),
     };
-    let rules: RulesFile =
+    // Check the format before the shape: a newer format is likely to have a
+    // different shape, and the useful answer is "update Sentinel".
+    let value: Value =
         serde_json::from_slice(&data).map_err(|error| format!("invalid rules: {error}"))?;
+    let format = value.get("format").and_then(Value::as_u64);
+    if format.is_some_and(|format| format > u64::from(RULES_FORMAT)) {
+        return Err(format!(
+            "Neat Core's rules use format {}, but this Sentinel reads format {RULES_FORMAT}. \
+Update Sentinel: sima-cli neat install sentinel",
+            format.unwrap_or_default()
+        ));
+    }
+    let rules: RulesFile =
+        serde_json::from_value(value).map_err(|error| format!("invalid rules: {error}"))?;
     if rules.format != RULES_FORMAT {
         return Err(format!("unsupported rules format {}", rules.format));
     }
@@ -448,6 +460,8 @@ mod tests {
         assert_eq!(status.state, "stale");
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, "peripherals.invalid_support_rules");
+        assert!(issues[0].reason.contains("format 2"));
+        assert!(issues[0].reason.contains("sima-cli neat install sentinel"));
         assert!(issues[0].retained_last_good);
         assert_eq!(verdicts(&devices[0])[0], (true, String::new()));
     }

@@ -15,6 +15,9 @@ use super::support::{RulesWatch, SupportStage};
 use super::uevent::UeventSocket;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
+/// Discovery yields to camera pipelines on a busy board. Scan threads and
+/// external provider processes inherit this from the peripherals thread.
+pub const NICE: libc::c_int = 10;
 
 #[derive(Default)]
 struct Schedule {
@@ -171,6 +174,7 @@ fn run(
     mut uevents: Option<UeventSocket>,
     mut rules_watch: Option<RulesWatch>,
 ) {
+    lower_priority();
     // The initial scan runs immediately; afterwards the thread sleeps in
     // poll() until a uevent, a rules change, a refresh request, or shutdown.
     let mut due = Some(Instant::now());
@@ -283,6 +287,22 @@ fn run(
                 eprintln!("Sentinel peripheral catalog write failed: {error:#}");
             }
         }
+    }
+}
+
+fn lower_priority() {
+    // SAFETY: gettid has no arguments; get/setpriority target only this
+    // thread. Raise niceness relative to the daemon's own, capped at 19.
+    let result = unsafe {
+        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+        let current = libc::getpriority(libc::PRIO_PROCESS, tid);
+        libc::setpriority(libc::PRIO_PROCESS, tid, (current + NICE).min(19))
+    };
+    if result != 0 {
+        eprintln!(
+            "Sentinel could not lower the peripherals thread priority: {}",
+            io::Error::last_os_error()
+        );
     }
 }
 
@@ -499,5 +519,54 @@ mod tests {
 
         handle.stop();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    struct NiceProbe(Arc<std::sync::Mutex<Option<i32>>>);
+
+    impl Provider for NiceProbe {
+        fn name(&self) -> &str {
+            "test.nice"
+        }
+        fn subsystems(&self) -> &[String] {
+            &[]
+        }
+        fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
+            // SAFETY: reads this thread's own scheduling priority.
+            let nice = unsafe {
+                libc::getpriority(
+                    libc::PRIO_PROCESS,
+                    libc::syscall(libc::SYS_gettid) as libc::id_t,
+                )
+            };
+            *self.0.lock().unwrap() = Some(nice);
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn scans_run_at_lower_priority() {
+        let root = std::env::temp_dir().join(format!(
+            "sentinel-nice-{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = root.join("peripherals.json");
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let handle = spawn(
+            Config {
+                catalog_path: path.clone(),
+                support_rules_path: root.join("support/neat-core.json"),
+                instance_id: "nice".into(),
+                debounce: Duration::from_millis(10),
+            },
+            vec![Box::new(NiceProbe(seen.clone()))],
+        )
+        .unwrap();
+        wait_for(&path, |document| document.ready);
+        handle.stop();
+        fs::remove_dir_all(root).unwrap();
+        // The process may already run niced; discovery adds NICE on top.
+        let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        assert_eq!(*seen.lock().unwrap(), Some((base + NICE).min(19)));
     }
 }
