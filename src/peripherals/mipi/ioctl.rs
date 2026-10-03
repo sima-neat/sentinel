@@ -1,28 +1,17 @@
-//! The read-only media-controller and V4L2 ioctl surface used by MIPI camera
-//! discovery.
-//!
-//! Only query ioctls are declared here: `MEDIA_IOC_DEVICE_INFO` and
-//! `MEDIA_IOC_G_TOPOLOGY` on `/dev/media*`, and `VIDIOC_QUERYCAP`,
-//! `VIDIOC_ENUM_FMT`, `VIDIOC_ENUM_FRAMESIZES` and `VIDIOC_ENUM_FRAMEINTERVALS`
-//! on the ISP video node. Nothing in this module can set up media links, set a
-//! subdevice or video format, request buffers, or start streaming.
-//!
-//! The structures mirror `<linux/media.h>` byte for byte. The V4L2 video-node
-//! queries are the shared surface in `peripherals::videodev2`.
+//! The read-only media-controller ioctls of MIPI discovery: `MEDIA_IOC_DEVICE_INFO`
+//! and `MEDIA_IOC_G_TOPOLOGY` (entities only). Nothing here can set up links,
+//! set a format, or stream. The structures mirror `<linux/media.h>` byte for
+//! byte; the V4L2 node queries are the shared surface in `videodev2`.
 
 use std::io;
+use std::mem::{offset_of, size_of};
 use std::path::Path;
 
 use crate::peripherals::videodev2::{
     ioc, open_read_only, SystemNode, VideoNode, IOC_READ, IOC_WRITE,
 };
 
-/// `MEDIA_ENT_F_CAM_SENSOR`.
 pub const MEDIA_ENT_F_CAM_SENSOR: u32 = 0x0002_0001;
-#[cfg(test)]
-pub const MEDIA_ENT_F_IO_V4L: u32 = 0x0001_0001;
-#[cfg(test)]
-pub const MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN: u32 = 0x0002_0000;
 
 /// `struct media_device_info`.
 #[repr(C)]
@@ -32,12 +21,9 @@ pub struct MediaDeviceInfo {
     pub model: [u8; 32],
     pub serial: [u8; 40],
     pub bus_info: [u8; 32],
-    pub media_version: u32,
-    pub hw_revision: u32,
-    pub driver_version: u32,
+    pub versions: [u32; 3],
     pub reserved: [u32; 31],
 }
-const _: () = assert!(std::mem::size_of::<MediaDeviceInfo>() == 256);
 
 impl Default for MediaDeviceInfo {
     fn default() -> Self {
@@ -46,37 +32,26 @@ impl Default for MediaDeviceInfo {
             model: [0; 32],
             serial: [0; 40],
             bus_info: [0; 32],
-            media_version: 0,
-            hw_revision: 0,
-            driver_version: 0,
+            versions: [0; 3],
             reserved: [0; 31],
         }
     }
 }
 
-/// `struct media_v2_topology`. Only the entity array is ever requested; the
-/// interface, pad and link pointers stay null so the kernel skips them.
+/// `struct media_v2_topology`. `other` holds the interface, pad and link
+/// counts and pointers, which stay zero so the kernel skips those arrays.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-pub struct MediaV2Topology {
-    pub topology_version: u64,
-    pub num_entities: u32,
-    pub reserved1: u32,
-    pub ptr_entities: u64,
-    pub num_interfaces: u32,
-    pub reserved2: u32,
-    pub ptr_interfaces: u64,
-    pub num_pads: u32,
-    pub reserved3: u32,
-    pub ptr_pads: u64,
-    pub num_links: u32,
-    pub reserved4: u32,
-    pub ptr_links: u64,
+struct MediaV2Topology {
+    topology_version: u64,
+    num_entities: u32,
+    reserved1: u32,
+    ptr_entities: u64,
+    other: [u64; 6],
 }
-const _: () = assert!(std::mem::size_of::<MediaV2Topology>() == 72);
 
-/// `struct media_v2_entity` (declared `packed` in the header; every member is
-/// 4-byte aligned, so the `repr(C)` layout is identical).
+/// `struct media_v2_entity` (declared `packed`; every member is 4-byte
+/// aligned, so the `repr(C)` layout is identical).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct MediaV2Entity {
@@ -86,7 +61,6 @@ pub struct MediaV2Entity {
     pub flags: u32,
     pub reserved: [u32; 5],
 }
-const _: () = assert!(std::mem::size_of::<MediaV2Entity>() == 96);
 
 impl Default for MediaV2Entity {
     fn default() -> Self {
@@ -100,21 +74,20 @@ impl Default for MediaV2Entity {
     }
 }
 
-pub const MEDIA_IOC_DEVICE_INFO: u32 = ioc(
-    IOC_READ | IOC_WRITE,
-    b'|',
-    0x00,
-    std::mem::size_of::<MediaDeviceInfo>(),
-);
-pub const MEDIA_IOC_G_TOPOLOGY: u32 = ioc(
-    IOC_READ | IOC_WRITE,
-    b'|',
-    0x04,
-    std::mem::size_of::<MediaV2Topology>(),
-);
+const IOWR: u32 = IOC_READ | IOC_WRITE;
+const MEDIA_IOC_DEVICE_INFO: u32 = ioc(IOWR, b'|', 0x00, size_of::<MediaDeviceInfo>());
+const MEDIA_IOC_G_TOPOLOGY: u32 = ioc(IOWR, b'|', 0x04, size_of::<MediaV2Topology>());
 
-/// Opens media and video nodes. The production implementation opens character
-/// devices; tests substitute a fake that serves synthetic devices.
+// The ABI of <linux/media.h>, with ioctl numbers computed by a C program.
+const _: () =
+    assert!(size_of::<MediaDeviceInfo>() == 256 && offset_of!(MediaDeviceInfo, bus_info) == 88);
+const _: () =
+    assert!(size_of::<MediaV2Topology>() == 72 && offset_of!(MediaV2Topology, ptr_entities) == 16);
+const _: () =
+    assert!(size_of::<MediaV2Entity>() == 96 && offset_of!(MediaV2Entity, function) == 68);
+const _: () = assert!(MEDIA_IOC_DEVICE_INFO == 0xc100_7c00 && MEDIA_IOC_G_TOPOLOGY == 0xc048_7c04);
+
+/// Opens media and video nodes; tests substitute synthetic devices.
 pub trait Backend: Send {
     fn open_media(&self, path: &Path) -> io::Result<Box<dyn MediaNode>>;
     fn open_video(&self, path: &Path) -> io::Result<Box<dyn VideoNode>>;
@@ -123,18 +96,12 @@ pub trait Backend: Send {
 /// The query ioctls of one open `/dev/media*` node.
 pub trait MediaNode {
     fn device_info(&mut self, value: &mut MediaDeviceInfo) -> io::Result<()>;
-    /// `MEDIA_IOC_G_TOPOLOGY` for entities only. The kernel writes at most
-    /// `entities.len()` entries (none when the slice is empty, which only
-    /// counts) and sets `value.num_entities` to the total entity count.
-    fn topology(
-        &mut self,
-        value: &mut MediaV2Topology,
-        entities: &mut [MediaV2Entity],
-    ) -> io::Result<()>;
+    /// Fills `entities` with the graph's entities in one `MEDIA_IOC_G_TOPOLOGY`
+    /// call and returns how many there are; `ENOSPC` when they do not fit.
+    fn entities(&mut self, entities: &mut [MediaV2Entity]) -> io::Result<usize>;
 }
 
-/// Character-device backend: `open(O_RDONLY | O_NONBLOCK | O_CLOEXEC)` and
-/// query ioctls only.
+/// `open(O_RDONLY | O_NONBLOCK | O_CLOEXEC)` and query ioctls only.
 pub struct SystemBackend;
 
 impl Backend for SystemBackend {
@@ -153,29 +120,18 @@ impl MediaNode for SystemNode {
         unsafe { self.ioctl(MEDIA_IOC_DEVICE_INFO, value) }
     }
 
-    fn topology(
-        &mut self,
-        value: &mut MediaV2Topology,
-        entities: &mut [MediaV2Entity],
-    ) -> io::Result<()> {
-        // The kernel writes at most `num_entities` entries to `ptr_entities`
-        // (and fails with ENOSPC if more exist), so tying both to the slice
-        // keeps the write in bounds. All other arrays stay null. A slice too
-        // long to describe is refused rather than silently understated.
-        let num_entities = u32::try_from(entities.len())
-            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-        *value = MediaV2Topology {
-            num_entities,
-            ptr_entities: if entities.is_empty() {
-                0
-            } else {
-                entities.as_mut_ptr() as u64
-            },
+    fn entities(&mut self, entities: &mut [MediaV2Entity]) -> io::Result<usize> {
+        let mut topology = MediaV2Topology {
+            // Truncation could only understate the buffer, never overrun it.
+            num_entities: entities.len() as u32,
+            ptr_entities: entities.as_mut_ptr() as u64,
             ..MediaV2Topology::default()
         };
-        // SAFETY: MEDIA_IOC_G_TOPOLOGY encodes `struct media_v2_topology`;
-        // `ptr_entities` is null or points to `num_entities` entries of
-        // `entities`, which outlives the call, and every other array is null.
-        unsafe { self.ioctl(MEDIA_IOC_G_TOPOLOGY, value) }
+        // SAFETY: MEDIA_IOC_G_TOPOLOGY encodes `struct media_v2_topology`; the
+        // kernel writes at most `num_entities` entries to `ptr_entities`, which
+        // points into `entities` for the duration of the call; all other
+        // arrays are null.
+        unsafe { self.ioctl(MEDIA_IOC_G_TOPOLOGY, &mut topology)? };
+        Ok(topology.num_entities as usize)
     }
 }
