@@ -88,7 +88,7 @@ Neat Core installs `/usr/share/simaai-sentinel/support/neat-core.json`. For
 cameras the rules check, in order: `backend`, `format`, frame rate, size
 ranges (never supported), and `isp_output`. Without Neat Core, every mode is
 `supported: false` with the reason "Neat Core is not installed". See
-[Local agent API](../../api.md).
+[support rules](../README.md#support-rules).
 
 ## Verification
 

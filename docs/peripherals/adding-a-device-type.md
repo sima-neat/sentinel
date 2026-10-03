@@ -91,8 +91,10 @@ catalog:
 simaai-sentinel peripherals --test-provider daemon.audio.alsa
 ```
 
-The command validates your records with the same checks as the daemon, applies
-any support rules, prints the result, and exits non-zero on failure.
+The command validates your provider's records with the same per-provider
+checks as the daemon, applies any support rules, prints the result, and exits
+non-zero on failure. Ids must also be unique across providers: prefix them with
+your type and a provider-specific key.
 
 Unit tests are required:
 

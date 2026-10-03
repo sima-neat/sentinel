@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::thread;
 
 use super::catalog::Catalog;
@@ -66,7 +66,13 @@ impl Scanner {
         // No providers at all is a valid, empty catalog rather than a failure.
         if has_provider_result || issues.is_empty() {
             let (devices, issues) = self.classify(devices, issues, catalog);
-            catalog.apply_success(devices, issues)
+            // Providers own distinct id prefixes; a collision is a provider
+            // bug. It still counts as a scan so refresh targets are reached.
+            catalog
+                .apply_success(devices, issues)
+                .inspect_err(|reason| {
+                    catalog.apply_rejected_scan(reason);
+                })
         } else {
             catalog.apply_provider_failure(issues)
         }
@@ -108,15 +114,6 @@ fn compose(slots: &[ProviderSlot]) -> (Vec<Record>, bool) {
 /// Run every provider once, in parallel. A failed provider contributes an
 /// issue and keeps only its own last-good records.
 fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
-    let mut established_owners = BTreeMap::<String, String>::new();
-    for slot in slots.iter() {
-        for record in slot.last_good.iter().flatten() {
-            established_owners
-                .entry(record.id.clone())
-                .or_insert_with(|| slot.name().to_string());
-        }
-    }
-
     let outcomes: Vec<Result<Vec<Record>, ProviderError>> = thread::scope(|scope| {
         let handles: Vec<_> = slots
             .iter_mut()
@@ -135,7 +132,7 @@ fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
             .collect()
     });
 
-    let mut results: Vec<ScanResult> = slots
+    let results: Vec<ScanResult> = slots
         .iter()
         .zip(outcomes)
         .map(|(slot, outcome)| {
@@ -155,8 +152,6 @@ fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
         })
         .collect();
 
-    resolve_ownership(slots, &mut results, &established_owners);
-
     let mut issues = Vec::new();
     for (slot, result) in slots.iter_mut().zip(results) {
         if result.accepted {
@@ -167,61 +162,6 @@ fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
         }
     }
     issues
-}
-
-/// Two providers may not publish the same identity. The provider that already
-/// owned it keeps it; without an owner, every claimant is rejected.
-fn resolve_ownership(
-    slots: &[ProviderSlot],
-    results: &mut [ScanResult],
-    established_owners: &BTreeMap<String, String>,
-) {
-    loop {
-        let mut claims = BTreeMap::<String, Vec<usize>>::new();
-        for (index, (slot, result)) in slots.iter().zip(results.iter()).enumerate() {
-            let records = if result.accepted {
-                Some(&result.discovered)
-            } else {
-                slot.last_good.as_ref()
-            };
-            for record in records.into_iter().flatten() {
-                claims.entry(record.id.clone()).or_default().push(index);
-            }
-        }
-        let mut changed = false;
-        for (id, claimants) in claims.iter().filter(|(_, claimants)| claimants.len() > 1) {
-            let owner = established_owners.get(id).and_then(|owner| {
-                claimants
-                    .iter()
-                    .copied()
-                    .find(|&index| slots[index].name() == owner)
-            });
-            for &index in claimants {
-                if !results[index].accepted || owner == Some(index) {
-                    continue;
-                }
-                let reason = match owner {
-                    Some(owner) => format!(
-                        "peripheral identity {id} remains owned by provider {}",
-                        slots[owner].name()
-                    ),
-                    None => format!(
-                        "peripheral identity {id} was returned by multiple providers without an established owner"
-                    ),
-                };
-                results[index].accepted = false;
-                results[index].issue = Some(provider_issue(
-                    slots[index].name(),
-                    ProviderError::new("peripherals.invalid_provider_result", reason),
-                    slots[index].last_good.is_some(),
-                ));
-                changed = true;
-            }
-        }
-        if !changed {
-            return;
-        }
-    }
 }
 
 /// The checks every provider's output must pass, in the daemon and in
@@ -415,40 +355,17 @@ mod tests {
     }
 
     #[test]
-    fn established_owner_keeps_a_contested_identity() {
-        let mut scanner = scanner(vec![
-            Scripted::boxed(
-                "mipi",
-                vec![
-                    Ok(vec![record("mipi", "same")]),
-                    Ok(vec![record("mipi", "same")]),
-                ],
-            ),
-            Scripted::boxed("usb", vec![Ok(vec![]), Ok(vec![record("usb", "same")])]),
-        ]);
-        let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
-        scanner.scan(&mut catalog).unwrap();
-        let document = catalog.document();
-        assert_eq!(ids(&catalog), vec!["same"]);
-        assert_eq!(document.devices[0]["provider"], "mipi");
-        assert_eq!(document.issues[0].provider, "usb");
-        assert!(document.issues[0]
-            .reason
-            .contains("remains owned by provider mipi"));
-    }
-
-    #[test]
-    fn unowned_contested_identity_rejects_every_claimant() {
+    fn colliding_ids_reject_the_scan_but_count_it() {
         let mut scanner = scanner(vec![
             Scripted::boxed("a", vec![Ok(vec![record("a", "same")])]),
             Scripted::boxed("b", vec![Ok(vec![record("b", "same")])]),
         ]);
         let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
+        assert!(scanner.scan(&mut catalog).is_err());
         let document = catalog.document();
-        assert!(document.devices.is_empty());
-        assert_eq!(document.issues.len(), 2);
+        assert_eq!(document.scan_sequence, 1, "refresh targets still advance");
+        assert_eq!(document.issues[0].provider, "catalog");
+        assert!(document.issues[0].reason.contains("same"));
     }
 
     #[test]

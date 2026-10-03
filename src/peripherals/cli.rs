@@ -27,6 +27,9 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
                 let target = args
                     .get(index + 1)
                     .context("--test-provider needs a provider name, e.g. daemon.camera.mipi")?;
+                if let Some(extra) = args.get(index + 2) {
+                    bail!("--test-provider takes no further options (got '{extra}')");
+                }
                 return test_provider(target, settings);
             }
             other => bail!("unknown peripherals option '{other}'"),
@@ -34,8 +37,11 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
         index += 1;
     }
     if refresh {
+        let instance = read(catalog_path)
+            .map(|document| document.instance_id)
+            .context("peripheral catalog unavailable; check `systemctl status simaai-sentinel`")?;
         let target = request_refresh(api_socket)?;
-        wait_for_scan(catalog_path, target)?;
+        wait_for_scan(catalog_path, &instance, target)?;
     }
     let document = read(catalog_path).with_context(|| {
         "peripheral catalog unavailable; check `systemctl status simaai-sentinel`"
@@ -51,19 +57,13 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
 /// Run one provider once, as the daemon would, and print the records it
 /// would add to the catalog. Built for people adding a device type.
 fn test_provider(target: &str, settings: &Settings) -> Result<()> {
-    let names: Vec<String> = builtin_providers()
-        .iter()
-        .map(|provider| provider.name().to_string())
-        .collect();
-    let mut provider = builtin_providers()
+    let providers = builtin_providers();
+    let names: Vec<&str> = providers.iter().map(|provider| provider.name()).collect();
+    let names = names.join(", ");
+    let mut provider = providers
         .into_iter()
         .find(|provider| provider.name() == target)
-        .with_context(|| {
-            format!(
-                "no provider '{target}'; built-in providers: {}",
-                names.join(", ")
-            )
-        })?;
+        .with_context(|| format!("no provider '{target}'; built-in providers: {names}"))?;
     let name = provider.name().to_string();
     let outcome = provider
         .discover()
@@ -117,15 +117,34 @@ fn request_refresh(api_socket: &Path) -> Result<u64> {
     })
 }
 
-fn wait_for_scan(catalog_path: &Path, target: u64) -> Result<()> {
+fn wait_for_scan(catalog_path: &Path, instance: &str, target: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        if read(catalog_path).is_ok_and(|document| document.scan_sequence >= target) {
-            return Ok(());
+        if let Ok(document) = read(catalog_path) {
+            if document.instance_id != instance {
+                bail!("Sentinel restarted during the refresh; run the command again");
+            }
+            if document.scan_sequence >= target {
+                return Ok(());
+            }
         }
         thread::sleep(Duration::from_millis(100));
     }
     bail!("refresh did not complete within 15 seconds")
+}
+
+/// Device names come from the hardware; strip control characters so a device
+/// cannot send escape sequences to the administrator's terminal.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if ch.is_control() && ch != '\n' {
+                '?'
+            } else {
+                ch
+            }
+        })
+        .collect()
 }
 
 fn render(document: &CatalogDocument) -> String {
@@ -188,7 +207,7 @@ fn render(document: &CatalogDocument) -> String {
             error["reason"].as_str().unwrap_or("")
         ));
     }
-    out
+    printable(&out)
 }
 
 #[cfg(test)]
@@ -207,6 +226,28 @@ mod tests {
         let error = test_provider("no.such.provider", &settings).unwrap_err();
         assert!(error.to_string().contains("daemon.camera.mipi"), "{error}");
         assert!(error.to_string().contains("daemon.camera.v4l2"), "{error}");
+    }
+
+    #[test]
+    fn device_text_cannot_inject_terminal_escapes() {
+        let mut catalog = Catalog::new("i", 8);
+        catalog
+            .apply_success(
+                vec![Record {
+                    id: "camera:x".into(),
+                    kind: "camera".into(),
+                    provider: "p".into(),
+                    details: json!({"model": "evil\u{1b}]0;owned\u{7}cam"}),
+                }],
+                vec![],
+            )
+            .unwrap();
+        let text = render(&catalog.document());
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
+        assert!(text.contains("evil?]0;owned?cam"));
     }
 
     #[test]

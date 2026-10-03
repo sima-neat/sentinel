@@ -219,7 +219,8 @@ fn evaluate(rules: &CameraRules, backend: &str, mode: &Value) -> Result<(), Stri
 
 /// 30/1 and 60/2 are the same rate.
 fn same_rate(left: (u64, u64), right: (u64, u64)) -> bool {
-    left.1 != 0 && right.1 != 0 && left.0 * right.1 == right.0 * left.1
+    let cross = |a: u64, b: u64| u128::from(a) * u128::from(b);
+    left.1 != 0 && right.1 != 0 && cross(left.0, right.1) == cross(right.0, left.1)
 }
 
 /// Wakes the peripherals thread when Core installs, replaces or removes its

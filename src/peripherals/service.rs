@@ -18,6 +18,8 @@ pub const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Discovery yields to camera pipelines on a busy board. Scan threads inherit
 /// this from the peripherals thread.
 pub const NICE: libc::c_int = 10;
+/// A steady stream of events cannot postpone a scan by more than this.
+pub const MAX_EVENT_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct Schedule {
@@ -25,6 +27,9 @@ struct Schedule {
     scanning: bool,
     refresh: bool,
     stop: bool,
+    /// False once the thread has exited, so refreshes are refused instead of
+    /// promising a scan that will never run.
+    alive: bool,
 }
 
 /// Shared between the peripherals thread and its callers (API, daemon).
@@ -52,15 +57,19 @@ impl Control {
     }
 
     /// Ask for a scan now. Returns the `scan_sequence` whose completion
-    /// guarantees the result reflects the hardware as of this call.
-    pub fn request_refresh(&self) -> u64 {
+    /// guarantees the result reflects the hardware as of this call, or `None`
+    /// if the peripherals thread is no longer running.
+    pub fn request_refresh(&self) -> Option<u64> {
         let target = {
             let mut schedule = self.schedule.lock().unwrap_or_else(|e| e.into_inner());
+            if !schedule.alive {
+                return None;
+            }
             schedule.refresh = true;
             schedule.completed + if schedule.scanning { 2 } else { 1 }
         };
         self.wake();
-        target
+        Some(target)
     }
 
     fn request_stop(&self) {
@@ -100,6 +109,8 @@ pub struct Config {
     pub support_rules_path: PathBuf,
     pub instance_id: String,
     pub debounce: Duration,
+    /// Tests turn this off so host hot-plug events cannot trigger scans.
+    pub listen_for_uevents: bool,
 }
 
 pub struct PeripheralsHandle {
@@ -114,7 +125,9 @@ impl PeripheralsHandle {
 
     pub fn stop(self) {
         self.control.request_stop();
-        let _ = self.thread.join();
+        if self.thread.join().is_err() {
+            eprintln!("Sentinel peripherals thread panicked");
+        }
     }
 }
 
@@ -126,9 +139,14 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
         providers,
         SupportStage::new(config.support_rules_path.clone()),
     );
-    let uevents = match UeventSocket::open(scanner.subsystems()) {
-        Ok(socket) => Some(socket),
-        Err(error) => {
+    let uevents = match config
+        .listen_for_uevents
+        .then(|| UeventSocket::open(scanner.subsystems()))
+    {
+        None => None,
+        Some(Ok(socket)) => Some(socket),
+        Some(Err(error)) => {
+            eprintln!("Sentinel cannot watch hot-plug events: {error}");
             catalog.apply_error(
                 "peripherals.monitor_failed",
                 &format!(
@@ -149,6 +167,11 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
         })
         .ok();
     publish(&config.catalog_path, &catalog.document())?;
+    control
+        .schedule
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .alive = true;
     let thread_control = control.clone();
     let thread = thread::Builder::new()
         .name("peripherals".into())
@@ -166,6 +189,19 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
     Ok(PeripheralsHandle { control, thread })
 }
 
+/// Marks the thread dead when it exits for any reason, including a panic.
+struct AliveGuard(Arc<Control>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0
+            .schedule
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .alive = false;
+    }
+}
+
 fn run(
     config: Config,
     control: Arc<Control>,
@@ -174,19 +210,22 @@ fn run(
     mut uevents: Option<UeventSocket>,
     mut rules_watch: Option<RulesWatch>,
 ) {
+    let _alive = AliveGuard(control.clone());
     lower_priority();
     // The initial scan runs immediately; afterwards the thread sleeps in
     // poll() until a uevent, a rules change, a refresh request, or shutdown.
     let mut due = Some(Instant::now());
     let mut reclassify_due: Option<Instant> = None;
+    // A refresh is waiting on `due`: later events may not postpone it.
+    let mut refresh_pending = false;
+    // When the current burst of events began, to cap how long it can delay.
+    let mut burst_start: Option<Instant> = None;
     // Refresh requests within one debounce window of the last scan share the
     // next scan, so a client that spams refresh cannot keep the thread busy.
     let mut last_scan_end: Option<Instant> = None;
     loop {
-        let next = match (due, reclassify_due) {
-            (Some(scan), Some(rules)) => Some(scan.min(rules)),
-            (scan, rules) => scan.or(rules),
-        };
+        // A pending scan re-reads the rules, so it supersedes a reclassify.
+        let next = due.or(reclassify_due);
         let timeout = next.map_or(-1, |at| {
             at.saturating_duration_since(Instant::now())
                 .as_millis()
@@ -211,10 +250,17 @@ fn run(
         ];
         // SAFETY: fds is a valid array of three pollfd structures.
         let ready = unsafe { libc::poll(fds.as_mut_ptr(), 3, timeout) };
-        if ready < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-            catalog.apply_error("peripherals.monitor_failed", "waiting for events failed");
-            let _ = publish(&config.catalog_path, &catalog.document());
-            return;
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                eprintln!("Sentinel peripherals thread stopped: poll failed: {error}");
+                catalog.apply_error(
+                    "peripherals.monitor_failed",
+                    &format!("waiting for events failed: {error}"),
+                );
+                let _ = publish(&config.catalog_path, &catalog.document());
+                return;
+            }
         }
         if fds[0].revents != 0 {
             control.drain_wake();
@@ -222,6 +268,10 @@ fn run(
         {
             let mut schedule = control.schedule.lock().unwrap_or_else(|e| e.into_inner());
             if schedule.stop {
+                drop(schedule);
+                // Like the metrics cache, leave no catalog that looks live.
+                catalog.apply_error("peripherals.stopped", "The Sentinel daemon has stopped.");
+                let _ = publish(&config.catalog_path, &catalog.document());
                 return;
             }
             if std::mem::take(&mut schedule.refresh) {
@@ -229,17 +279,28 @@ fn run(
                     (end + config.debounce).max(Instant::now())
                 });
                 due = Some(due.map_or(earliest, |at| at.min(earliest)));
+                refresh_pending = true;
             }
         }
         if fds[1].revents != 0 {
             if let Some(socket) = &uevents {
                 match socket.drain() {
                     Ok(drained) if drained.matched || drained.overflowed => {
-                        // Trailing debounce: a burst produces one scan.
-                        due = Some(Instant::now() + config.debounce);
+                        // Trailing debounce, capped so a flapping device cannot
+                        // postpone the scan forever; never delays a refresh.
+                        let now = Instant::now();
+                        let start = *burst_start.get_or_insert(now);
+                        due = Some(scan_due_after_event(
+                            now,
+                            start,
+                            config.debounce,
+                            due,
+                            refresh_pending,
+                        ));
                     }
                     Ok(_) => {}
                     Err(error) => {
+                        eprintln!("Sentinel stopped receiving hot-plug events: {error}");
                         catalog.apply_error(
                             "peripherals.monitor_failed",
                             &format!("hot-plug events stopped: {error}"),
@@ -263,7 +324,7 @@ fn run(
                 }
             }
         }
-        if reclassify_due.is_some_and(|at| Instant::now() >= at) && due.is_none() {
+        if due.is_none() && reclassify_due.is_some_and(|at| Instant::now() >= at) {
             reclassify_due = None;
             if let Err(error) = scanner.reclassify(&mut catalog) {
                 eprintln!("Sentinel peripheral reclassification rejected: {error}");
@@ -274,6 +335,8 @@ fn run(
         }
         if due.is_some_and(|at| Instant::now() >= at) {
             due = None;
+            refresh_pending = false;
+            burst_start = None;
             // A scan re-reads the rules too.
             reclassify_due = None;
             control
@@ -294,6 +357,23 @@ fn run(
             }
             last_scan_end = Some(Instant::now());
         }
+    }
+}
+
+/// When to scan after a hot-plug event: a trailing debounce, capped at
+/// `MAX_EVENT_WAIT` after the burst began, and never later than a refresh
+/// that is already waiting.
+fn scan_due_after_event(
+    now: Instant,
+    burst_start: Instant,
+    debounce: Duration,
+    due: Option<Instant>,
+    refresh_pending: bool,
+) -> Instant {
+    let event_due = (now + debounce).min(burst_start + MAX_EVENT_WAIT);
+    match due {
+        Some(at) if refresh_pending => at.min(event_due),
+        _ => event_due,
     }
 }
 
@@ -422,6 +502,7 @@ mod tests {
                 support_rules_path: root.join("support/neat-core.json"),
                 instance_id: "test-instance".into(),
                 debounce: Duration::from_millis(10),
+                listen_for_uevents: false,
             },
             vec![Box::new(Counting {
                 calls: calls.clone(),
@@ -435,7 +516,7 @@ mod tests {
         assert_eq!((first.revision, first.scan_sequence), (1, 1));
         assert_eq!(first.devices.len(), 1);
 
-        let target = handle.control().request_refresh();
+        let target = handle.control().request_refresh().unwrap();
         assert_eq!(target, 2);
         let refreshed = wait_for(&path, |document| document.scan_sequence >= target);
         assert_eq!(refreshed.revision, 2);
@@ -489,6 +570,7 @@ mod tests {
                 support_rules_path: rules_dir.join("neat-core.json"),
                 instance_id: "rules".into(),
                 debounce: Duration::from_millis(10),
+                listen_for_uevents: false,
             },
             vec![Box::new(OneMipiCamera)],
         )
@@ -565,6 +647,7 @@ mod tests {
                 support_rules_path: root.join("support/neat-core.json"),
                 instance_id: "nice".into(),
                 debounce: Duration::from_millis(10),
+                listen_for_uevents: false,
             },
             vec![Box::new(NiceProbe(seen.clone()))],
         )
@@ -592,6 +675,7 @@ mod tests {
                 support_rules_path: root.join("support/neat-core.json"),
                 instance_id: "burst".into(),
                 debounce: Duration::from_millis(100),
+                listen_for_uevents: false,
             },
             vec![Box::new(Counting {
                 calls: calls.clone(),
@@ -603,7 +687,7 @@ mod tests {
         let control = handle.control();
         let mut target = 0;
         for _ in 0..200 {
-            target = control.request_refresh();
+            target = control.request_refresh().unwrap();
         }
         let document = wait_for(&path, |document| document.scan_sequence >= target);
         handle.stop();
@@ -618,5 +702,56 @@ mod tests {
             calls.load(Ordering::SeqCst)
         );
         assert!(document.scan_sequence <= 3);
+    }
+
+    #[test]
+    fn events_cannot_postpone_a_scan_forever_or_delay_a_refresh() {
+        let start = Instant::now();
+        let debounce = Duration::from_millis(250);
+        // Trailing debounce inside a burst.
+        assert_eq!(
+            scan_due_after_event(start, start, debounce, None, false),
+            start + debounce
+        );
+        // An event stream 900 ms in is capped at one second after it began.
+        let late = start + Duration::from_millis(900);
+        assert_eq!(
+            scan_due_after_event(late, start, debounce, Some(late), false),
+            start + MAX_EVENT_WAIT
+        );
+        // A refresh due now is not pushed back by a new event.
+        assert_eq!(
+            scan_due_after_event(start, start, debounce, Some(start), true),
+            start
+        );
+    }
+
+    #[test]
+    fn stopping_marks_the_catalog_stopped_and_refuses_refreshes() {
+        let root = std::env::temp_dir().join(format!(
+            "sentinel-stop-{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = root.join("peripherals.json");
+        let handle = spawn(
+            Config {
+                catalog_path: path.clone(),
+                support_rules_path: root.join("support/neat-core.json"),
+                instance_id: "stop".into(),
+                debounce: Duration::from_millis(10),
+                listen_for_uevents: false,
+            },
+            vec![],
+        )
+        .unwrap();
+        wait_for(&path, |document| document.ready);
+        let control = handle.control();
+        handle.stop();
+        let document = read(&path).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(document.state, "degraded");
+        assert_eq!(document.error.unwrap()["code"], "peripherals.stopped");
+        assert_eq!(control.request_refresh(), None);
     }
 }

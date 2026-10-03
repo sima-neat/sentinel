@@ -35,7 +35,8 @@ fn run() -> Result<()> {
     let mut history = 240usize;
     let mut runs_dir = PathBuf::from(runs::DEFAULT_RUNS_DIR);
     let mut api_socket = PathBuf::from(api::DEFAULT_API_SOCKET);
-    let mut peripherals = Some(peripherals::default_settings());
+    let mut peripheral_settings = peripherals::default_settings();
+    let mut peripherals_enabled = true;
 
     let mut i = 0;
     while i < args.len() {
@@ -61,22 +62,18 @@ fn run() -> Result<()> {
                 continue;
             }
             "--peripherals-file" => {
-                let path = take_value(&mut args, i, "--peripherals-file")?;
-                if let Some(settings) = peripherals.as_mut() {
-                    settings.catalog_path = path.into();
-                }
+                peripheral_settings.catalog_path =
+                    take_value(&mut args, i, "--peripherals-file")?.into();
                 continue;
             }
             "--support-rules" => {
-                let path = take_value(&mut args, i, "--support-rules")?;
-                if let Some(settings) = peripherals.as_mut() {
-                    settings.support_rules_path = path.into();
-                }
+                peripheral_settings.support_rules_path =
+                    take_value(&mut args, i, "--support-rules")?.into();
                 continue;
             }
             "--no-peripherals" => {
                 args.remove(i);
-                peripherals = None;
+                peripherals_enabled = false;
                 continue;
             }
             "--once" => {
@@ -104,7 +101,7 @@ fn run() -> Result<()> {
             history,
             &runs_dir,
             &api_socket,
-            peripherals.as_ref(),
+            peripherals_enabled.then_some(&peripheral_settings),
         ),
         "table" => ui::run_table(
             &cache,
@@ -127,11 +124,7 @@ fn run() -> Result<()> {
         "export" => export_runs_command(&runs_dir, &args[1..]),
         "sensors" | "metrics" => ui::print_sensors(&cache),
         "status" => ui::print_status(&cache),
-        "peripherals" => peripherals::cli::run(
-            &peripherals.unwrap_or_else(peripherals::default_settings),
-            &api_socket,
-            &args[1..],
-        ),
+        "peripherals" => peripherals::cli::run(&peripheral_settings, &api_socket, &args[1..]),
         other => bail!("unknown command '{other}'"),
     }
 }

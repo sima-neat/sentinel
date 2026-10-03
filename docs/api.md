@@ -50,79 +50,34 @@ default. Add `raw=1` only when timestamped samples are required.
 
 ## Peripheral catalog
 
-Sentinel keeps a catalog of connected peripherals, currently cameras. A
-dedicated daemon thread waits for kernel hot-plug events (uevents), waits
-250 ms for the burst to settle, runs every discovery provider once, and
-replaces `/run/simaai-sentinel/peripherals.json` by atomic rename. It does not
-scan on a timer. Providers only query devices: they never open a stream,
-change a format, or take ownership of a camera.
-
-```bash
-curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/peripherals
-simaai-sentinel peripherals            # table
-simaai-sentinel peripherals --json     # the catalog document
-simaai-sentinel peripherals --refresh  # rescan first
-```
-
-Catalog fields:
+`GET /v1/peripherals` returns the catalog of connected devices that the
+peripherals thread writes to `/run/simaai-sentinel/peripherals.json`, exactly as
+written. How discovery works, the record format of each device type, and how
+to add one are in [Peripherals](peripherals/README.md).
 
 | Field | Meaning |
 | --- | --- |
 | `instance_id` | New on every daemon start. A different value means the daemon restarted. |
-| `state`, `ready` | `starting` until the first scan, then `ready`, or `degraded` while a provider or the event monitor reports a problem. |
-| `revision` | Increases only when the device list or a device's details change. |
+| `state`, `ready` | `starting` until the first scan, then `ready`, or `degraded` while a provider, the event monitor, or the support rules report a problem. A stopped daemon leaves `degraded` with error `peripherals.stopped`. |
+| `revision` | Increases whenever anything a client can see changes: devices, issues, errors, or the support rules status. |
 | `scan_sequence` | Increases after every completed scan, including unchanged ones. |
-| `stale`, `issues` | A provider that failed keeps its last good records, marked by `retained_last_good`; other providers are unaffected. |
+| `stale`, `issues`, `error` | A provider that failed keeps its last good records, marked by `retained_last_good`; other providers are unaffected. `error` describes the daemon itself, such as hot-plug monitoring being unavailable. |
 | `changes` | The last 256 changes: `added`, `removed`, `changed`, `error`, `recovered`, each with `sequence` and `revision`. |
-| `devices` | `{id, type, provider, <type>: {...}}`. The `id` is stable across replugs and never a `/dev/videoN` name. |
+| `support` | Which Neat Core rules classified the camera modes; see [support rules](peripherals/README.md#support-rules). |
+| `devices` | `{id, type, provider, <type>: {...}}`. The `id` survives replugs into the same port and is never a `/dev/videoN` name. |
 
-Each camera mode carries `supported` and `reason`: whether the installed Neat
-Core's `CameraInput` accepts it. Sentinel does not decide this itself. Neat
-Core installs its rules at `/usr/share/simaai-sentinel/support/neat-core.json`,
-and the peripherals thread applies them to every mode before the catalog is
-compared and written, so a Core upgrade bumps `revision` like any other change.
-Sentinel watches that directory and re-applies the rules without rescanning
-hardware. The top-level `support` field reports `state` (`applied`,
-`not_installed`, `invalid`, or `stale` when an invalid update left the
-previous rules in use), the rules' `source`, and their `path`. Without Neat
-Core, every mode is `supported: false` with a reason saying Core is not
-installed.
+To poll cheaply, send the last `revision` and `instance_id` you saw:
+`GET /v1/peripherals?since_revision=7&instance_id=<id>`. If nothing a client
+can see has changed, the reply is
+`{"unchanged": true, "revision": 7, "scan_sequence": ..., "instance_id": ...}`;
+otherwise it is the full catalog. `since_revision` without `instance_id` is
+rejected with HTTP 400, because revisions restart with every daemon.
 
-```json
-{
-  "format": 1,
-  "source": "neat-core 0.4.0",
-  "camera": {
-    "backends": {"accept": ["mipi"], "reason": "..."},
-    "formats": {"accept": ["NV12"], "reason": "..."},
-    "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "..."},
-    "isp_output": {"reason": "..."}
-  }
-}
-```
-
-Rules are checked in that order and the first failure becomes the mode's
-`reason`. Size ranges are never marked supported; `isp_output`, when present,
-requires the mode to be an ISP output size.
-
-Sentinel creates `/usr/share/simaai-sentinel/support/` but never installs a
-file in it: each file there belongs to the package that provides it, so
-Sentinel and Neat Core never claim the same path and can be installed,
-upgraded, or removed independently. Sentinel keeps reading every rules
-format it has supported; a newer format makes Sentinel keep its previous rules
-and report that Sentinel needs an update.
-
-Discovery runs at nice +10, so a scan yields to camera pipelines on a busy
-board.
-
-Clients should poll with `since_revision` rather than re-read the full
-document. After `POST /v1/peripherals/refresh`, re-read until `scan_sequence`
-reaches the returned `target_scan_sequence`. A missing or unreadable catalog
-returns HTTP 503.
-
-Cameras are discovered from kernel interfaces only. The record format of each
-device type and how to add a device type are in
-[Peripherals](peripherals/README.md).
+`POST /v1/peripherals/refresh` schedules a scan and returns
+`{"accepted": true, "target_scan_sequence": N}`; the refresh is complete when
+`scan_sequence` reaches `N`. Requests that arrive together share one scan.
+HTTP 503 means peripheral discovery is not running (see the journal) or the
+catalog cannot be read.
 
 ## Security and concurrency
 

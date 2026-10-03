@@ -219,10 +219,10 @@ fn route(
             let control = peripherals
                 .and_then(|peripherals| peripherals.control.as_ref())
                 .ok_or_else(peripherals_disabled)?;
-            Ok(json!({
-                "accepted": true,
-                "target_scan_sequence": control.request_refresh(),
-            }))
+            let target = control.request_refresh().ok_or_else(|| {
+                unavailable("peripheral discovery has stopped; see `journalctl -u simaai-sentinel`")
+            })?;
+            Ok(json!({"accepted": true, "target_scan_sequence": target}))
         }
         ("GET", "/v1/cache") => {
             serde_json::to_value(cache::read_cache(cache_path).map_err(internal)?).map_err(internal)
@@ -331,12 +331,15 @@ fn peripheral_catalog(
         ))
     })?;
     if let Some(since) = since {
+        // Revisions restart with every daemon, so a revision alone cannot
+        // prove the client is current.
+        let instance = query_values(&request.query, "instance_id")
+            .into_iter()
+            .next()
+            .ok_or_else(|| bad_request("since_revision requires instance_id"))?;
         let header: CatalogHeader = serde_json::from_slice(&body)
             .map_err(|error| unavailable(format!("peripheral catalog unreadable: {error}")))?;
-        let same_instance = query_values(&request.query, "instance_id")
-            .first()
-            .is_none_or(|instance| *instance == header.instance_id);
-        if same_instance && since == header.revision && header.ready {
+        if instance == header.instance_id && since == header.revision && header.ready {
             return Ok(response(
                 200,
                 json!({
@@ -367,7 +370,10 @@ fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
 }
 
 fn peripherals_disabled() -> ApiError {
-    unavailable("peripheral discovery is not enabled in this Sentinel daemon")
+    unavailable(
+        "peripheral discovery is not running in this Sentinel daemon; \
+see `journalctl -u simaai-sentinel`",
+    )
 }
 
 fn query_values(query: &str, key: &str) -> Vec<String> {
@@ -614,6 +620,11 @@ mod tests {
             "GET /v1/peripherals?since_revision=x HTTP/1.1\r\nHost: localhost\r\n\r\n",
         );
         assert!(invalid.starts_with("HTTP/1.1 400"));
+        let no_instance = request(
+            &socket_path,
+            "GET /v1/peripherals?since_revision=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(no_instance.starts_with("HTTP/1.1 400"), "{no_instance}");
         let refresh = request(
             &socket_path,
             "POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",

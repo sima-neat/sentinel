@@ -42,6 +42,7 @@ pub fn start(settings: &Settings) -> Result<PeripheralsHandle> {
             support_rules_path: settings.support_rules_path.clone(),
             instance_id: service::new_instance_id(),
             debounce: service::DEBOUNCE,
+            listen_for_uevents: true,
         },
         builtin_providers(),
     )

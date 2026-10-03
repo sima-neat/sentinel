@@ -46,10 +46,17 @@ impl UeventSocket {
         unsafe {
             let pointer = &size as *const libc::c_int as *const libc::c_void;
             let length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-            if libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_RCVBUFFORCE, pointer, length) != 0 {
-                libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_RCVBUF, pointer, length);
+            if libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_RCVBUFFORCE, pointer, length) != 0
+                && libc::setsockopt(raw, libc::SOL_SOCKET, libc::SO_RCVBUF, pointer, length) != 0
+            {
+                // The default buffer still works; overflow forces a full rescan.
+                eprintln!(
+                    "Sentinel kept the default uevent buffer: {}",
+                    io::Error::last_os_error()
+                );
             }
         }
+        // SAFETY: sockaddr_nl is plain old data; all-zero is a valid value.
         let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         address.nl_family = libc::AF_NETLINK as libc::sa_family_t;
         address.nl_groups = KERNEL_GROUP | UDEV_GROUP;
@@ -109,7 +116,7 @@ impl UeventSocket {
 
 /// Both the kernel format (`add@/devpath\0KEY=VALUE\0...`) and udev's format
 /// (binary header, then `KEY=VALUE\0...`) carry NUL-separated properties.
-pub fn message_subsystem(message: &[u8]) -> Option<&str> {
+fn message_subsystem(message: &[u8]) -> Option<&str> {
     message
         .split(|&byte| byte == 0)
         .find_map(|field| field.strip_prefix(b"SUBSYSTEM="))

@@ -56,3 +56,49 @@ From a Neat application, `simaai::neat::peripherals::list()` (C++) and
 `pyneat.peripherals.list()` (Python) return the same catalog. Every device
 carries its details as JSON (`details_json` / `details`), so a new device type
 is usable from Neat applications before Core adds typed fields for it.
+
+## Support rules
+
+Each camera mode carries `supported` and `reason`: whether the installed Neat
+Core's `CameraInput` accepts it. Sentinel does not decide this. Neat Core
+installs its rules at `/usr/share/simaai-sentinel/support/neat-core.json`, and
+the peripherals thread applies them to every mode before the catalog is
+compared and written, so a Core upgrade bumps `revision` like any other change.
+Sentinel watches the directory and re-applies the rules without rescanning
+hardware. Without Neat Core, every mode is `supported: false` with a reason
+saying Core is not installed.
+
+```json
+{
+  "format": 1,
+  "source": "neat-core 0.4.0",
+  "camera": {
+    "backends": {"accept": ["mipi"], "reason": "..."},
+    "formats": {"accept": ["NV12"], "reason": "..."},
+    "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "..."},
+    "isp_output": {"reason": "..."}
+  }
+}
+```
+
+Rules are checked in that order and the first failure becomes the mode's
+`reason`. Size ranges are never marked supported; `isp_output`, when present,
+requires the mode to be an ISP output size. The catalog's top-level `support`
+reports `state` (`applied`, `not_installed`, `invalid`, or `stale` when an
+invalid update left the previous rules in use), `source` and `path`.
+
+Sentinel creates `/usr/share/simaai-sentinel/support/` but never installs a
+file in it, so Sentinel and Neat Core never claim the same path and install,
+upgrade or uninstall independently. Format 1 is the only format so far; when a
+format is added, Sentinel keeps reading the older ones. A rules file in a
+format newer than Sentinel knows keeps the previous rules in use and reports
+that Sentinel needs an update.
+
+## Daemon options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--peripherals-file PATH` | `/run/simaai-sentinel/peripherals.json` | Where the catalog is written, and read by `simaai-sentinel peripherals` |
+| `--support-rules PATH` | `/usr/share/simaai-sentinel/support/neat-core.json` | Neat Core's camera support rules |
+| `--no-peripherals` | off | Run the daemon without peripheral discovery |
+

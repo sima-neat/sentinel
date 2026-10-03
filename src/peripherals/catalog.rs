@@ -24,6 +24,7 @@ pub struct Catalog {
     last_attempt_at: Option<String>,
     error: Option<Value>,
     support: Option<SupportStatus>,
+    support_changed: bool,
 }
 
 impl Catalog {
@@ -42,10 +43,14 @@ impl Catalog {
             last_attempt_at: None,
             error: None,
             support: None,
+            support_changed: false,
         }
     }
 
     pub fn set_support(&mut self, support: SupportStatus) {
+        if self.support.as_ref() != Some(&support) {
+            self.support_changed = true;
+        }
         self.support = Some(support);
     }
 
@@ -83,7 +88,7 @@ impl Catalog {
     ) -> Result<(), String> {
         canonicalize_devices(&mut devices)?;
         canonicalize_issues(&mut issues)?;
-        let recovered = (self.error.is_some() || !self.issues.is_empty()) && issues.is_empty();
+        let recovered = !self.issues.is_empty() && issues.is_empty();
         let issues_changed = self.issues != issues;
         if scanned {
             let now = utc_now();
@@ -92,42 +97,44 @@ impl Catalog {
             if issues.is_empty() {
                 self.last_success_at = Some(now);
             }
-            self.error = None;
         }
 
         if !self.initialized {
             self.initialized = true;
             self.revision = 1;
+            self.support_changed = false;
             self.devices = devices;
             self.push_status_changes(recovered, issues_changed, &issues);
             self.issues = issues;
             return Ok(());
         }
 
-        if self.devices == devices {
-            self.push_status_changes(recovered, issues_changed, &issues);
-            self.issues = issues;
-            return Ok(());
+        // `revision` changes whenever anything a client can see changes, so
+        // polling with `since_revision` never hides a new state.
+        let devices_changed = self.devices != devices;
+        if devices_changed || issues_changed || std::mem::take(&mut self.support_changed) {
+            self.revision += 1;
         }
-
-        self.revision += 1;
         self.push_status_changes(recovered, issues_changed, &issues);
-        let previous = std::mem::take(&mut self.devices);
-        let (mut old, mut new) = (0, 0);
-        while old < previous.len() || new < devices.len() {
-            if new == devices.len() || (old < previous.len() && previous[old].id < devices[new].id)
-            {
-                self.push_device_change("removed", &previous[old]);
-                old += 1;
-            } else if old == previous.len() || devices[new].id < previous[old].id {
-                self.push_device_change("added", &devices[new]);
-                new += 1;
-            } else {
-                if previous[old] != devices[new] {
-                    self.push_device_change("changed", &devices[new]);
+        if devices_changed {
+            let previous = std::mem::take(&mut self.devices);
+            let (mut old, mut new) = (0, 0);
+            while old < previous.len() || new < devices.len() {
+                if new == devices.len()
+                    || (old < previous.len() && previous[old].id < devices[new].id)
+                {
+                    self.push_device_change("removed", &previous[old]);
+                    old += 1;
+                } else if old == previous.len() || devices[new].id < previous[old].id {
+                    self.push_device_change("added", &devices[new]);
+                    new += 1;
+                } else {
+                    if previous[old] != devices[new] {
+                        self.push_device_change("changed", &devices[new]);
+                    }
+                    old += 1;
+                    new += 1;
                 }
-                old += 1;
-                new += 1;
             }
         }
         self.devices = devices;
@@ -143,8 +150,10 @@ impl Catalog {
         }
         self.scan_sequence += 1;
         self.last_attempt_at = Some(utc_now());
-        self.error = None;
         if self.issues != issues {
+            if self.initialized {
+                self.revision += 1;
+            }
             let error = issue_error(&issues);
             self.push_change("error", None, None, Some(error));
         }
@@ -152,9 +161,39 @@ impl Catalog {
         Ok(())
     }
 
-    /// Record a failure of the monitor itself rather than of one provider.
+    /// Record a scan whose combined result was invalid (a provider bug such as
+    /// two providers returning one id). Devices keep their previous values;
+    /// the scan still counts, so refresh targets are reached.
+    pub fn apply_rejected_scan(&mut self, reason: &str) {
+        self.scan_sequence += 1;
+        self.last_attempt_at = Some(utc_now());
+        let issues = vec![Issue {
+            provider: "catalog".into(),
+            code: "peripherals.invalid_provider_result".into(),
+            reason: reason.into(),
+            retained_last_good: self.initialized,
+        }];
+        if self.issues != issues {
+            if self.initialized {
+                self.revision += 1;
+            }
+            let error = issue_error(&issues);
+            self.push_change("error", None, None, Some(error));
+            self.issues = issues;
+        }
+    }
+
+    /// Record a failure of the event monitor or the thread itself. Unlike a
+    /// provider issue it is not cleared by later scans: it describes the
+    /// daemon, and stays until the daemon restarts.
     pub fn apply_error(&mut self, code: &str, reason: &str) {
         let error = json!({"code": code, "reason": reason});
+        if self.error.as_ref() == Some(&error) {
+            return;
+        }
+        if self.initialized {
+            self.revision += 1;
+        }
         self.error = Some(error.clone());
         self.push_change("error", None, None, Some(error));
     }
@@ -374,7 +413,11 @@ mod tests {
         assert_eq!(recovered.state, "ready");
         assert!(!recovered.stale);
         assert_eq!(recovered.changes.last().unwrap().kind, "recovered");
-        assert_eq!(recovered.revision, 1);
+        assert_eq!(
+            (degraded.revision, recovered.revision),
+            (2, 3),
+            "issue changes are visible changes"
+        );
     }
 
     #[test]
@@ -423,6 +466,49 @@ mod tests {
         assert_eq!((document.revision, document.scan_sequence), (2, 1));
         assert_eq!(document.last_attempt_at, attempted);
         assert_eq!(document.changes.last().unwrap().kind, "changed");
+    }
+
+    #[test]
+    fn monitor_error_survives_later_scans_and_is_never_reported_recovered() {
+        let mut catalog = Catalog::new("a", 8);
+        catalog.apply_error("peripherals.monitor_failed", "uevent socket unavailable");
+        catalog
+            .apply_success(vec![camera("a", "1")], vec![])
+            .unwrap();
+        catalog
+            .apply_success(vec![camera("a", "1")], vec![])
+            .unwrap();
+        let document = catalog.document();
+        assert_eq!(document.state, "degraded");
+        assert!(document.stale);
+        assert_eq!(
+            document.error.unwrap()["code"],
+            "peripherals.monitor_failed"
+        );
+        assert!(document
+            .changes
+            .iter()
+            .all(|change| change.kind != "recovered"));
+    }
+
+    #[test]
+    fn unchanged_rescans_and_repeated_errors_keep_the_revision() {
+        let mut catalog = Catalog::new("a", 8);
+        catalog
+            .apply_success(vec![camera("a", "1")], vec![issue(true)])
+            .unwrap();
+        catalog
+            .apply_success(vec![camera("a", "1")], vec![issue(true)])
+            .unwrap();
+        catalog.apply_error("peripherals.monitor_failed", "x");
+        let first = catalog.document();
+        catalog.apply_error("peripherals.monitor_failed", "x");
+        let second = catalog.document();
+        assert_eq!(first.revision, 2);
+        assert_eq!(
+            (second.revision, second.sequence),
+            (first.revision, first.sequence)
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ Keep the API on the Unix socket; do not create an unauthenticated TCP bridge.
 | `runs` | `GET /v1/runs` |
 | `run NAME` | `GET /v1/runs/NAME` |
 | `compare A B...` | `GET /v1/compare?runs=A,B,...` |
-| `peripherals` | `GET /v1/peripherals` (add `since_revision=N`) |
+| `peripherals` | `GET /v1/peripherals` (add `since_revision=N&instance_id=ID` to skip unchanged catalogs) |
 | `refresh` | `POST /v1/peripherals/refresh` |
 
 Trace samples follow the daemon cache cadence, normally two seconds. The API

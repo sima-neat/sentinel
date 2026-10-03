@@ -6,10 +6,9 @@ pub const DEFAULT_CATALOG_PATH: &str = "/run/simaai-sentinel/peripherals.json";
 
 /// One peripheral as reported by a provider. `details` is type-specific and is
 /// published under a key named after `kind` (for example `"camera": {...}`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Record {
     pub id: String,
-    #[serde(rename = "type")]
     pub kind: String,
     pub provider: String,
     pub details: Value,
@@ -37,7 +36,7 @@ pub struct Issue {
 }
 
 /// A structured provider failure, for example `io.permission_denied`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderError {
     pub code: String,
     pub reason: String,

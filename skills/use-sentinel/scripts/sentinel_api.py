@@ -58,6 +58,7 @@ def build_parser():
     compare.add_argument("--raw", action="store_true", help="include timestamped samples")
     peripherals = commands.add_parser("peripherals")
     peripherals.add_argument("--since-revision", type=int, help="reply briefly if unchanged")
+    peripherals.add_argument("--instance-id", help="instance_id the revision belongs to")
     start = commands.add_parser("start")
     start.add_argument("--name", required=True)
     start.add_argument("--note")
@@ -86,7 +87,11 @@ def main():
         raw = "&raw=1" if args.raw else ""
         operation = ("GET", f"/v1/compare?runs={encoded}{raw}", None)
     elif args.command == "peripherals":
-        since = "" if args.since_revision is None else f"?since_revision={args.since_revision}"
+        if (args.since_revision is None) != (args.instance_id is None):
+            argument_parser.error("--since-revision and --instance-id go together")
+        since = ""
+        if args.since_revision is not None:
+            since = f"?since_revision={args.since_revision}&instance_id={quote(args.instance_id, safe='')}"
         operation = ("GET", f"/v1/peripherals{since}", None)
     elif args.command == "start":
         operation = (
