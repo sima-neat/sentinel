@@ -7,6 +7,7 @@ hardware. Application developers read these pages to use the catalog.
 | Type | Providers | Page |
 | --- | --- | --- |
 | `camera` | `daemon.camera.mipi`, `daemon.camera.v4l2` | [Cameras](camera.md) |
+| `microphone` | `daemon.audio.alsa` | [Microphones](microphone.md) |
 
 ## Adding a type
 

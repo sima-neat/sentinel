@@ -5,9 +5,9 @@ devices are present, how to identify them, and what they can do. Neat Core,
 Insight, sima-cli2, scripts and agents all read the same catalog, so a device
 type added here becomes visible everywhere at once.
 
-The catalog is built for growth. Cameras are the first device type; adding
-another type (a microphone, an IMU, a LiDAR, ...) does not require changes to
-the catalog, the API, the CLI, or the clients.
+The catalog is built for growth. Cameras and microphones are the built-in
+device types; adding another type (an IMU, a LiDAR, ...) does not require
+changes to the catalog, the API, the CLI, or the clients.
 
 ## How it works
 
@@ -40,7 +40,7 @@ requests into one scan.
 | Page | For |
 | --- | --- |
 | [Adding a device type](adding-a-device-type.md) | Contributors adding support for a new kind of device |
-| [Device types](device-types/README.md) | The record format of each supported type, starting with [cameras](device-types/camera.md) |
+| [Device types](device-types/README.md) | The record format of each supported type: [cameras](device-types/camera.md), [microphones](device-types/microphone.md) |
 | [Local agent API](../api.md) | `GET /v1/peripherals`, `POST /v1/peripherals/refresh`, polling with `since_revision` |
 
 ## Using the catalog
