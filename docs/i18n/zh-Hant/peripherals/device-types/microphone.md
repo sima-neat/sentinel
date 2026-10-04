@@ -6,7 +6,7 @@ ALSA 所提供的音頻擷取裝置：USB 音訊類麥克風、複合 USB 裝置
 - **提供者：** `daemon.audio.alsa`（內建）
 - **重新掃描觸發器：** `sound`
 
-Discovery 只讀取核心文本和 sysfs：可選的 `/proc/asound/cards`、`/proc/asound/cardN/id`、可選的 `/proc/asound/cardN/pcmMc/info`、`/proc/asound/cardN/streamM`（USB 音頻）、`/sys/class/sound/pcmCNDMc`、`/sys/class/sound/cardN/device` 及其 USB 上層設備，以及 `/dev/snd/by-path` 和 `/dev/snd/by-id` 中的 udev 連結。它從不打開 PCM 或控制設備，因此無法從應用程式獲取麥克風或更改其混音器。未啟用 `CONFIG_SND_PROC_FS` 的核心會省略所有 `/proc/asound`；Sentinel 從 sysfs 枚舉卡和捕獲 PCM，保留 sysfs 卡 ID 和捕獲選擇器，並省略僅在 procfs 中的名稱、驅動程式、模式和可用性元資料及相應問題。未啟用 `CONFIG_SND_VERBOSE_PROCFS` 的核心僅省略 `pcmMc/info`；sysfs 類設備仍會生成具有未知可用性和 `peripherals.pcm_info_unreadable` 問題的紀錄。
+Discovery 只讀取核心文本和 sysfs：可選的 `/proc/asound/cards`、可選的 `/proc/asound/cardN/pcmMc/info`、`/proc/asound/cardN/streamM`（USB 音頻）、`/sys/class/sound/pcmCNDMc`、`/sys/class/sound/cardN/device` 及其 USB 上層設備，以及 `/dev/snd/by-path` 和 `/dev/snd/by-id` 中的 udev 連結。它從不打開 PCM 或控制設備，因此無法從應用程式獲取麥克風或更改其混音器。未啟用 `CONFIG_SND_PROC_FS` 的核心會省略所有 `/proc/asound`；Sentinel 從 sysfs 枚舉卡和捕獲 PCM，保留 sysfs 卡 ID 和捕獲選擇器，並省略僅在 procfs 中的名稱、驅動程式、模式和可用性元資料及相應問題。未啟用 `CONFIG_SND_VERBOSE_PROCFS` 的核心僅省略 `pcmMc/info`；sysfs 類設備仍會生成具有未知可用性和 `peripherals.pcm_info_unreadable` 問題的紀錄。
 
 ## 身份
 
@@ -28,7 +28,7 @@ alsa-card-id:<card id>:pcm<M>c
 alsa-card-id:Loopback:pcm0c
 ```
 
-卡片 ID 是最好的可用屬性：它可以在卡片重新編號和重啟後存活下來，並且 ALSA 可以保持它在現有卡片中的唯一性，因此兩張這樣的卡片永遠不會共享同一個鍵。其限制是：更改卡片 ID（驅動程序的 `id` 模組選項，或寫入 `/sys/class/sound/cardN/id`）會改變記錄 ID，且當同一驅動程序的兩張卡片同時存在時，內核會在註冊順序中對第二張卡片的 ID 添加後綴（`Loopback_1`），因此它們可能在重啟之間交換 ID。內核從不註冊 ID 為空的卡片；如果讀回的 ID 為空，鍵值為 `alsa-card-index:<N>:pcm<M>c`，其中卡號可以區分不同記錄，但在重啟之間會改變。
+卡片 ID 是最好的可用屬性：它可以在卡片重新編號和重啟後存活下來，並且 ALSA 可以保持它在現有卡片中的唯一性，因此兩張這樣的卡片永遠不會共享同一個鍵。其限制是：更改卡片 ID（驅動程序的 `id` 模組選項，或寫入 `/sys/class/sound/cardN/id`）會改變記錄 ID，且當同一驅動程序的兩張卡片同時存在時，內核會在註冊順序中對第二張卡片的 ID 添加後綴（`Loopback_1`），因此它們可能在重啟之間交換 ID。內核從不註冊 ID 為空的卡片。如果即時 sysfs ID 為空或無法讀取，Sentinel 會將該快照視為暫時狀態，並跳過該卡片直到稍後重新掃描。
 
 ## 詳細資訊
 
@@ -37,7 +37,7 @@ alsa-card-id:Loopback:pcm0c
 | `name` | 字串 | 是 | 卡片簡稱，否則為 PCM 名稱，否則為卡片 ID，否則 `ALSA capture PCM <M>` | `/proc/asound/cards`，`pcmMc/info` |
 | `backend` | 字串 | 是 | `alsa` | |
 | `connection` | 字串 | 是 | `usb` 當該卡的設備有一個 USB 上層設備時， `unknown` 當卡沒有父裝置時，否則 `platform` | sysfs |
-| `capture_target` | 物件 | 是 | `card_id` (字串，可能為空)， `device` (PCM 編號)，而且 `selector` (`plughw:CARD=<card_id>,DEV=<M>`) 當卡片 ID 只包含字母、數字時， `_` 和 `-` 並且不是一位數或兩位數的數字（ALSA 讀取 `CARD=7` 如卡片索引 7)。僅針對當前啟動的路由 | `/sys/class/sound/cardN/id`, `/proc/asound/cardN/id` |
+| `capture_target` | 物件 | 是 | `card_id` (非空字串)， `device` (PCM 編號)，而且 `selector` (`plughw:CARD=<card_id>,DEV=<M>`) 當卡片 ID 只包含字母、數字時， `_` 和 `-` 並且不是一位數或兩位數的數字（ALSA 讀取 `CARD=7` 如卡片索引 7)。僅針對當前啟動的路由 | `/sys/class/sound/cardN/id` |
 | `identity` | 物件 | 是 | 見下文 | |
 | `modes` | 陣列 | 是 | 捕獲格式；當驅動程式未發佈任何格式時為空（見 `issues`) | `streamM` |
 | `availability` | 物件 | 是 | `state`: `available`, `in_use`（沒有捕捉子設備可用）或 `unknown`; 當已知時，含有 `subdevices` 和 `subdevices_available`。來自上次掃描的快照；請參閱 [可用性](#availability) | `pcmMc/info` |
@@ -50,7 +50,7 @@ alsa-card-id:Loopback:pcm0c
 | `stable_key` | 字串 | 是 | 這個鍵 `id` 的雜湊值（上方） |
 | `card_index` | 整數 | 是 | 目前的 ALSA 卡號（重新插拔時會改變） |
 | `pcm_node` | 字串 | 是 | `/dev/snd/pcmC<N>D<M>c`（僅路由） |
-| `card_id`、`card_name`、`card_driver` | 字串 | 當不為空時 | ID 來自 sysfs（或 procfs）；名稱和驅動程式來自 `/proc/asound/cards`，例如 `Nano`、`Yeti Nano`、`USB-Audio` |
+| `card_id`、`card_name`、`card_driver` | 字串 | `card_id` 永遠存在；其他欄位在非空時 | ID 來自即時 sysfs；名稱和驅動程式來自 `/proc/asound/cards`，例如 `Nano`、`Yeti Nano`、`USB-Audio` |
 | `pcm_name` | 字串 | 當非空 | PCM的名稱，例如 `USB Audio` |
 | `by_path`，`by_id` | 字串 | 與 udev | 第一個 `/dev/snd/by-path` / `/dev/snd/by-id` 連結，按照名稱順序，至卡片的 `controlC<N>` |
 | `usb` | 對象 | 僅限 USB | `vendor_id`、`product_id`、`bus_path`（USB 埠，例如 `1-1.2`），以及當存在時 `interface`（例如 `1-1.2:1.0`）、`manufacturer`、`product`、`serial` |

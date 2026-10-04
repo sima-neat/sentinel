@@ -6,7 +6,7 @@ ALSAが公開するオーディオキャプチャデバイス: USBオーディ�
 - **プロバイダー:** `daemon.audio.alsa`（組み込み）
 - **再スキャンのトリガー:** `sound`
 
-Discoveryはカーネルテキストとsysfsのみを読み取ります：オプションの`/proc/asound/cards`、`/proc/asound/cardN/id`、オプションの`/proc/asound/cardN/pcmMc/info`、`/proc/asound/cardN/streamM`（USBオーディオ）、`/sys/class/sound/pcmCNDMc`、`/sys/class/sound/cardN/device`およびそのUSB先祖、さらに`/dev/snd/by-path`および`/dev/snd/by-id`のudevリンクを読み取ります。PCMやコントロールデバイスを開くことはないため、アプリケーションからマイクを取得したり、ミキサーを変更したりすることはできません。`CONFIG_SND_PROC_FS`なしで構築されたカーネルは、`/proc/asound`のすべてを省略します。SentinelはsysfsからカードとキャプチャPCMを列挙し、sysfsカードIDとキャプチャセレクターを保持し、同対応する問題によりprocfs専用の名前、ドライバー、モード、および可用性メタデータを省略します。`CONFIG_SND_VERBOSE_PROCFS`なしで構築されたカーネルは、`pcmMc/info`のみを省略します。それでもsysfsクラスデバイスは、未知の可用性と`peripherals.pcm_info_unreadable`問題を伴うレコードを生成します。
+Discoveryはカーネルテキストとsysfsのみを読み取ります：オプションの`/proc/asound/cards`、オプションの`/proc/asound/cardN/pcmMc/info`、`/proc/asound/cardN/streamM`（USBオーディオ）、`/sys/class/sound/pcmCNDMc`、`/sys/class/sound/cardN/device`およびそのUSB先祖、さらに`/dev/snd/by-path`および`/dev/snd/by-id`のudevリンクを読み取ります。PCMやコントロールデバイスを開くことはないため、アプリケーションからマイクを取得したり、ミキサーを変更したりすることはできません。`CONFIG_SND_PROC_FS`なしで構築されたカーネルは、`/proc/asound`のすべてを省略します。SentinelはsysfsからカードとキャプチャPCMを列挙し、sysfsカードIDとキャプチャセレクターを保持し、同対応する問題によりprocfs専用の名前、ドライバー、モード、および可用性メタデータを省略します。`CONFIG_SND_VERBOSE_PROCFS`なしで構築されたカーネルは、`pcmMc/info`のみを省略します。それでもsysfsクラスデバイスは、未知の可用性と`peripherals.pcm_info_unreadable`問題を伴うレコードを生成します。
 
 ## アイデンティティ
 
@@ -26,7 +26,7 @@ alsa-card-id:<card id>:pcm<M>c
 alsa-card-id:Loopback:pcm0c
 ```
 
-カードIDは最も優れた利用可能な属性であり、カードの番号変更や再起動にも耐え、ALSAは存在するカード間で一意性を保持するため、これらのカードがキーを共有することはありません。その制限としては、カードID（ドライバの`id`モジュールオプション、または`/sys/class/sound/cardN/id`への書き込み）を変更すると、レコードIDが変わることがあります。また、同じドライバのカードが2枚ある場合、カーネルは登録順に2枚目のIDにサフィックスを付けます（`Loopback_1`）、そのため起動間でIDが入れ替わる可能性があります。カーネルは空のIDを持つカードを登録することはありません。IDが空で読み戻された場合、キーは`alsa-card-index:<N>:pcm<M>c`であり、カード番号がレコードを区別しますが、起動ごとに変わります。
+カードIDは最も優れた利用可能な属性であり、カードの番号変更や再起動にも耐え、ALSAは存在するカード間で一意性を保持するため、これらのカードがキーを共有することはありません。その制限としては、カードID（ドライバの`id`モジュールオプション、または`/sys/class/sound/cardN/id`への書き込み）を変更すると、レコードIDが変わることがあります。また、同じドライバのカードが2枚ある場合、カーネルは登録順に2枚目のIDにサフィックスを付けます（`Loopback_1`）、そのため起動間でIDが入れ替わる可能性があります。カーネルは空のIDを持つカードを登録することはありません。ライブのsysfs IDが空または読み取り不能な場合、Sentinelはそのスナップショットを一時的なものとして扱い、後続の再スキャンまでカードをスキップします。
 
 ## 詳細
 
@@ -35,7 +35,7 @@ alsa-card-id:Loopback:pcm0c
 | `name` | 文字列 | はい | カードの短い名前、存在しなければ PCM 名、それもなければカード ID、それもなければ `ALSA capture PCM <M>` | `/proc/asound/cards`, `pcmMc/info` |
 | `backend` | 文字列 | はい | `alsa` | |
 | `connection` | 文字列 | はい | `usb` カードのデバイスにUSBの祖先がある場合、 `unknown` カードに親デバイスがない場合、そうでなければ `platform` | sysfs |
-| `capture_target` | オブジェクト | はい | `card_id` （文字列、空の可能性あり）、`device` （PCM番号）、および `selector` (`plughw:CARD=<card_id>,DEV=<M>`)。カードIDが文字、数字、`_` および `-` のみを保持しており、1桁または2桁の番号でない場合（ALSAは `CARD=7` をカードインデックス7として読み取ります）。現在のブートのみのルーティング | `/sys/class/sound/cardN/id`、`/proc/asound/cardN/id` |
+| `capture_target` | オブジェクト | はい | `card_id` （空でない文字列）、`device` （PCM番号）、および `selector` (`plughw:CARD=<card_id>,DEV=<M>`)。カードIDが文字、数字、`_` および `-` のみを保持しており、1桁または2桁の番号でない場合（ALSAは `CARD=7` をカードインデックス7として読み取ります）。現在のブートのみのルーティング | `/sys/class/sound/cardN/id` |
 | `identity` | オブジェクト | はい | 下記を参照 | |
 | `modes` | 配列 | はい | キャプチャ形式；ドライバーが公開していない場合は空（参照） `issues`) | `streamM` |
 | `availability` | オブジェクト | はい | `state`: `available`, `in_use` （キャプチャサブデバイスなしでフリー）または `unknown`；と `subdevices` そして `subdevices_available` 既知の場合。最後のスキャンからのスナップショット; 参照 [利用可能性](#availability) | `pcmMc/info` |
@@ -48,7 +48,7 @@ alsa-card-id:Loopback:pcm0c
 | `stable_key` | 文字列 | はい | キー `id` のハッシュ (上記) |
 | `card_index` | 整数 | はい | 現在のALSAカード番号（再接続時に変わります） |
 | `pcm_node` | 文字列 | はい | `/dev/snd/pcmC<N>D<M>c`（ルーティングのみ） |
-| `card_id`、`card_name`、`card_driver` | 文字列 | 空でないとき | ID は sysfs（または procfs）から取得されます；名前とドライバーは `/proc/asound/cards` から取得されます。例えば `Nano`、`Yeti Nano`、`USB-Audio` |
+| `card_id`、`card_name`、`card_driver` | 文字列 | `card_id` は常に存在；その他は空でないとき | ID はライブの sysfs から取得されます；名前とドライバーは `/proc/asound/cards` から取得されます。例えば `Nano`、`Yeti Nano`、`USB-Audio` |
 | `pcm_name` | 文字列 | 空でない場合 | PCMの名前、例：`USB Audio` |
 | `by_path`、`by_id` | 文字列 | udev がある場合 | カードの `controlC<N>` を指す最初の `/dev/snd/by-path` / `/dev/snd/by-id` リンク（名前順） |
 | `usb` | オブジェクト | USBのみ | `vendor_id`, `product_id`, `bus_path`（USBポート、例: `1-1.2`）、および存在する場合は `interface`（例: `1-1.2:1.0`）、`manufacturer`, `product`, `serial` |

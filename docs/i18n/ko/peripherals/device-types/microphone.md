@@ -12,7 +12,7 @@ ALSA가 노출하는 오디오 캡처 장치: USB 오디오 클래스 마이크,
 - **재검색 트리거:** `sound`
 
 검색은 커널 텍스트 및 sysfs만 읽습니다. 선택 사항 `/proc/asound/cards`,
-`/proc/asound/cardN/id`, 선택 사항 `/proc/asound/cardN/pcmMc/info`,
+선택 사항 `/proc/asound/cardN/pcmMc/info`,
 `/proc/asound/cardN/streamM`(USB 오디오), `/sys/class/sound/pcmCNDMc`,
 `/sys/class/sound/cardN/device` 및 해당 USB 조상과 udev 링크
 `/dev/snd/by-path` 및 `/dev/snd/by-id`. PCM이나 컨트롤이 열리지 않습니다.
@@ -60,9 +60,9 @@ alsa-card-id:Loopback:pcm0c
 모듈 옵션을 사용하거나 `/sys/class/sound/cardN/id`)를 작성하면 레코드 ID가 변경됩니다.
 한 드라이버의 두 카드가 모두 존재할 경우 커널은 다음을 접미사로 붙입니다.
 등록 순서에 있는 두 번째 ID(`Loopback_1`)를 사용하여 ID를 교환할 수 있습니다.
-부츠 사이. 커널은 빈 ID를 가진 카드를 등록하지 않습니다. 해야 한다
-ID는 비어 있음을 다시 읽습니다. 키는 `alsa-card-index:<N>:pcm<M>c`입니다. 여기서 카드는
-번호는 기록을 별도로 유지하지만 부팅 사이에 변경됩니다.
+부츠 사이. 커널은 빈 ID를 가진 카드를 등록하지 않습니다. 실시간 sysfs ID가
+비어 있거나 읽을 수 없으면 Sentinel은 스냅샷을 일시적인 것으로 간주하고
+나중에 다시 검색할 때까지 카드를 건너뜁니다.
 
 ## 세부
 
@@ -71,7 +71,7 @@ ID는 비어 있음을 다시 읽습니다. 키는 `alsa-card-index:<N>:pcm<M>c`
 | `name` | 문자열 | 예 | 카드 짧은 이름, 그렇지 않으면 PCM 이름, 그렇지 않으면 카드 ID, 그렇지 `ALSA capture PCM <M>` | `/proc/asound/cards`, `pcmMc/info` |
 | `backend` | 문자열 | 예 | `alsa` | |
 | `connection` | 문자열 | 예 | `usb` 카드의 장치에 USB 조상이 있는 경우, `unknown` 카드에 상위 장치가 없는 경우, 그렇지 않으면 `platform` | sysfs |
-| `capture_target` | 개체 | 예 | `card_id`(문자열, 비어 있을 수 있음), `device`(PCM 번호) 및 `selector`(`plughw:CARD=<card_id>,DEV=<M>`)인 경우 카드 ID에는 문자, 숫자, `_` 및 `-`만 포함되며 한 자리 또는 두 자리 숫자가 아닙니다(ALSA는 `CARD=7`을 카드 인덱스 7로 읽습니다). 현재 부팅 전용 라우팅 | `/sys/class/sound/cardN/id`, `/proc/asound/cardN/id` |
+| `capture_target` | 개체 | 예 | `card_id`(비어 있지 않은 문자열), `device`(PCM 번호) 및 `selector`(`plughw:CARD=<card_id>,DEV=<M>`)인 경우 카드 ID에는 문자, 숫자, `_` 및 `-`만 포함되며 한 자리 또는 두 자리 숫자가 아닙니다(ALSA는 `CARD=7`을 카드 인덱스 7로 읽습니다). 현재 부팅 전용 라우팅 | `/sys/class/sound/cardN/id` |
 | `identity` | 개체 | 예 | 아래 참조 | |
 | `modes` | 정렬 | 예 | 캡처 형식; 드라이버가 아무것도 게시하지 않으면 비어 있습니다(참조 `issues`) | `streamM` |
 | `availability` | 물체 | 예 | `state`: `available`, `in_use` (캡처 하위 장치가 비어 있지 않음) 또는 `unknown`; ~와 함께 `subdevices` 그리고 `subdevices_available` 알려졌을 때. 마지막 스캔의 스냅샷 보다 [유효성](#availability) | `pcmMc/info` |
@@ -84,7 +84,7 @@ ID는 비어 있음을 다시 읽습니다. 키는 `alsa-card-index:<N>:pcm<M>c`
 | `stable_key` | 문자열 | 예 | 키 `id` 해시(위) |
 | `card_index` | 정수 | 예 | 현재 ALSA 카드 번호(다시 꽂을 때마다 변경됨) |
 | `pcm_node` | 문자열 | 예 | `/dev/snd/pcmC<N>D<M>c`(라우팅 전용) |
-| `card_id`, `card_name`, `card_driver` | 문자열 | 비어 있지 않은 경우 | ID는 sysfs(또는 procfs)에서 가져옵니다. 이름과 드라이버는 `/proc/asound/cards`에서 나옵니다. 예: `Nano`, `Yeti Nano`, `USB-Audio` |
+| `card_id`, `card_name`, `card_driver` | 문자열 | `card_id`는 항상 존재하며 나머지는 비어 있지 않은 경우 | ID는 실시간 sysfs에서 가져옵니다. 이름과 드라이버는 `/proc/asound/cards`에서 나옵니다. 예: `Nano`, `Yeti Nano`, `USB-Audio` |
 | `pcm_name` | 문자열 | 비어 있지 않은 경우 | PCM 이름, 예: `USB Audio` |
 | `by_path`, `by_id` | 문자열 |(udev 포함) | 이름 순서대로 카드의 `controlC<N>`에 대한 첫 번째 `/dev/snd/by-path` / `/dev/snd/by-id` 링크 |
 | `usb` | 개체 | USB 전용 | `vendor_id`, `product_id`, `bus_path`(USB 포트, 예: `1-1.2`) 및 존재하는 경우 `interface` (예: `1-1.2:1.0`), `manufacturer`, `product`, `serial` |
