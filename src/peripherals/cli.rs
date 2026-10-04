@@ -47,7 +47,7 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
         wait_for_scan(catalog_path, &instance, target)?;
     }
     let document = read(catalog_path).context(CATALOG_UNAVAILABLE)?;
-    if !daemon_running(api_socket) {
+    if !daemon_serves_catalog(api_socket) {
         eprintln!(
             "Warning: the Sentinel daemon is not running, so this catalog may be out of date; \
 check `systemctl status simaai-sentinel`."
@@ -103,14 +103,20 @@ fn test_provider(target: &str, settings: &Settings) -> Result<()> {
 }
 
 /// The catalog file outlives the daemon (a stop by SIGTERM leaves it as it
-/// was), so the CLI asks the daemon for its health before trusting it. A
-/// complete request keeps the daemon from logging a dropped connection.
-fn daemon_running(api_socket: &Path) -> bool {
-    exchange(
+/// was), and a daemon running without peripheral discovery leaves an old one
+/// in place, so the CLI trusts it only when the daemon's health reports a
+/// peripheral summary. A complete request keeps the daemon from logging a
+/// dropped connection.
+fn daemon_serves_catalog(api_socket: &Path) -> bool {
+    let Ok(response) = exchange(
         api_socket,
         b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    )
-    .is_ok_and(|response| response.starts_with("HTTP/1.1 "))
+    ) else {
+        return false;
+    };
+    let body = response.split_once("\r\n\r\n").map(|(_, body)| body);
+    let health: Option<Value> = body.and_then(|body| serde_json::from_str(body).ok());
+    health.is_some_and(|health| health["peripherals"].is_object())
 }
 
 /// Send one request to the daemon and read its whole response.
@@ -275,32 +281,65 @@ mod tests {
         assert!(text.contains("evil?]0;owned?cam"));
     }
 
+    /// Answer one request on `path` with a health `body`; returns the request.
+    fn answer_health(
+        listener: std::os::unix::net::UnixListener,
+        body: &'static str,
+    ) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 256];
+            let length = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request[..length]).into_owned()
+        })
+    }
+
     #[test]
     fn a_missing_or_dead_socket_means_the_daemon_is_not_running() {
-        assert!(!daemon_running(Path::new("/nonexistent/sentinel/api.sock")));
+        assert!(!daemon_serves_catalog(Path::new(
+            "/nonexistent/sentinel/api.sock"
+        )));
         let dir = std::env::temp_dir().join(format!("sentinel-cli-socket-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("api.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         // The daemon answers a complete health request, so it logs nothing.
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 256];
-            let length = stream.read(&mut request).unwrap();
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .unwrap();
-            String::from_utf8_lossy(&request[..length]).into_owned()
-        });
-        assert!(daemon_running(&path));
+        let server = answer_health(listener, r#"{"status":"ok","peripherals":{"ready":true}}"#);
+        assert!(daemon_serves_catalog(&path));
         assert!(server
             .join()
             .unwrap()
             .starts_with("GET /v1/health HTTP/1.1\r\n"));
         assert!(
-            !daemon_running(&path),
+            !daemon_serves_catalog(&path),
             "a stale socket file is not a running daemon"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_daemon_without_peripheral_discovery_does_not_vouch_for_the_catalog() {
+        let dir = std::env::temp_dir().join(format!("sentinel-cli-nodisc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("api.sock");
+        // `--no-peripherals`, or discovery failed to start: health answers,
+        // but has no peripheral summary, so an old catalog file is stale.
+        for body in [
+            r#"{"status":"ok","peripherals":null}"#,
+            r#"{"status":"ok"}"#,
+            "",
+        ] {
+            let _ = std::fs::remove_file(&path);
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let server = answer_health(listener, body);
+            assert!(!daemon_serves_catalog(&path), "health body {body:?}");
+            server.join().unwrap();
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
