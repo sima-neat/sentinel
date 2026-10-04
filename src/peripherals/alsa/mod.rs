@@ -715,7 +715,8 @@ impl AlsaProvider {
                     .is_ok_and(|current| current.as_path() == expected.as_path()),
                 None => parentless(sys, &entry, &link),
             };
-            if !same_card || vanished(&pcm_entry) {
+            let same_id = read_text_file(&entry.join("id")).as_deref() == Some(card.id.as_str());
+            if !same_card || !same_id || vanished(&pcm_entry) {
                 return Ok(Vec::new());
             }
             records.push(Record {

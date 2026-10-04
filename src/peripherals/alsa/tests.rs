@@ -895,6 +895,31 @@ fn card_link_retargeted_after_identity_is_skipped() {
     assert!(board.path(&format!("sys/{XHCI}/1-3.2")).exists());
 }
 
+/// A card ID changed after identity was collected must not leave a stale
+/// selector or, for a parentless card, a stale record ID in the catalog.
+#[test]
+fn card_id_changed_after_identity_is_skipped() {
+    fn change_card_id(path: &Path) -> Option<String> {
+        if path.ends_with("1-3.2/manufacturer") {
+            let sys = path
+                .ancestors()
+                .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "sys"))
+                .unwrap();
+            fs::write(sys.join("class/sound/card2/id"), "Replacement\n").unwrap();
+        }
+        read_text_file(path)
+    }
+
+    let mut board = Board::new();
+    board.usb_mic(2, "1-3.2", "Original", MONO_STREAM);
+    let paths = ["proc/asound", "sys", "dev"].map(|path| board.path(path));
+    let mut provider = AlsaProvider::with_roots(&paths[0], &paths[1], &paths[2]);
+    provider.read_usb_attribute = change_card_id;
+    assert!(on_board(board.root.path(), provider.discover())
+        .unwrap()
+        .is_empty());
+}
+
 /// A kernel without ALSA, or without sound cards, has no microphones. A
 /// stale or unparsable global card list is optional metadata when the per-card
 /// directories are present. An unreadable list, a present card with no
