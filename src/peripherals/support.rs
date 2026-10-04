@@ -308,7 +308,7 @@ fn events_concern(mut buffer: &[u8], file_name: &[u8]) -> io::Result<bool> {
         let Some(name) = buffer.get(HEADER..HEADER + length) else {
             break;
         };
-        if mask & libc::IN_IGNORED != 0 {
+        if mask & (libc::IN_IGNORED | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF) != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "support rules directory watch was invalidated",
@@ -467,6 +467,18 @@ mod tests {
         assert!(watch.drain().unwrap(), "removal is seen");
 
         fs::remove_dir_all(dir.path()).unwrap();
+        let error = watch.drain().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+
+        // Renaming a watched directory keeps the watch attached to the old
+        // inode and emits IN_MOVE_SELF without necessarily emitting
+        // IN_IGNORED. The service must reopen against the replacement path.
+        let root = TempDir::new();
+        let directory = root.path().join("support");
+        fs::create_dir(&directory).unwrap();
+        let watch = RulesWatch::open(&directory.join("neat-core.json")).unwrap();
+        fs::rename(&directory, root.path().join("support.old")).unwrap();
+        fs::create_dir(&directory).unwrap();
         let error = watch.drain().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
