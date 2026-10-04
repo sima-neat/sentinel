@@ -383,6 +383,23 @@ fn read_peripheral_catalog(path: &Path, control: Option<&Control>) -> io::Result
     // that handoff rather than a new inode with the old identity (or vice
     // versa).
     let publication = control.map(Control::lock_publication);
+    if publication
+        .as_ref()
+        .is_some_and(|publication| !publication.is_alive())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "peripheral discovery has stopped",
+        ));
+    }
+    if let Some(error) = publication
+        .as_ref()
+        .and_then(|publication| publication.publish_error())
+    {
+        return Err(io::Error::other(format!(
+            "peripheral catalog could not be written: {error}"
+        )));
+    }
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)

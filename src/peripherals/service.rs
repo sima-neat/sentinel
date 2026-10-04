@@ -68,6 +68,14 @@ impl Publication {
 pub struct PublicationGuard<'a>(MutexGuard<'a, Schedule>);
 
 impl PublicationGuard<'_> {
+    pub fn is_alive(&self) -> bool {
+        self.0.alive
+    }
+
+    pub fn publish_error(&self) -> Option<&str> {
+        self.0.publish_error.as_deref()
+    }
+
     pub fn owns(&self, metadata: &fs::Metadata) -> bool {
         self.0.publication == Some(Publication::from_metadata(metadata))
     }
