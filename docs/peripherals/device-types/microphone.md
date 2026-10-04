@@ -132,9 +132,11 @@ refresh first, and must not treat `in_use` or `available` as a guarantee.
   (running status lines are skipped, availability `in_use`).
 - A kernel without ALSA, or without sound cards: no records.
 - A card being added or removed (the card list and the card directories
-  disagree, or the card's sysfs device is gone) and an incomplete USB
-  ancestor fail the scan, so the catalog keeps the last good records and
-  reports the provider issue until the next scan.
+  disagree), a present card without its sysfs device, and a present USB
+  ancestor with only one of `idVendor` and `idProduct` fail the scan, so the
+  catalog keeps the last good records and reports the provider issue until
+  the next scan. A card whose sysfs entry or device disappears during the
+  scan (an unplug racing it) is skipped instead.
 
 ## Support rules
 

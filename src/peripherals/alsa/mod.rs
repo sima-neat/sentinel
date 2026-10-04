@@ -26,12 +26,17 @@ use super::videodev2::MAX_ENUMERATION_ENTRIES;
 
 pub const PROVIDER_NAME: &str = "daemon.audio.alsa";
 
+/// Reads a USB device attribute; tests substitute one that unplugs the
+/// device between the `idVendor` and `idProduct` reads.
+type AttributeReader = fn(&Path) -> Option<String>;
+
 /// The `daemon.audio.alsa` provider.
 pub struct AlsaProvider {
     asound: PathBuf,
     sys_root: PathBuf,
     dev_root: PathBuf,
     subsystems: Vec<String>,
+    read_usb_attribute: AttributeReader,
 }
 
 impl AlsaProvider {
@@ -50,6 +55,7 @@ impl AlsaProvider {
             sys_root: sys_root.into(),
             dev_root: dev_root.into(),
             subsystems: vec!["sound".to_string()],
+            read_usb_attribute: read_text_file,
         }
     }
 }
@@ -278,10 +284,15 @@ fn link_to(directory: &Path, target: &str) -> Option<String> {
 
 /// A USB card's `identity.usb`: from the nearest sysfs ancestor with
 /// `idVendor` and `idProduct` (the USB device) and the USB interface between
-/// it and the card's device. `None` for a card that is not on USB.
-fn usb_identity(sys: &Path, device: &Path) -> Result<Option<Value>, ProviderError> {
+/// it and the card's device. `None` for a card that is not on USB; the only
+/// error is an ancestor with one of `idVendor` and `idProduct`.
+fn usb_identity(
+    sys: &Path,
+    device: &Path,
+    read: AttributeReader,
+) -> Result<Option<Value>, ProviderError> {
     for path in device.ancestors().take_while(|path| *path != sys) {
-        let attribute = |name: &str| read_text_file(&path.join(name));
+        let attribute = |name: &str| read(&path.join(name));
         let (vendor, product) = match (attribute("idVendor"), attribute("idProduct")) {
             (Some(vendor), Some(product)) => (vendor, product),
             (None, None) => continue,
@@ -337,6 +348,12 @@ fn availability(info: &BTreeMap<String, String>, issues: &mut Vec<Value>) -> Val
             json!({"state": "unknown"})
         }
     }
+}
+
+/// Whether `path` is gone (ENOENT or ENOTDIR); any other error is not taken
+/// as a removal.
+fn vanished(path: &Path) -> bool {
+    fs::metadata(path).is_err_and(|error| matches!(errno_of(&error), libc::ENOENT | libc::ENOTDIR))
 }
 
 /// ALSA card ids are safe in a `plughw:CARD=<id>` selector when they hold
@@ -431,12 +448,17 @@ impl AlsaProvider {
         if let Some(id) = read_text_file(&directory.join("id")).filter(|id| !id.is_empty()) {
             card.id = id;
         }
-        let link = self
-            .sys_root
-            .join(format!("class/sound/card{index}/device"));
-        let device = fs::canonicalize(&link).map_err(|error| {
-            io_error("failed to resolve ALSA sysfs device", &link, &error, false)
-        })?;
+        let entry = self.sys_root.join(format!("class/sound/card{index}"));
+        let link = entry.join("device");
+        let device = match fs::canonicalize(&link) {
+            Ok(device) => device,
+            // A card removed after the card list was read has no class entry.
+            Err(_) if vanished(&entry) => return Ok(Vec::new()),
+            Err(error) => {
+                let action = "failed to resolve ALSA sysfs device";
+                return Err(io_error(action, &link, &error, false));
+            }
+        };
         let Ok(topology) = device.strip_prefix(sys) else {
             let reason = format!(
                 "ALSA sysfs device escaped the configured sysfs root: {}",
@@ -445,7 +467,13 @@ impl AlsaProvider {
             return Err(ProviderError::new(CODE_IO_OPEN, reason));
         };
         let topology = topology.to_string_lossy();
-        let usb = usb_identity(sys, &device)?;
+        let usb = match usb_identity(sys, &device, self.read_usb_attribute) {
+            // An unplug removes the attributes one at a time: if the card's
+            // sysfs device (below the USB ancestor) is gone too, the card
+            // vanished mid-scan and is skipped.
+            Err(_) if vanished(&device) => return Ok(Vec::new()),
+            usb => usb?,
+        };
         let control = format!("controlC{index}");
         let snd = self.dev_root.join("snd");
         let links = [

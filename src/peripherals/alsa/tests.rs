@@ -468,10 +468,54 @@ fn incomplete_captures_degrade_and_playback_only_cards_are_skipped() {
     assert_eq!(Value::from(actual), expected);
 }
 
+/// A microphone unplugged between its `idVendor` and `idProduct` reads is
+/// skipped; a present device with only `idVendor` still fails the scan.
+#[test]
+fn microphone_unplugged_between_identity_reads_is_skipped() {
+    /// Removes the USB device at port 1-3.2 when its `idProduct` is read
+    /// after its `idVendor`, as an unplug racing the scan does.
+    fn unplug(path: &Path) -> Option<String> {
+        if path.ends_with("1-3.2/idProduct") && path.exists() {
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+        read_text_file(path)
+    }
+    let scan = |board: &Board| {
+        let paths = ["proc/asound", "sys", "dev"].map(|path| board.path(path));
+        let mut provider = AlsaProvider::with_roots(&paths[0], &paths[1], &paths[2]);
+        provider.read_usb_attribute = unplug;
+        on_board(board.root.path(), provider.discover())
+    };
+    let mut board = Board::new();
+    board.usb_mic(1, "1-3.1", "Other", MONO_STREAM);
+    board.usb_mic(2, "1-3.2", "Nano", MONO_STREAM);
+    let records = scan(&board).unwrap();
+    let ids = Vec::from_iter(
+        records
+            .iter()
+            .map(|r| &r.details["capture_target"]["card_id"]),
+    );
+    assert_eq!(ids, ["Other"]);
+    assert!(
+        !board.path(&format!("sys/{XHCI}/1-3.2")).exists(),
+        "no race"
+    );
+
+    let mut board = Board::new();
+    board.usb_mic(2, "1-3.2", "Nano", MONO_STREAM);
+    fs::remove_file(board.path(&format!("sys/{XHCI}/1-3.2/idProduct"))).unwrap();
+    let error = scan(&board).unwrap_err();
+    assert_eq!(error.code, "io.open");
+    let incomplete = "incomplete vendor/product attributes";
+    assert!(error.reason.contains(incomplete), "{}", error.reason);
+}
+
 /// A kernel without ALSA, or without sound cards, has no microphones. A
 /// snapshot taken while a card is being added or removed, an unparsable or
-/// unreadable card list, a card without its sysfs device, and an incomplete
-/// USB ancestor fail the scan, so the catalog keeps the last good records.
+/// unreadable card list, a present card without its sysfs device, and an
+/// incomplete USB ancestor of a present card fail the scan, so the catalog
+/// keeps the last good records. A card removed after the card list was read
+/// is skipped.
 #[test]
 fn absent_alsa_is_empty_and_partial_snapshots_fail_the_scan() {
     let board = Board::new();
@@ -511,9 +555,16 @@ fn absent_alsa_is_empty_and_partial_snapshots_fail_the_scan() {
     board.write("proc/asound/cards", &board.cards);
     board.scan().unwrap();
 
+    let link = board.path(&format!("sys/{XHCI}/1-3.2/1-3.2:1.0/sound/card2/device"));
+    fs::remove_file(&link).unwrap();
+    assert!(fail(&board).starts_with("io.open failed to resolve ALSA sysfs device"));
+    symlink("../..", &link).unwrap();
     let device = board.path("sys/class/sound/card2");
     fs::rename(&device, board.path("sys/class/sound/hidden")).unwrap();
-    assert!(fail(&board).starts_with("io.open failed to resolve ALSA sysfs device"));
+    assert!(
+        board.scan().unwrap().is_empty(),
+        "a removed card is skipped"
+    );
     fs::rename(board.path("sys/class/sound/hidden"), &device).unwrap();
     fs::remove_file(board.path(&format!("sys/{XHCI}/1-3.2/idProduct"))).unwrap();
     assert!(fail(&board).contains("incomplete vendor/product attributes"));
