@@ -95,7 +95,12 @@ fn number(text: &str) -> Option<u32> {
 /// empty short name leaves the line ending in `" - "`.
 fn parse_cards(text: &str) -> BTreeMap<u32, Card> {
     let parse = |line: &str| {
-        let (index, rest) = line.trim_start().split_once([' ', '\t'])?;
+        // The kernel right-aligns a one-digit index in a two-character
+        // field. Remove only that one possible padding space; trimming every
+        // leading space would make an indented long-name continuation whose
+        // text looks like a header parse as another card.
+        let line = line.strip_prefix(' ').unwrap_or(line);
+        let (index, rest) = line.split_once(' ')?;
         let (_, rest) = rest.split_once('[')?;
         let (id, rest) = rest.split_once(']')?;
         let (_, metadata) = rest.split_once(':')?;

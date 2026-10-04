@@ -333,6 +333,18 @@ fn card_names_cannot_imitate_the_no_soundcards_marker() {
     assert_eq!(details[0]["name"], "no soundcards microphone");
 }
 
+#[test]
+fn card_long_names_cannot_imitate_headers() {
+    let text = concat!(
+        " 0 [Real           ]: USB-Audio - Real microphone\n",
+        "                      7 [Fake]: Driver - Name\n"
+    );
+    let cards = parse_cards(text);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[&0].name, "Real microphone");
+    assert!(!cards.contains_key(&7));
+}
+
 /// Stream parsing across the class: mono to multichannel, 16/24/32-bit,
 /// several altsets and interfaces, discrete lists and continuous ranges,
 /// several formats on one altset, unknown channel positions, and values the
