@@ -91,14 +91,14 @@ fn number(text: &str) -> Option<u32> {
 }
 
 /// `/proc/asound/cards`: `"%2i [%-15s]: %s - %s"` (index, id, driver, short
-/// name), each followed by an indented long-name line, which is skipped. An
-/// empty short name leaves the line ending in `" - "`.
+/// name), each followed by `" %s"` (the long name). Parse only the first line
+/// of each kernel-emitted pair because a device-provided long name can itself
+/// look exactly like a card header. An empty short name leaves the header
+/// ending in `" - "`.
 fn parse_cards(text: &str) -> BTreeMap<u32, Card> {
     let parse = |line: &str| {
         // The kernel right-aligns a one-digit index in a two-character
-        // field. Remove only that one possible padding space; trimming every
-        // leading space would make an indented long-name continuation whose
-        // text looks like a header parse as another card.
+        // field. Every long-name line has already been skipped structurally.
         let line = line.strip_prefix(' ').unwrap_or(line);
         let (index, rest) = line.split_once(' ')?;
         let (_, rest) = rest.split_once('[')?;
@@ -112,7 +112,7 @@ fn parse_cards(text: &str) -> BTreeMap<u32, Card> {
         };
         Some((number(index)?, card))
     };
-    text.lines().filter_map(parse).collect()
+    text.lines().step_by(2).filter_map(parse).collect()
 }
 
 /// `key: value` lines, as in `pcmMc/info`; a repeated key keeps its last value.

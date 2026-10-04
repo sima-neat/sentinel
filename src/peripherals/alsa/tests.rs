@@ -143,7 +143,7 @@ impl Board {
     /// `device`, registered as `snd_card_new` does, with its udev links.
     fn card(&mut self, index: u32, (id, driver, name): (&str, &str, &str), device: &str) {
         self.cards += &format!("{index:2} [{id:<15}]: {driver} - {name}\n");
-        self.cards += &format!("                      {name} at {device}\n");
+        self.cards += &format!(" {name} at {device}\n");
         self.write("proc/asound/cards", &self.cards);
         self.write(&format!("proc/asound/card{index}/id"), &format!("{id}\n"));
         let card = format!("{device}/sound/card{index}");
@@ -351,7 +351,7 @@ fn card_names_cannot_imitate_the_no_soundcards_marker() {
 fn card_long_names_cannot_imitate_headers() {
     let text = concat!(
         " 0 [Real           ]: USB-Audio - Real microphone\n",
-        "                      7 [Fake]: Driver - Name\n"
+        " 7 [Fake]: Driver - Name\n"
     );
     let cards = parse_cards(text);
     assert_eq!(cards.len(), 1);
