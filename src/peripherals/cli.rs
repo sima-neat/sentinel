@@ -9,7 +9,6 @@ use serde_json::Value;
 
 use super::model::CatalogDocument;
 use super::scan::validate;
-use super::service::read;
 use super::support::SupportStage;
 use super::{builtin_providers, Settings};
 
@@ -39,19 +38,11 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
         }
         index += 1;
     }
+    let mut document = fetch_catalog(api_socket).context(CATALOG_UNAVAILABLE)?;
     if refresh {
-        let instance = read(catalog_path)
-            .map(|document| document.instance_id)
-            .context(CATALOG_UNAVAILABLE)?;
+        let instance = document.instance_id.clone();
         let target = request_refresh(api_socket, catalog_path, &instance)?;
-        wait_for_scan(api_socket, catalog_path, &instance, target)?;
-    }
-    let document = read(catalog_path).context(CATALOG_UNAVAILABLE)?;
-    if !daemon_serves_catalog(api_socket, &document.instance_id) {
-        eprintln!(
-            "Warning: no running Sentinel daemon is serving this catalog, so it may be out of \
-date; check `systemctl status simaai-sentinel`."
-        );
+        document = wait_for_scan(api_socket, &instance, target)?;
     }
     if json {
         println!("{}", serde_json::to_string_pretty(&document)?);
@@ -102,24 +93,6 @@ fn test_provider(target: &str, settings: &Settings) -> Result<()> {
     }
 }
 
-/// The catalog file outlives the daemon (a stop by SIGTERM leaves it as it
-/// was), a daemon running without peripheral discovery leaves an old one in
-/// place, and a daemon started with another `--peripherals-file` writes
-/// elsewhere, so the CLI trusts the file only when the daemon's health
-/// reports a peripheral summary for the same `instance_id`. A complete
-/// request keeps the daemon from logging a dropped connection.
-fn daemon_serves_catalog(api_socket: &Path, instance: &str) -> bool {
-    let Ok(response) = exchange(
-        api_socket,
-        b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    ) else {
-        return false;
-    };
-    let body = response.split_once("\r\n\r\n").map(|(_, body)| body);
-    let health: Option<Value> = body.and_then(|body| serde_json::from_str(body).ok());
-    health.is_some_and(|health| health["peripherals"]["instance_id"].as_str() == Some(instance))
-}
-
 /// Send one request to the daemon and read its whole response.
 fn exchange(api_socket: &Path, request: &[u8]) -> Result<String> {
     let mut stream = UnixStream::connect(api_socket)
@@ -129,6 +102,28 @@ fn exchange(api_socket: &Path, request: &[u8]) -> Result<String> {
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     Ok(response)
+}
+
+/// Read the catalog through the daemon, which validates ownership, mode and
+/// that the file is its latest published inode before returning the bytes.
+fn fetch_catalog(api_socket: &Path) -> Result<CatalogDocument> {
+    let response = exchange(
+        api_socket,
+        b"GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )?;
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .context("invalid response from Sentinel daemon")?;
+    if !head.starts_with("HTTP/1.1 200 ") {
+        let value: Value = serde_json::from_str(body).context("parse catalog refusal")?;
+        bail!(
+            "{}",
+            value["error"]
+                .as_str()
+                .unwrap_or("Sentinel daemon refused the peripheral catalog")
+        );
+    }
+    serde_json::from_str(body).context("parse peripheral catalog response")
 }
 
 /// Ask the daemon for a scan, and return the `scan_sequence` that completes
@@ -160,53 +155,24 @@ fn request_refresh(api_socket: &Path, catalog_path: &Path, instance: &str) -> Re
     Ok(target)
 }
 
-fn wait_for_scan(
-    api_socket: &Path,
-    catalog_path: &Path,
-    instance: &str,
-    target: u64,
-) -> Result<()> {
+fn wait_for_scan(api_socket: &Path, instance: &str, target: u64) -> Result<CatalogDocument> {
     let start = Instant::now();
-    let (mut revision, mut probed) = (0, start);
     loop {
-        if let Ok(document) = read(catalog_path) {
-            if document.instance_id != instance {
-                bail!("Sentinel restarted during the refresh; run the command again");
-            }
-            if document.scan_sequence >= target {
-                return Ok(());
-            }
-            revision = document.revision;
+        let document = match fetch_catalog(api_socket) {
+            Ok(document) => document,
+            Err(error) => bail!("refresh did not complete: {error}"),
+        };
+        if document.instance_id != instance {
+            bail!("Sentinel restarted during the refresh; run the command again");
         }
-        // While the daemon cannot write the file, it stops advancing; the
-        // daemon refuses its catalog and says why.
-        if probed.elapsed() >= Duration::from_secs(1) {
-            probed = Instant::now();
-            if let Some(reason) = catalog_refusal(api_socket, instance, revision) {
-                bail!("refresh did not complete: {reason}");
-            }
+        if document.scan_sequence >= target {
+            return Ok(document);
         }
         if start.elapsed() >= Duration::from_secs(15) {
             bail!("refresh did not complete within 15 seconds");
         }
         thread::sleep(Duration::from_millis(100));
     }
-}
-
-/// The daemon's reason for refusing its catalog (HTTP 503), if it does. With
-/// the revision already read, a current catalog costs only a short reply.
-fn catalog_refusal(api_socket: &Path, instance: &str, revision: u64) -> Option<String> {
-    let request = format!(
-        "GET /v1/peripherals?since_revision={revision}&instance_id={instance} HTTP/1.1\r\n\
-Host: localhost\r\n\r\n"
-    );
-    let response = exchange(api_socket, request.as_bytes()).ok()?;
-    let (head, body) = response.split_once("\r\n\r\n")?;
-    if !head.starts_with("HTTP/1.1 503") {
-        return None;
-    }
-    let body: Value = serde_json::from_str(body).ok()?;
-    Some(body["error"].as_str()?.to_string())
 }
 
 /// Device names and errors come from the hardware; replace control
@@ -345,32 +311,27 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
         assert_eq!(text(&catalog), expected);
     }
 
-    /// The catalog file outlives the daemon, so only a running daemon whose
-    /// health reports a peripheral summary for the same instance vouches for
-    /// it; a daemon writing another `--peripherals-file` does not. The probe
-    /// is one complete health request, so the daemon logs nothing.
+    /// The CLI reads the daemon-validated endpoint, not the catalog path an
+    /// unprivileged user may be able to replace.
     #[test]
-    fn only_the_daemon_that_wrote_the_catalog_vouches_for_it() {
+    fn catalog_is_read_from_the_daemon_api() {
         let nonexistent = Path::new("/nonexistent/api.sock");
-        assert!(!daemon_serves_catalog(nonexistent, "i"));
+        assert!(fetch_catalog(nonexistent).is_err());
         let dir = TempDir::new();
         let path = dir.path().join("api.sock");
-        for (body, live) in [
-            (r#"{"status":"ok","peripherals":{"instance_id":"i"}}"#, true),
-            (r#"{"peripherals":{"instance_id":"j"}}"#, false), // other file
-            (r#"{"status":"ok","peripherals":{"ready":true}}"#, false),
-            (r#"{"status":"ok","peripherals":null}"#, false), // --no-peripherals
-            (r#"{"status":"ok"}"#, false),
-            ("", false),
-        ] {
-            let server = answer_once(&path, "200 OK", body);
-            let served = daemon_serves_catalog(&path, "i");
-            assert_eq!(served, live, "health body {body:?}");
-            let request = server.join().unwrap();
-            assert!(request.starts_with("GET /v1/health HTTP/1.1\r\n"));
-        }
-        let stale = daemon_serves_catalog(&path, "i");
-        assert!(!stale, "a stale socket file is not a running daemon");
+        let body = serde_json::to_string(&Catalog::new("i", 8).document()).unwrap();
+        let server = answer_once(&path, "200 OK", &body);
+        assert_eq!(fetch_catalog(&path).unwrap().instance_id, "i");
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/peripherals HTTP/1.1\r\n"));
+
+        let body = r#"{"error":"catalog publication was replaced"}"#;
+        let server = answer_once(&path, "503 Service Unavailable", body);
+        assert_eq!(
+            fetch_catalog(&path).unwrap_err().to_string(),
+            "catalog publication was replaced"
+        );
+        server.join().unwrap();
     }
 
     /// A refresh target counts the scans of the daemon's own catalog, so when
@@ -414,22 +375,19 @@ run the command again";
     #[test]
     fn refresh_reports_a_catalog_the_daemon_cannot_write() {
         let dir = TempDir::new();
-        let (socket, path) = (dir.path().join("api.sock"), dir.path().join("p.json"));
-        let mut catalog = Catalog::new("i", 8);
-        catalog.apply_success(vec![], vec![]).unwrap();
-        crate::peripherals::service::publish(&path, &catalog.document()).unwrap();
+        let socket = dir.path().join("api.sock");
         let reason = "peripheral catalog could not be written: replace p.json: No space left \
 on device (os error 28); see `journalctl -u simaai-sentinel`";
         let body = json!({ "error": reason }).to_string();
         let server = answer_once(&socket, "503 Service Unavailable", &body);
         let started = Instant::now();
-        let error = wait_for_scan(&socket, &path, "i", 2).unwrap_err();
+        let error = wait_for_scan(&socket, "i", 2).unwrap_err();
         assert_eq!(
             error.to_string(),
             format!("refresh did not complete: {reason}")
         );
         assert!(started.elapsed() < Duration::from_secs(3));
-        let probe = "GET /v1/peripherals?since_revision=1&instance_id=i HTTP/1.1\r\n";
+        let probe = "GET /v1/peripherals HTTP/1.1\r\n";
         assert!(server.join().unwrap().starts_with(probe));
     }
 

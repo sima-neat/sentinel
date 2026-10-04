@@ -502,7 +502,7 @@ pub fn publish(path: &Path, document: &CatalogDocument) -> Result<()> {
 }
 
 fn publish_identity(path: &Path, document: &CatalogDocument) -> Result<Publication> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = publication_parent(path);
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let name = path
         .file_name()
@@ -521,7 +521,7 @@ fn publish_config(config: &Config, document: &CatalogDocument) -> Result<Publica
 }
 
 fn publish_to(path: &Path, document: &CatalogDocument, temporary: &Path) -> Result<Publication> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = publication_parent(path);
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let result = (|| {
         // The exclusive, randomized name cannot follow an attacker-created
@@ -544,6 +544,13 @@ fn publish_to(path: &Path, document: &CatalogDocument, temporary: &Path) -> Resu
     result
 }
 
+fn publication_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(test)]
 pub fn read(path: &Path) -> Result<CatalogDocument> {
     let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_slice(&data).with_context(|| format!("parse {}", path.display()))
@@ -743,5 +750,9 @@ mod tests {
 
         assert_eq!(fs::read_to_string(target).unwrap(), "do not overwrite");
         assert_eq!(read(&path).unwrap().instance_id, "test-instance");
+        assert_eq!(
+            publication_parent(Path::new("peripherals.json")),
+            Path::new(".")
+        );
     }
 }
