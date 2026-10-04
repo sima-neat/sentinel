@@ -42,12 +42,17 @@ discovery does not acquire, configure, or stream from the camera.";
 /// Opens a V4L2 node; tests substitute fake nodes.
 type Opener = Box<dyn Fn(&Path) -> io::Result<Box<dyn VideoNode>> + Send>;
 
+/// Checks whether a USB identity attribute exists; tests substitute one that
+/// unplugs the device between the `idVendor` and `idProduct` checks.
+type AttributeCheck = fn(&Path) -> Result<bool, Failure>;
+
 /// The `daemon.camera.v4l2` provider.
 pub struct V4l2Provider {
     sys_root: PathBuf,
     dev_root: PathBuf,
     subsystems: Vec<String>,
     open: Opener,
+    identity_attribute_exists: AttributeCheck,
 }
 
 impl V4l2Provider {
@@ -66,6 +71,7 @@ impl V4l2Provider {
             dev_root: dev_root.into(),
             subsystems: vec!["video4linux".to_string()],
             open,
+            identity_attribute_exists: attribute_exists,
         }
     }
 }
@@ -502,14 +508,19 @@ impl V4l2Provider {
             if interface.is_none() {
                 interface = read_text_file(&path.join("bInterfaceNumber"));
             }
-            let vendor = attribute_exists(&path.join("idVendor"))?;
-            if vendor != attribute_exists(&path.join("idProduct"))? {
+            let exists = self.identity_attribute_exists;
+            let vendor = exists(&path.join("idVendor"))?;
+            if vendor != exists(&path.join("idProduct"))? {
                 let reason = format!(
                     "V4L2 USB ancestor has incomplete vendor/product attributes: {}",
                     path.display()
                 );
+                // An unplug removes the attributes one at a time: if the
+                // node's sysfs device (below this ancestor) is gone too, the
+                // camera vanished mid-scan and is skipped.
+                let present = attribute_exists(&device)?;
                 return Err(Failure {
-                    errno: libc::EPROTO,
+                    errno: if present { libc::EPROTO } else { libc::ENOENT },
                     error: ProviderError::new(CODE_IO_OPEN, reason),
                 });
             }

@@ -81,6 +81,15 @@ fn uvc_camera(card: &str) -> FakeVideoNode {
 /// Scan `<root>/sys` with `<root>/dev/<name>` served by `nodes` (`Err` is the
 /// errno `open` fails with; unknown names fail with `ENOENT`).
 fn scan(root: &Path, nodes: Nodes) -> Result<Vec<Record>, ProviderError> {
+    scan_checking(root, nodes, attribute_exists)
+}
+
+/// `scan` with the USB identity attributes checked by `exists`.
+fn scan_checking(
+    root: &Path,
+    nodes: Nodes,
+    exists: AttributeCheck,
+) -> Result<Vec<Record>, ProviderError> {
     let dev = root.join("dev");
     let nodes = nodes.into_iter().map(|(name, node)| (dev.join(name), node));
     let nodes: HashMap<_, _> = nodes.collect();
@@ -90,6 +99,7 @@ fn scan(root: &Path, nodes: Nodes) -> Result<Vec<Record>, ProviderError> {
         None => Err(io::Error::from_raw_os_error(libc::ENOENT)),
     });
     let mut provider = V4l2Provider::with_opener(root.join("sys"), dev, open);
+    provider.identity_attribute_exists = exists;
     on_board(root, provider.discover())
 }
 
@@ -433,6 +443,42 @@ fn vanished_devices_are_skipped() {
     let records = scan(root.path(), nodes).unwrap();
     let paths = Vec::from_iter(records.iter().map(|r| &r.details["device_path"]));
     assert_eq!(paths, ["/dev/video3"]);
+}
+
+/// A camera unplugged between its `idVendor` and `idProduct` checks is
+/// skipped like any vanished node; a present device with only `idVendor`
+/// still fails the scan.
+#[test]
+fn camera_unplugged_between_identity_checks_is_skipped() {
+    /// Removes the camera at `USB` when its `idProduct` is checked after its
+    /// `idVendor` was found, as an unplug racing the scan does.
+    fn unplug(path: &Path) -> Result<bool, Failure> {
+        if path.ends_with(Path::new(USB).join("idProduct")) && path.exists() {
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+        attribute_exists(path)
+    }
+    let root = one_camera(&[("video0", "0")]);
+    let sys = root.path().join("sys");
+    add_camera(
+        &sys,
+        "devices/platform/xhci/usb1/1-2",
+        &[],
+        &[("video1", "0")],
+    );
+    let nodes = || vec![("video1", Ok(uvc_camera("C920")))];
+    let records = scan_checking(root.path(), nodes(), unplug).unwrap();
+    let paths = Vec::from_iter(records.iter().map(|r| &r.details["device_path"]));
+    assert_eq!(paths, ["/dev/video1"]);
+    assert!(!sys.join(USB).exists(), "the race was not exercised");
+
+    let root = one_camera(&[("video0", "0")]);
+    fs::remove_file(root.path().join("sys").join(USB).join("idProduct")).unwrap();
+    let nodes = vec![("video0", Ok(uvc_camera("C920")))];
+    let error = scan_checking(root.path(), nodes, unplug).unwrap_err();
+    assert_eq!(error.code, "io.open");
+    let incomplete = "incomplete vendor/product attributes";
+    assert!(error.reason.contains(incomplete), "{}", error.reason);
 }
 
 /// No list may exceed `MAX_ENUMERATION_ENTRIES`, and one device gets
