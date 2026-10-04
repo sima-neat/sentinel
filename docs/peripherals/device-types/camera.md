@@ -55,7 +55,7 @@ behind the Modalix ISP, and USB Video Class (UVC) cameras.
 | `framerate_num`, `framerate_den` | integer | always | Frame rate; USB uses the fastest advertised interval |
 | `frame_intervals` | array | USB | Every interval the device advertises |
 | `isp_output` | bool | MIPI | `true`: an ISP output size |
-| `framerate_source` | string | MIPI | `isp` (an ISP frame interval), `sensor_timing` (a rate offered up to `max_fps`), or `nominal` (30/1: neither is known) |
+| `framerate_source` | string | MIPI | `isp` (a discrete ISP frame interval or the fastest valid rate of an interval range), `sensor_timing` (a rate offered up to `max_fps`), or `nominal` (30/1: neither is known) |
 | `supported`, `reason` | bool, string | always | Added by the support stage from Neat Core's rules |
 
 MIPI modes are the ISP output node's formats and discrete sizes, which is what
@@ -63,7 +63,8 @@ MIPI modes are the ISP output node's formats and discrete sizes, which is what
 includes sizes the ISP cannot produce (see sima-neat/core#883).
 
 MIPI frame rates, per size: the ISP's discrete frame intervals when it lists
-them. Otherwise, when `max_fps` is known, one mode per rate in `max_fps`
+them, or the fastest valid rate of a stepwise/continuous interval range.
+Otherwise, when `max_fps` is known, one mode per rate in `max_fps`
 rounded to the nearest whole rate (at least 1) and every standard rate of 60,
 30, 25, 20, 15, 10 and 5 below it, fastest first (66.18 gives 66, 60, 30, 25,
 20, 15, 10, 5). Otherwise one nominal 30/1 mode. `max_fps` is the limit at

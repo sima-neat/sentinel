@@ -35,7 +35,8 @@ use super::sysutil::{
 use super::videodev2::{
     effective_capabilities, fourcc_string, Capability, EnumerationBudget, FmtDesc, FrmIvalEnum,
     FrmSizeEnum, MAX_ENUMERATION_ENTRIES, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-    V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_FRMIVAL_TYPE_DISCRETE,
+    V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+    V4L2_FRMIVAL_TYPE_CONTINUOUS, V4L2_FRMIVAL_TYPE_DISCRETE, V4L2_FRMIVAL_TYPE_STEPWISE,
     V4L2_FRMSIZE_TYPE_DISCRETE,
 };
 use ioctl::*;
@@ -510,6 +511,31 @@ fn normalized_rate(mut numerator: u32, mut denominator: u32) -> (u32, u32) {
     )
 }
 
+/// The shortest valid frame period an ISP interval entry advertises. A range
+/// minimum is itself a valid period (and therefore its fastest rate).
+fn fastest_period(value: &FrmIvalEnum) -> Option<(u32, u32)> {
+    let nonzero = |(numerator, denominator): (u32, u32)| {
+        (numerator != 0 && denominator != 0).then_some((numerator, denominator))
+    };
+    if value.kind == V4L2_FRMIVAL_TYPE_DISCRETE {
+        return nonzero(value.discrete());
+    }
+    if !matches!(
+        value.kind,
+        V4L2_FRMIVAL_TYPE_CONTINUOUS | V4L2_FRMIVAL_TYPE_STEPWISE
+    ) {
+        return None;
+    }
+    let (minimum, maximum, _step) = (
+        nonzero(value.min())?,
+        nonzero(value.max())?,
+        nonzero(value.step())?,
+    );
+    let ordered =
+        u64::from(minimum.0) * u64::from(maximum.1) <= u64::from(maximum.0) * u64::from(minimum.1);
+    ordered.then_some(minimum)
+}
+
 /// Entries 0, 1, … of one V4L2 enumeration, until the driver answers `EINVAL`
 /// or `query` returns `None`. Every query spends the device budget, and a list
 /// may not exceed `MAX_ENUMERATION_ENTRIES`.
@@ -577,8 +603,9 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
             return Err(malformed("frame size", path));
         }
         for (width, height) in sizes {
-            // Discrete intervals only: the list ends at a stepwise or
-            // continuous range, or at ENOTTY from a driver without the ioctl.
+            // A driver without this ioctl contributes a nominal rate. A
+            // reported range contributes its fastest valid rate instead of
+            // inventing 30 fps, which may lie outside that range.
             let ioctl = ("VIDIOC_ENUM_FRAMEINTERVALS", "frame interval list");
             let intervals = enumerate(budget, path, ioctl, |index| {
                 let mut value = FrmIvalEnum::default();
@@ -586,16 +613,16 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
                 (value.width, value.height) = (width, height);
                 match node.enum_frame_interval(&mut value) {
                     Err(error) if errno_of(&error) == libc::ENOTTY => Ok(None),
-                    result => result.map(|()| {
-                        (value.kind == V4L2_FRMIVAL_TYPE_DISCRETE).then(|| value.discrete())
-                    }),
+                    result => result.map(|()| Some(value)),
                 }
             })?;
-            if intervals.iter().any(|&(n, d)| n == 0 || d == 0) {
-                return Err(malformed("frame interval", path));
+            let mut rates = Vec::new();
+            for interval in &intervals {
+                let (numerator, denominator) =
+                    fastest_period(interval).ok_or_else(|| malformed("frame interval", path))?;
+                // An interval is a frame period; the rate is its reciprocal.
+                rates.push(((denominator, numerator), "isp"));
             }
-            // An interval is a frame period; the rate is its reciprocal.
-            let mut rates: Vec<_> = intervals.iter().map(|&(n, d)| ((d, n), "isp")).collect();
             if rates.is_empty() {
                 rates.push((NOMINAL_FRAMERATE, "nominal"));
             }

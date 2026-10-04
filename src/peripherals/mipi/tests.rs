@@ -630,9 +630,9 @@ fn isp_node_unplugged_after_mode_enumeration_is_not_published() {
 }
 
 /// Several ISP nodes report the modes they share; a node with another card
-/// or no discrete size is skipped. Discrete ISP intervals replace the nominal
-/// 30/1; a size without them, a range-only size, and a driver without the
-/// ioctl keep it.
+/// or no discrete size is skipped. Discrete ISP intervals and the fastest
+/// valid rate of interval ranges replace the nominal 30/1; a size without an
+/// interval and a driver without the ioctl keep it.
 #[test]
 fn isp_nodes_provide_the_modes() {
     let nv12 = fourcc(b"NV12");
@@ -660,17 +660,22 @@ fn isp_nodes_provide_the_modes() {
     let available = json!({"state": "available", "device_path": paths[0], "device_paths": paths});
     assert_eq!(details["isp"], available);
 
-    let mut continuous = discrete_interval(1, 60);
-    continuous.kind = V4L2_FRMIVAL_TYPE_CONTINUOUS;
+    let stepwise = raw_interval(V4L2_FRMIVAL_TYPE_STEPWISE, [1, 24, 1, 6, 1, 24]);
+    let continuous = raw_interval(V4L2_FRMIVAL_TYPE_CONTINUOUS, [1, 12, 1, 5, 1, 60]);
     let mut node = nv12_isp(&SIZES);
     node.intervals = vec![
         ((nv12, 1920, 1080), discrete_interval(1, 60)),
         ((nv12, 1920, 1080), discrete_interval(1001, 30000)),
+        ((nv12, 2048, 1080), stepwise),
         ((nv12, 2432, 2048), continuous),
     ];
     let rate = |rate| mode("NV12", (1920, 1080), rate, "isp");
-    let mut expected = vec![rate((60, 1)), rate((30000, 1001))];
-    expected.extend(SIZES[1..].iter().map(|&size| nominal(size)));
+    let expected = vec![
+        rate((60, 1)),
+        rate((30000, 1001)),
+        mode("NV12", (2048, 1080), (24, 1), "isp"),
+        mode("NV12", (2432, 2048), (12, 1), "isp"),
+    ];
     let details = imx477([isp(node.clone())], vec![]);
     assert_eq!(details["modes"], json!(expected));
     node.fail = Some((VIDIOC_ENUM_FRAMEINTERVALS, libc::ENOTTY));
