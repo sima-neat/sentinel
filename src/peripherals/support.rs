@@ -342,10 +342,10 @@ pub(crate) fn core_rules() -> Value {
         "format": 1,
         "source": "neat-core 0.4.0",
         "camera": {
-            "backends": {"accept": ["mipi"], "reason": "CameraInput currently accepts MIPI cameras only; direct V4L2 capture is not supported."},
-            "formats": {"accept": ["NV12"], "reason": "CameraInput's current camera-memory path supports NV12 output only."},
-            "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "This mode does not advertise CameraInput's 30/1 frame rate."},
-            "isp_output": {"reason": "This resolution is not an ISP output size on this board."}
+            "backends": {"accept": ["mipi"], "reason": "CameraInput's default libcamera profile accepts MIPI cameras only. These rules do not classify raw V4L2 profiles such as MetoakSimor (RAW8 1920x360, selected with CameraInputOptions.profile and device)."},
+            "formats": {"accept": ["NV12"], "reason": "CameraInput's default libcamera profile supports NV12 output only."},
+            "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "This mode does not advertise the 30/1 frame rate of CameraInput's default libcamera profile."},
+            "isp_output": {"reason": "CameraInput's default libcamera profile requires an ISP output size; this resolution is not one on this board."}
         }
     })
 }
