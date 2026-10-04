@@ -161,9 +161,11 @@ Update Sentinel: sima-cli neat install sentinel"
         .framerates
         .accept
         .iter()
-        .any(|rate| rate.den == 0)
+        .any(|rate| rate.num == 0 || rate.den == 0)
     {
-        return Err("camera.framerates accept entries must have a nonzero denominator".into());
+        return Err(
+            "camera.framerates accept entries must have a nonzero numerator and denominator".into(),
+        );
     }
     Ok(Some(rules))
 }
@@ -450,12 +452,16 @@ mod tests {
         assert_eq!(apply("not json").0, expected);
         let (text, _) = apply(&core_rules().to_string());
         assert_eq!(text, "applied neat-core 0.4.0 true");
-        let mut zero_denominator = core_rules();
-        zero_denominator["camera"]["framerates"]["accept"][0]["den"] = json!(0);
-        let (text, issues) = apply(&zero_denominator.to_string());
-        let expected = format!("stale neat-core 0.4.0 true, {issue} retained=true");
-        assert_eq!(text, expected);
-        assert!(issues[0].reason.contains("nonzero denominator"));
+        for field in ["num", "den"] {
+            let mut zero_rate = core_rules();
+            zero_rate["camera"]["framerates"]["accept"][0][field] = json!(0);
+            let (text, issues) = apply(&zero_rate.to_string());
+            let expected = format!("stale neat-core 0.4.0 true, {issue} retained=true");
+            assert_eq!(text, expected);
+            assert!(issues[0]
+                .reason
+                .contains("nonzero numerator and denominator"));
+        }
         let (text, issues) = apply(r#"{"format": 2, "source": "x", "camera": {}}"#);
         let expected = format!("stale neat-core 0.4.0 true, {issue} retained=true");
         assert_eq!(text, expected);
