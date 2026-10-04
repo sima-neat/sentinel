@@ -623,8 +623,14 @@ mod tests {
         assert_eq!(body.as_bytes(), fs::read(&catalog_path).unwrap());
         let current = response_json(&get("?since_revision=1&instance_id=instance-a"));
         assert_eq!(current["unchanged"], true);
-        assert_eq!(current["last_success_at"], document.last_success_at.unwrap());
-        assert_eq!(current["last_attempt_at"], document.last_attempt_at.unwrap());
+        assert_eq!(
+            current["last_success_at"],
+            document.last_success_at.unwrap()
+        );
+        assert_eq!(
+            current["last_attempt_at"],
+            document.last_attempt_at.unwrap()
+        );
         let other_instance = response_json(&get("?since_revision=1&instance_id=instance-b"));
         assert_eq!(other_instance["devices"][0]["id"], "camera:x");
         for query in ["?since_revision=x", "?since_revision=1"] {
