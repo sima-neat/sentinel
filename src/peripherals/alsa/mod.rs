@@ -279,16 +279,23 @@ fn numbered(
 ) -> Result<BTreeMap<u32, PathBuf>, ProviderError> {
     let failed = |error: io::Error| io_error("failed to list", directory, &error, false);
     let mut entries = BTreeMap::new();
-    for entry in fs::read_dir(directory)
-        .map_err(failed)?
-        .take(MAX_ENUMERATION_ENTRIES as usize)
-    {
+    let mut matching = 0;
+    for entry in fs::read_dir(directory).map_err(failed)? {
         let name = entry.map_err(failed)?.file_name();
         let name = name.to_string_lossy();
         let middle = name
             .strip_prefix(prefix)
             .and_then(|n| n.strip_suffix(suffix));
         if let Some(index) = middle.and_then(number) {
+            matching += 1;
+            if matching > MAX_ENUMERATION_ENTRIES {
+                let reason = format!(
+                    "more than {MAX_ENUMERATION_ENTRIES} ALSA entries matched \
+                     {prefix}<number>{suffix} in {}",
+                    directory.display()
+                );
+                return Err(ProviderError::new(CODE_IO_OPEN, reason));
+            }
             entries.insert(index, directory.join(&*name));
         }
     }

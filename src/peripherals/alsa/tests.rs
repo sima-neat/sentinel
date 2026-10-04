@@ -221,6 +221,24 @@ fn card_id_aliases_are_not_card_indices() {
     assert_eq!(details[0]["identity"]["card_id"], "card7");
 }
 
+#[test]
+fn matching_sound_entries_over_the_limit_are_rejected() {
+    let root = TempDir::new();
+    for index in 0..=MAX_ENUMERATION_ENTRIES {
+        write_file(&root.path().join(format!("pcmC0D{index}c")), "");
+    }
+
+    let error = numbered(root.path(), "pcmC0D", "c").unwrap_err();
+    assert_eq!(error.code, CODE_IO_OPEN);
+    assert!(
+        error
+            .reason
+            .contains("more than 1024 ALSA entries matched pcmC0D<number>c"),
+        "{}",
+        error.reason
+    );
+}
+
 /// The three reference microphones, in full: their catalog entries are what
 /// Insight's microphone page reads. The Yeti's headphone output and the
 /// C920's camera are not reported.
