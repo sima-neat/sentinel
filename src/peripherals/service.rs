@@ -227,12 +227,11 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
             )
         })
         .ok();
-    let publication = publish_config(&config, &catalog.document())?;
-    {
-        let mut schedule = control.schedule();
-        schedule.publication = Some(publication);
-        schedule.alive = true;
-    }
+    // A temporarily unwritable runtime directory must not disable discovery
+    // for the lifetime of the daemon. Record the failure and let the event
+    // loop's normal publication retry recover when storage is writable again.
+    let retry_publish = write(&control, &config, &catalog);
+    control.schedule().alive = true;
     let thread_control = control.clone();
     let thread = thread::Builder::new()
         .name("peripherals".into())
@@ -244,6 +243,7 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
                 scanner,
                 uevents,
                 rules_watch,
+                retry_publish,
             )
         })
         .context("spawn peripherals thread")?;
@@ -266,6 +266,7 @@ fn run(
     mut scanner: Scanner,
     mut uevents: Option<UeventSocket>,
     mut rules_watch: Option<RulesWatch>,
+    mut retry_publish: Option<Instant>,
 ) {
     let _alive = AliveGuard(control.clone());
     lower_priority();
@@ -280,8 +281,6 @@ fn run(
     // Refresh requests within the cooldown share the next scan, so a client
     // that spams the world-writable API cannot keep the thread busy.
     let mut last_scan_end: Option<Instant> = None;
-    // While the catalog cannot be written, when to try again.
-    let mut retry_publish: Option<Instant> = None;
     loop {
         // A pending scan re-reads the rules, so it supersedes a reclassify.
         let next = [due.or(reclassify_due), retry_publish]
@@ -679,6 +678,32 @@ mod tests {
         );
         let after = end + REFRESH_COOLDOWN + Duration::from_secs(1);
         assert_eq!(refresh_due(after, Some(end), REFRESH_COOLDOWN), after);
+    }
+
+    #[test]
+    fn initial_catalog_publication_failure_is_retried() {
+        let root = TempDir::new();
+        let blocker = root.path().join("catalog.tmp");
+        fs::create_dir(&blocker).unwrap();
+        let config = Config {
+            catalog_path: root.path().join("peripherals.json"),
+            support_rules_path: root.path().join("support/neat-core.json"),
+            instance_id: "test-instance".into(),
+            debounce: Duration::from_millis(10),
+            refresh_cooldown: Duration::from_millis(10),
+            listen_for_uevents: false,
+            temporary_path: Some(blocker.clone()),
+        };
+        let handle = spawn(config, vec![Box::new(Fake("test", || Ok(vec![])))]).unwrap();
+        let control = handle.control();
+        assert!(control.is_alive());
+        assert!(control.publish_error().is_some());
+
+        fs::remove_dir(&blocker).unwrap();
+        let ready = wait_for(root.path(), |document| document.ready);
+        assert_eq!(ready, "ready rev=1 scan=1 devices=0 last=-");
+        assert_eq!(control.publish_error(), None);
+        handle.stop();
     }
 
     #[test]
