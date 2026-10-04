@@ -222,7 +222,12 @@ fn route(
                 .as_ref()
                 .ok_or_else(peripherals_disabled)?;
             let target = control.request_refresh().ok_or_else(peripherals_stopped)?;
-            Ok(json!({"accepted": true, "target_scan_sequence": target}))
+            // The target counts this catalog instance's scans.
+            Ok(json!({
+                "accepted": true,
+                "target_scan_sequence": target,
+                "instance_id": control.instance_id(),
+            }))
         }
         ("GET", "/v1/cache") => {
             serde_json::to_value(cache::read_cache(cache_path).map_err(internal)?).map_err(internal)
@@ -729,6 +734,7 @@ mod tests {
         fs::create_dir(&blocker).unwrap();
         let accepted = response_json(&request(&socket, refresh));
         assert_eq!(accepted["target_scan_sequence"], 2);
+        assert_eq!(accepted["instance_id"], "instance-a");
         let refused = get_until(&|reply| reply.starts_with("HTTP/1.1 503"));
         let error = response_json(&refused)["error"]
             .as_str()

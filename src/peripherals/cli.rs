@@ -43,7 +43,7 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
         let instance = read(catalog_path)
             .map(|document| document.instance_id)
             .context(CATALOG_UNAVAILABLE)?;
-        let target = request_refresh(api_socket)?;
+        let target = request_refresh(api_socket, catalog_path, &instance)?;
         wait_for_scan(api_socket, catalog_path, &instance, target)?;
     }
     let document = read(catalog_path).context(CATALOG_UNAVAILABLE)?;
@@ -131,7 +131,10 @@ fn exchange(api_socket: &Path, request: &[u8]) -> Result<String> {
     Ok(response)
 }
 
-fn request_refresh(api_socket: &Path) -> Result<u64> {
+/// Ask the daemon for a scan, and return the `scan_sequence` that completes
+/// it in `catalog_path`. The daemon's target counts the scans of its own
+/// catalog, so it is refused unless that catalog is the one being read.
+fn request_refresh(api_socket: &Path, catalog_path: &Path, instance: &str) -> Result<u64> {
     let response = exchange(
         api_socket,
         b"POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
@@ -141,12 +144,20 @@ fn request_refresh(api_socket: &Path) -> Result<u64> {
         .map(|(_, body)| body)
         .unwrap_or_default();
     let value: Value = serde_json::from_str(body).context("parse refresh response")?;
-    value["target_scan_sequence"].as_u64().with_context(|| {
+    let target = value["target_scan_sequence"].as_u64().with_context(|| {
         format!(
             "refresh refused: {}",
             value["error"].as_str().unwrap_or("unexpected response")
         )
-    })
+    })?;
+    if value["instance_id"].as_str() != Some(instance) {
+        bail!(
+            "the Sentinel daemon does not publish {}: it was started with another \
+--peripherals-file, or it restarted; pass the daemon's --peripherals-file or run the command again",
+            catalog_path.display()
+        );
+    }
+    Ok(target)
 }
 
 fn wait_for_scan(
@@ -360,6 +371,41 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
         }
         let stale = daemon_serves_catalog(&path, "i");
         assert!(!stale, "a stale socket file is not a running daemon");
+    }
+
+    /// A refresh target counts the scans of the daemon's own catalog, so when
+    /// the file being read is another one (another `--peripherals-file`, or an
+    /// earlier daemon's), the CLI refuses instead of waiting for a scan that
+    /// file will never record.
+    #[test]
+    fn refresh_targets_only_the_catalog_being_read() {
+        let dir = TempDir::new();
+        let socket = dir.path().join("api.sock");
+        let file = Path::new("/run/other/peripherals.json");
+        let refresh = |status, body| {
+            let server = answer_once(&socket, status, body);
+            let target = request_refresh(&socket, file, "i").map_err(|e| e.to_string());
+            let request = server.join().unwrap();
+            assert!(request.starts_with("POST /v1/peripherals/refresh HTTP/1.1\r\n"));
+            target
+        };
+        let accepted = r#"{"accepted":true,"target_scan_sequence":5,"instance_id":"i"}"#;
+        assert_eq!(refresh("200 OK", accepted), Ok(5));
+        let other = "the Sentinel daemon does not publish /run/other/peripherals.json: it was \
+started with another --peripherals-file, or it restarted; pass the daemon's --peripherals-file or \
+run the command again";
+        for body in [
+            r#"{"accepted":true,"target_scan_sequence":5,"instance_id":"j"}"#,
+            r#"{"accepted":true,"target_scan_sequence":5}"#,
+        ] {
+            assert_eq!(refresh("200 OK", body), Err(other.into()), "{body}");
+        }
+        let refused = r#"{"error":"peripheral discovery has stopped"}"#;
+        let refused = refresh("503 Service Unavailable", refused);
+        assert_eq!(
+            refused.unwrap_err(),
+            "refresh refused: peripheral discovery has stopped"
+        );
     }
 
     /// While the daemon cannot write the catalog, the file stops advancing;

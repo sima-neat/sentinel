@@ -39,13 +39,14 @@ struct Schedule {
 
 /// Shared between the peripherals thread and its callers (API, daemon).
 pub struct Control {
+    instance_id: String,
     schedule: Mutex<Schedule>,
     wake_read: OwnedFd,
     wake_write: OwnedFd,
 }
 
 impl Control {
-    fn new() -> io::Result<Self> {
+    fn new(instance_id: String) -> io::Result<Self> {
         let mut fds = [0; 2];
         // SAFETY: fds has room for the two descriptors pipe2 returns.
         if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
@@ -55,6 +56,7 @@ impl Control {
         let (wake_read, wake_write) =
             unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
         Ok(Self {
+            instance_id,
             schedule: Mutex::new(Schedule::default()),
             wake_read,
             wake_write,
@@ -85,6 +87,11 @@ impl Control {
     /// False once the peripherals thread has exited, cleanly or by a panic.
     pub fn is_alive(&self) -> bool {
         self.schedule().alive
+    }
+
+    /// The `instance_id` of the catalog this thread publishes.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// Why the catalog file is behind the catalog, while writes fail.
@@ -153,7 +160,8 @@ impl PeripheralsHandle {
 
 /// Publish a `starting` catalog, then run the event loop on its own thread.
 pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<PeripheralsHandle> {
-    let control = Arc::new(Control::new().context("create peripherals wake pipe")?);
+    let control =
+        Arc::new(Control::new(config.instance_id.clone()).context("create peripherals wake pipe")?);
     let mut catalog = Catalog::new(config.instance_id.clone(), DEFAULT_CHANGE_CAPACITY);
     let scanner = Scanner::new(
         providers,
