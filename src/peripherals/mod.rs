@@ -5,6 +5,7 @@
 
 pub mod camera;
 pub mod cli;
+mod mipi;
 mod sysutil;
 mod uevent;
 mod v4l2;
@@ -108,7 +109,10 @@ pub trait Provider: Send {
 
 /// Every built-in provider. Add a device type's provider here.
 pub fn builtin_providers() -> Vec<Box<dyn Provider>> {
-    vec![Box::new(v4l2::V4l2Provider::new())]
+    vec![
+        Box::new(mipi::MipiProvider::new()),
+        Box::new(v4l2::V4l2Provider::new()),
+    ]
 }
 
 #[cfg(test)]

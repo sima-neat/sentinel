@@ -20,6 +20,8 @@ pub struct Camera {
 pub enum Source {
     /// A USB Video Class camera.
     V4l2(UsbCamera),
+    /// A MIPI CSI-2 sensor behind the Modalix ISP.
+    Mipi(MipiCamera),
 }
 
 /// Whether the device is free. Discovery never opens a stream, so a camera's
@@ -56,6 +58,9 @@ pub struct Mode {
     /// Every interval the device advertises, per probed size.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frame_intervals: Vec<SizeIntervals>,
+    /// MIPI: `true` for an ISP output size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isp_output: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,7 +91,7 @@ pub struct SizeIntervals {
 
 /// A frame interval (seconds per frame), as `VIDIOC_ENUM_FRAMEINTERVALS`
 /// reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Interval {
     Discrete(Fraction),
@@ -102,7 +107,7 @@ pub enum Interval {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Fraction {
     pub numerator: u32,
     pub denominator: u32,
@@ -139,12 +144,62 @@ pub struct UsbIdentity {
     pub speed: Option<String>,
 }
 
+/// Routing and topology of a MIPI CSI-2 sensor. `id` is derived from
+/// `camera_name`; paths are routing only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MipiCamera {
+    /// The sensor's media-controller entity name, e.g. `imx477 5-001a`, as
+    /// `CameraInput` accepts it.
+    pub camera_name: String,
+    /// `/dev/mediaN`.
+    pub media_device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_info: Option<String>,
+    pub isp: Isp,
+    /// The CSI-2 receiver entity the sensor's source pad links to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csi_receiver: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor_timing: Option<SensorTiming>,
+    /// The sensor's frame-rate limit at its active format, to two decimals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fps: Option<f64>,
+}
+
+/// The Modalix ISP output nodes the camera's modes come from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Isp {
+    Available {
+        device_path: String,
+        device_paths: Vec<String>,
+    },
+    /// The camera then has no modes.
+    Unavailable { reason: String },
+}
+
+/// The sensor's active source-pad format and the controls that bound its
+/// frame rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensorTiming {
+    /// Pixels per second.
+    pub pixel_rate: u64,
+    pub hblank_min: u32,
+    pub vblank_min: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 impl Camera {
     /// One line for `simaai-sentinel peripherals`.
     pub fn describe(&self) -> String {
-        let name = self.model.as_deref().unwrap_or("-");
+        let name = match self.source {
+            Source::Mipi(ref mipi) => &mipi.camera_name,
+            _ => self.model.as_deref().unwrap_or("-"),
+        };
         let backend = match self.source {
             Source::V4l2(_) => "v4l2",
+            Source::Mipi(_) => "mipi",
         };
         format!("{name}  ({backend}, {} modes)", self.modes.len())
     }

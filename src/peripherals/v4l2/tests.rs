@@ -94,9 +94,7 @@ fn usb(device: &Peripheral) -> (&Camera, &UsbCamera) {
     let Peripheral::Camera(camera) = device else {
         panic!("not a camera: {device:?}");
     };
-    #[allow(irrefutable_let_patterns)] // other camera backends are separate variants
-    let Source::V4l2(ref source) = camera.source
-    else {
+    let Source::V4l2(ref source) = camera.source else {
         panic!("not a USB camera: {device:?}");
     };
     (camera, source)
