@@ -181,7 +181,15 @@ fn wait_for_scan(api_socket: &Path, instance: &str, target: u64) -> Result<Catal
 /// field, so the renderer's own newlines stay.
 fn printable(text: &str) -> String {
     text.chars()
-        .map(|ch| if ch.is_control() { '?' } else { ch })
+        .map(|ch| {
+            let mut escaped = ch.escape_debug();
+            let prints_as_itself = escaped.next() == Some(ch) && escaped.next().is_none();
+            if (!ch.is_ascii() && !prints_as_itself) || ch.is_control() {
+                '?'
+            } else {
+                ch
+            }
+        })
         .collect()
 }
 
@@ -291,7 +299,8 @@ mod tests {
         assert_eq!(text(&catalog), format!("{empty}  No peripherals found.\n"));
         let modes = json!([{"supported": true}, {"supported": false}]);
         let imx477 = json!({"camera_name": "imx477 5-001a", "model": "imx477", "modes": modes});
-        let evil = json!({"model": "evil\u{1b}]0;owned\u{7}cam\n  ! forged row"});
+        let evil =
+            json!({"model": "evil\u{1b}]0;owned\u{7}cam\n  ! forged row\u{202e}rtl\u{2066}"});
         let devices = vec![record("p", "a", imx477), record("p\n", "b\nc", evil)];
         let issue = json!({"provider": "p", "code": "io.open", "reason": "gone\u{1b}[2J\n",
                            "retained_last_good": true});
@@ -304,7 +313,7 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
 
   TYPE     ID                                   PROVIDER                   NAME / MODES
   camera   a                                    p                          imx477 5-001a  (2 modes, 1 supported)
-  camera   b?c                                  p?                         evil?]0;owned?cam?  ! forged row
+  camera   b?c                                  p?                         evil?]0;owned?cam?  ! forged row?rtl?
   ! p io.open: gone?[2J?
   ! peripherals.monitor_failed: events?stopped
 ";
