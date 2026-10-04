@@ -310,6 +310,8 @@ struct CatalogHeader {
     stale: bool,
     revision: u64,
     scan_sequence: u64,
+    last_success_at: Option<String>,
+    last_attempt_at: Option<String>,
     devices: Vec<IgnoredAny>,
     issues: Vec<IgnoredAny>,
 }
@@ -352,6 +354,8 @@ fn peripheral_catalog(
                     "instance_id": header.instance_id,
                     "revision": header.revision,
                     "scan_sequence": header.scan_sequence,
+                    "last_success_at": header.last_success_at,
+                    "last_attempt_at": header.last_attempt_at,
                     "unchanged": true,
                 }),
             ));
@@ -598,7 +602,10 @@ mod tests {
         let mut catalog = crate::peripherals::catalog::Catalog::new("instance-a", 8);
         let camera = crate::peripherals::scan::testing::record("p", "camera:x", json!({}));
         catalog.apply_success(vec![camera], vec![]).unwrap();
-        crate::peripherals::service::publish(&catalog_path, &catalog.document()).unwrap();
+        let mut document = catalog.document();
+        document.last_success_at = Some("2026-10-04T13:45:00.000Z".into());
+        document.last_attempt_at = Some("2026-10-04T13:45:05.000Z".into());
+        crate::peripherals::service::publish(&catalog_path, &document).unwrap();
         let (socket, stopped) = (root.join("api.sock"), Arc::new(AtomicBool::new(false)));
         let peripherals = Some(PeripheralsApi {
             catalog_path: catalog_path.clone(),
@@ -616,6 +623,8 @@ mod tests {
         assert_eq!(body.as_bytes(), fs::read(&catalog_path).unwrap());
         let current = response_json(&get("?since_revision=1&instance_id=instance-a"));
         assert_eq!(current["unchanged"], true);
+        assert_eq!(current["last_success_at"], document.last_success_at.unwrap());
+        assert_eq!(current["last_attempt_at"], document.last_attempt_at.unwrap());
         let other_instance = response_json(&get("?since_revision=1&instance_id=instance-b"));
         assert_eq!(other_instance["devices"][0]["id"], "camera:x");
         for query in ["?since_revision=x", "?since_revision=1"] {

@@ -69,9 +69,11 @@ to add one are in [Peripherals](peripherals/README.md).
 To poll cheaply, send the last `revision` and `instance_id` you saw:
 `GET /v1/peripherals?since_revision=7&instance_id=<id>`. If nothing a client
 can see has changed, the reply is
-`{"unchanged": true, "revision": 7, "scan_sequence": ..., "instance_id": ...}`;
-otherwise it is the full catalog. `since_revision` without `instance_id` is
-rejected with HTTP 400, because revisions restart with every daemon.
+`{"unchanged": true, "revision": 7, "scan_sequence": ..., "last_success_at": ...,
+"last_attempt_at": ..., "instance_id": ...}`; otherwise it is the full
+catalog. The timestamps report the latest published scan even when the revision
+did not change. `since_revision` without `instance_id` is rejected with HTTP
+400, because revisions restart with every daemon.
 
 `POST /v1/peripherals/refresh` schedules a scan and returns
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}`; the

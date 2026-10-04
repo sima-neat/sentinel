@@ -62,9 +62,11 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 저렴하게 폴링하려면 마지막으로 본 `revision`과 `instance_id`를 보냅니다:
 `GET /v1/peripherals?since_revision=7&instance_id=<id>`. 클라이언트가 볼 수 있는
 변경이 없으면 응답은
-`{"unchanged": true, "revision": 7, "scan_sequence": ..., "instance_id": ...}`이고,
-그렇지 않으면 전체 카탈로그입니다. 데몬마다 리비전이 다시 시작되므로
-`instance_id` 없는 `since_revision`은 HTTP 400으로 거부됩니다.
+`{"unchanged": true, "revision": 7, "scan_sequence": ..., "last_success_at": ...,
+"last_attempt_at": ..., "instance_id": ...}`이고, 그렇지 않으면 전체
+카탈로그입니다. 타임스탬프는 리비전이 바뀌지 않은 경우에도 마지막으로 게시된
+검색을 나타냅니다. 데몬마다 리비전이 다시 시작되므로 `instance_id` 없는
+`since_revision`은 HTTP 400으로 거부됩니다.
 
 `POST /v1/peripherals/refresh`는 검색을 예약하고
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}`을 반환합니다.

@@ -62,9 +62,11 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 低コストでポーリングするには、最後に確認した `revision` と `instance_id` を
 送ります：`GET /v1/peripherals?since_revision=7&instance_id=<id>`。クライアント
 に見える変更がなければ、応答は
-`{"unchanged": true, "revision": 7, "scan_sequence": ..., "instance_id": ...}`、
-それ以外は完全なカタログです。リビジョンはデーモンごとに再開するため、
-`instance_id` のない `since_revision` は HTTP 400 で拒否されます。
+`{"unchanged": true, "revision": 7, "scan_sequence": ..., "last_success_at": ...,
+"last_attempt_at": ..., "instance_id": ...}`、それ以外は完全なカタログです。
+タイムスタンプは、リビジョンが変更されなかった場合でも、最後に公開された
+スキャンを示します。リビジョンはデーモンごとに再開するため、`instance_id`
+のない `since_revision` は HTTP 400 で拒否されます。
 
 `POST /v1/peripherals/refresh` はスキャンを予約し、
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}` を返します。

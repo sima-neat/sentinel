@@ -63,9 +63,10 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 若要低成本輪詢，請傳送上次看到的 `revision` 和 `instance_id`：
 `GET /v1/peripherals?since_revision=7&instance_id=<id>`。如果用戶端可見的內容
 沒有變更，回應為
-`{"unchanged": true, "revision": 7, "scan_sequence": ..., "instance_id": ...}`；
-否則為完整目錄。修訂版會隨每次啟動守護程式重新開始，因此缺少
-`instance_id` 的 `since_revision` 會以 HTTP 400 拒絕。
+`{"unchanged": true, "revision": 7, "scan_sequence": ..., "last_success_at": ...,
+"last_attempt_at": ..., "instance_id": ...}`；否則為完整目錄。即使修訂版
+沒有變更，時間戳記仍會顯示最近一次發佈的掃描。修訂版會隨每次啟動守護程式
+重新開始，因此缺少 `instance_id` 的 `since_revision` 會以 HTTP 400 拒絕。
 
 `POST /v1/peripherals/refresh` 會排定掃描並傳回
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}`；當具有

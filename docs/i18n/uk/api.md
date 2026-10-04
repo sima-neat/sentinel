@@ -63,9 +63,11 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 Для дешевого опитування надішліть останні побачені `revision` та `instance_id`:
 `GET /v1/peripherals?since_revision=7&instance_id=<id>`. Якщо нічого видимого
 клієнту не змінилося, відповідь має вигляд
-`{"unchanged": true, "revision": 7, "scan_sequence": ..., "instance_id": ...}`;
-інакше повертається повний каталог. `since_revision` без `instance_id`
-відхиляється з HTTP 400, оскільки ревізії починаються спочатку з кожним демоном.
+`{"unchanged": true, "revision": 7, "scan_sequence": ..., "last_success_at": ...,
+"last_attempt_at": ..., "instance_id": ...}`; інакше повертається повний
+каталог. Часові позначки вказують на останнє опубліковане сканування, навіть
+коли ревізія не змінилася. `since_revision` без `instance_id` відхиляється з
+HTTP 400, оскільки ревізії починаються спочатку з кожним демоном.
 
 `POST /v1/peripherals/refresh` планує сканування та повертає
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}`; оновлення
