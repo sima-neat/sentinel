@@ -80,6 +80,8 @@ has stopped.
 `simaai-sentinel peripherals` prints the same result as a table; add `--json`
 for the raw document and `--refresh` to rescan first.
 
+Device records are described per type: [USB cameras](peripherals/camera.md).
+
 ## Security and concurrency
 
 The socket is local to the DevKit and is never exposed remotely by Sentinel.

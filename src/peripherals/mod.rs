@@ -3,8 +3,12 @@
 //! catalog that the API serves. Sentinel reports hardware facts only; whether
 //! an application supports a device is decided by that application.
 
+pub mod camera;
 pub mod cli;
+mod sysutil;
 mod uevent;
+mod v4l2;
+mod videodev2;
 mod worker;
 
 use chrono::{DateTime, Utc};
@@ -16,7 +20,10 @@ pub use worker::{start, Peripherals, Worker};
 /// is added as a variant together with the provider that discovers it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// Only the test build has a second, small variant to compare against.
+#[cfg_attr(test, allow(clippy::large_enum_variant))]
 pub enum Peripheral {
+    Camera(camera::Camera),
     #[cfg(test)]
     Test(tests::TestDevice),
 }
@@ -25,6 +32,7 @@ impl Peripheral {
     /// Stable identity; never an enumeration index such as `/dev/videoN`.
     pub fn id(&self) -> &str {
         match *self {
+            Peripheral::Camera(ref camera) => &camera.id,
             #[cfg(test)]
             Peripheral::Test(ref device) => &device.id,
         }
@@ -33,6 +41,7 @@ impl Peripheral {
     /// The `type` tag.
     pub fn kind(&self) -> &'static str {
         match *self {
+            Peripheral::Camera(_) => "camera",
             #[cfg(test)]
             Peripheral::Test(_) => "test",
         }
@@ -41,6 +50,7 @@ impl Peripheral {
     /// One line for `simaai-sentinel peripherals`.
     pub fn describe(&self) -> String {
         match *self {
+            Peripheral::Camera(ref camera) => camera.describe(),
             #[cfg(test)]
             Peripheral::Test(ref device) => device.id.clone(),
         }
@@ -76,6 +86,15 @@ pub struct ProviderError {
     pub reason: String,
 }
 
+impl ProviderError {
+    pub fn new(code: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
 /// A discovery backend. Providers only observe devices: they never acquire,
 /// configure, or stream from them.
 pub trait Provider: Send {
@@ -89,7 +108,7 @@ pub trait Provider: Send {
 
 /// Every built-in provider. Add a device type's provider here.
 pub fn builtin_providers() -> Vec<Box<dyn Provider>> {
-    Vec::new()
+    vec![Box::new(v4l2::V4l2Provider::new())]
 }
 
 #[cfg(test)]
