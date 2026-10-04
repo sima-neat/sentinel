@@ -120,7 +120,7 @@ impl SupportStage {
                 }
             }
         };
-        for device in devices.iter_mut().filter(|device| device.kind == "camera") {
+        for device in devices.iter_mut().filter(|device| classifies(&device.kind)) {
             classify_camera(&mut device.details, self.last_good.as_ref());
         }
         SupportStatus {
@@ -168,6 +168,12 @@ Update Sentinel: sima-cli neat install sentinel"
         );
     }
     Ok(Some(rules))
+}
+
+/// Whether the support stage classifies the modes of `kind` (cameras only),
+/// so they carry `supported` even when the list is empty.
+pub fn classifies(kind: &str) -> bool {
+    kind == "camera"
 }
 
 fn classify_camera(details: &mut Value, rules: Option<&RulesFile>) {

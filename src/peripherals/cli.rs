@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::model::CatalogDocument;
 use super::scan::validate;
-use super::support::SupportStage;
+use super::support::{classifies, SupportStage};
 use super::{builtin_providers, Settings};
 
 const CATALOG_UNAVAILABLE: &str =
@@ -221,9 +221,9 @@ fn render(document: &CatalogDocument) -> String {
                 .find_map(|key| details[*key].as_str())
                 .unwrap_or("-");
             let modes = details["modes"].as_array();
-            // Only types with support rules (cameras) carry `supported`.
-            let classified =
-                modes.is_some_and(|modes| modes.iter().any(|mode| mode.get("supported").is_some()));
+            // Types the support stage classifies show their supported count,
+            // even with no modes; the others show only the mode count.
+            let classified = classifies(kind);
             let supported = modes.map_or(0, |modes| {
                 modes
                     .iter()
@@ -288,8 +288,9 @@ mod tests {
 
     /// Device names and errors come from the hardware, so control characters,
     /// newlines included, are replaced before they reach the terminal and
-    /// cannot forge rows. Types without support rules show only their mode
-    /// count.
+    /// cannot forge rows. Cameras show their supported count even with no
+    /// modes (a MIPI camera whose ISP modes could not be enumerated); types
+    /// without support rules show only their mode count.
     #[test]
     fn renders_devices_modes_and_states_without_terminal_escapes() {
         let mut catalog = Catalog::new("i", 8);
@@ -311,10 +312,15 @@ mod tests {
         let yeti = json!({"name": "Yeti\nNano\u{1b}[2J", "modes": [{}, {}]});
         let mut microphone = record("p", "microphone:\u{7}c", yeti);
         microphone.kind = "microphone".into();
+        let imx219 = json!({"camera_name": "imx219 6-0010", "modes": []});
+        let mut silent = record("p", "microphone:d", json!({"name": "Codec", "modes": []}));
+        silent.kind = "microphone".into();
         let devices = vec![
             record("p", "a", imx477),
             record("p\n", "b\nc", evil),
+            record("p", "c", imx219),
             microphone,
+            silent,
         ];
         let issue = json!({"provider": "p", "code": "io.open", "reason": "gone\u{1b}[2J\n",
                            "retained_last_good": true});
@@ -328,7 +334,9 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
   TYPE       ID                                   PROVIDER                   NAME / MODES
   camera     a                                    p                          imx477 5-001a  (2 modes, 1 supported)
   camera     b?c                                  p?                         evil?]0;owned?cam?  ! forged row?rtl?
+  camera     c                                    p                          imx219 6-0010  (0 modes, 0 supported)
   microphone microphone:?c                        p                          Yeti?Nano?[2J  (2 modes)
+  microphone microphone:d                         p                          Codec  (0 modes)
   ! p io.open: gone?[2J?
   ! peripherals.monitor_failed: events?stopped
 ";
