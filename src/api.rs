@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -337,6 +337,17 @@ fn peripheral_catalog(
             peripherals.catalog_path.display()
         ))
     })?;
+    let header: CatalogHeader = serde_json::from_slice(&body)
+        .map_err(|error| unavailable(format!("peripheral catalog unreadable: {error}")))?;
+    if peripherals
+        .control
+        .as_ref()
+        .is_some_and(|control| header.instance_id != control.instance_id())
+    {
+        return Err(unavailable(
+            "peripheral catalog belongs to another Sentinel instance",
+        ));
+    }
     if let Some(since) = since {
         // Revisions restart with every daemon, so a revision alone cannot
         // prove the client is current.
@@ -344,8 +355,6 @@ fn peripheral_catalog(
             .into_iter()
             .next()
             .ok_or_else(|| bad_request("since_revision requires instance_id"))?;
-        let header: CatalogHeader = serde_json::from_slice(&body)
-            .map_err(|error| unavailable(format!("peripheral catalog unreadable: {error}")))?;
         if instance == header.instance_id && since == header.revision && header.ready {
             return Ok(response(
                 200,
@@ -372,10 +381,15 @@ fn read_peripheral_catalog(path: &Path) -> io::Result<Vec<u8>> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    // SAFETY: geteuid has no arguments or preconditions.
+    let daemon_uid = unsafe { libc::geteuid() };
+    let owned_by_daemon = metadata.uid() == daemon_uid;
+    let safely_writable = metadata.mode() & 0o022 == 0;
+    if !metadata.is_file() || !owned_by_daemon || !safely_writable {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "peripheral catalog is not a regular file",
+            io::ErrorKind::PermissionDenied,
+            "peripheral catalog is not a daemon-owned, safely writable regular file",
         ));
     }
     let mut body = Vec::new();
@@ -386,6 +400,13 @@ fn read_peripheral_catalog(path: &Path) -> io::Result<Vec<u8>> {
 fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
     let body = read_peripheral_catalog(&peripherals.catalog_path).ok()?;
     let header: CatalogHeader = serde_json::from_slice(&body).ok()?;
+    if peripherals
+        .control
+        .as_ref()
+        .is_some_and(|control| header.instance_id != control.instance_id())
+    {
+        return None;
+    }
     Some(json!({
         "instance_id": header.instance_id,
         "state": header.state,
@@ -640,7 +661,8 @@ mod tests {
 
         let full = get("");
         let body = full.split_once("\r\n\r\n").unwrap().1;
-        assert_eq!(body.as_bytes(), fs::read(&catalog_path).unwrap());
+        let published = fs::read(&catalog_path).unwrap();
+        assert_eq!(body.as_bytes(), published);
         let current = response_json(&get("?since_revision=1&instance_id=instance-a"));
         assert_eq!(current["unchanged"], true);
         assert_eq!(
@@ -667,6 +689,12 @@ mod tests {
         let refused = get("");
         assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
         assert!(!refused.contains("must not be served"), "{refused}");
+
+        fs::remove_file(&catalog_path).unwrap();
+        fs::write(&catalog_path, &published).unwrap();
+        fs::set_permissions(&catalog_path, fs::Permissions::from_mode(0o666)).unwrap();
+        let refused = get("");
+        assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
 
         stopped.store(true, Ordering::Relaxed);
         handle.join().unwrap();
@@ -696,7 +724,7 @@ mod tests {
         let provider = Fake("p", move || Ok(vec![camera.clone()]));
         let thread = service::spawn(config, vec![Box::new(provider)]).unwrap();
         let peripherals = Some(PeripheralsApi {
-            catalog_path,
+            catalog_path: catalog_path.clone(),
             control: Some(thread.control()),
         });
         let (socket, stopped) = (root.join("api.sock"), Arc::new(AtomicBool::new(false)));
@@ -708,6 +736,15 @@ mod tests {
         assert!(request(&socket, get).starts_with("HTTP/1.1 200"));
         let summary = &response_json(&request(&socket, health))["peripherals"];
         assert_eq!(summary["instance_id"], "instance-a");
+
+        let mut forged = service::read(&catalog_path).unwrap();
+        forged.instance_id = "instance-b".into();
+        service::publish(&catalog_path, &forged).unwrap();
+        assert!(request(&socket, get).starts_with("HTTP/1.1 503"));
+        assert!(response_json(&request(&socket, health))["peripherals"].is_null());
+        forged.instance_id = "instance-a".into();
+        service::publish(&catalog_path, &forged).unwrap();
+        assert!(request(&socket, get).starts_with("HTTP/1.1 200"));
 
         thread.stop();
         let stopped_text = "peripheral discovery has stopped; see `journalctl -u simaai-sentinel`";

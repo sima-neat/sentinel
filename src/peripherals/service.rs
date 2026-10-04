@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -470,6 +471,7 @@ fn publish_to(path: &Path, document: &CatalogDocument, temporary: &Path) -> Resu
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o644)
             .open(temporary)
             .with_context(|| format!("create {}", temporary.display()))?;
         serde_json::to_writer(&mut file, document).context("serialize peripheral catalog")?;
