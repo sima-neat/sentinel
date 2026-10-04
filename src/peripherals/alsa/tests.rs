@@ -630,6 +630,34 @@ fn reused_card_index_discards_stale_global_metadata() {
     assert!(details["identity"].get("card_driver").is_none());
 }
 
+/// Equal ALSA IDs do not prove that an index still names the listed card.
+/// Re-reading a changed global entry invalidates its optional metadata.
+#[test]
+fn reused_card_index_with_equal_id_discards_stale_global_metadata() {
+    let mut board = Board::new();
+    let port = "1-1.2";
+    board.usb_mic(0, port, "Device", MONO_STREAM);
+    let mut listed = parse_cards(&board.cards, &BTreeSet::from([0]));
+    let listed = listed.remove(&0).unwrap();
+    board.write(
+        "proc/asound/cards",
+        " 0 [Device         ]: Replacement - Replacement microphone\n",
+    );
+
+    let paths = ["proc/asound", "sys", "dev"].map(|path| board.path(path));
+    let provider = AlsaProvider::with_roots(&paths[0], &paths[1], &paths[2]);
+    let sys = fs::canonicalize(&paths[1]).unwrap();
+    let records = provider
+        .card_records(&sys, 0, listed, &paths[0].join("card0"))
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let details = &records[0].details;
+    assert_eq!(details["name"], "USB Audio");
+    assert_eq!(details["identity"]["card_id"], "Device");
+    assert!(details["identity"].get("card_name").is_none());
+    assert!(details["identity"].get("card_driver").is_none());
+}
+
 /// A one- or two-digit card id gets no selector: ALSA would read `CARD=7` as
 /// card index 7, not the card whose id is `7`. Longer numeric ids and ids
 /// with a letter are looked up by id and keep their selector.
@@ -817,6 +845,36 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
     assert_eq!(error.code, "io.open");
     let incomplete = "incomplete vendor/product attributes";
     assert!(error.reason.contains(incomplete), "{}", error.reason);
+}
+
+/// A reused card index can point to a new parent while the old parent remains
+/// live. The final link-target check rejects the mixed snapshot.
+#[test]
+fn card_link_retargeted_after_identity_is_skipped() {
+    fn retarget(path: &Path) -> Option<String> {
+        if path.ends_with("1-3.2/manufacturer") {
+            let sys = path
+                .ancestors()
+                .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "sys"))
+                .unwrap();
+            let replacement = sys.join("devices/platform/replacement-sound");
+            fs::create_dir_all(&replacement).unwrap();
+            let link = sys.join("class/sound/card2/device");
+            fs::remove_file(&link).unwrap();
+            symlink(replacement, link).unwrap();
+        }
+        read_text_file(path)
+    }
+
+    let mut board = Board::new();
+    board.usb_mic(2, "1-3.2", "Device", MONO_STREAM);
+    let paths = ["proc/asound", "sys", "dev"].map(|path| board.path(path));
+    let mut provider = AlsaProvider::with_roots(&paths[0], &paths[1], &paths[2]);
+    provider.read_usb_attribute = retarget;
+    assert!(on_board(board.root.path(), provider.discover())
+        .unwrap()
+        .is_empty());
+    assert!(board.path(&format!("sys/{XHCI}/1-3.2")).exists());
 }
 
 /// A kernel without ALSA, or without sound cards, has no microphones. A

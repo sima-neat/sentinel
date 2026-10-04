@@ -122,6 +122,16 @@ fn parse_cards(text: &str, registered: &BTreeSet<u32>) -> BTreeMap<u32, Card> {
     cards
 }
 
+/// Whether the optional global metadata for one card is still the same
+/// snapshot. Card indices may be reused while discovery is in progress.
+fn card_metadata_is_current(path: &Path, index: u32, expected: &Card) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    parse_cards(&text, &BTreeSet::from([index])).get(&index) == Some(expected)
+}
+
 /// `key: value` lines, as in `pcmMc/info`; a repeated key keeps its last value.
 fn parse_key_values(text: &str) -> BTreeMap<String, String> {
     let pair = |line: &str| {
@@ -512,14 +522,8 @@ impl AlsaProvider {
         mut card: Card,
         directory: &Path,
     ) -> Result<Vec<Record>, ProviderError> {
+        let listed_card = card.clone();
         if let Some(id) = read_text_file(&directory.join("id")).filter(|id| !id.is_empty()) {
-            if card.id != id {
-                // The card index may have been reused since the global list
-                // was read. Its name and driver belong to the listed ID, not
-                // to this newly registered card.
-                card.name.clear();
-                card.driver.clear();
-            }
             card.id = id;
         }
         let entry = self.sys_root.join(format!("class/sound/card{index}"));
@@ -582,6 +586,15 @@ impl AlsaProvider {
         let sound_class = self.sys_root.join("class/sound");
         let prefix = format!("pcmC{index}D");
         for (pcm, pcm_entry) in numbered(&sound_class, &prefix, "c")? {
+            let metadata_current = listed_card.id == card.id
+                && (!listed_card.name.is_empty() || !listed_card.driver.is_empty())
+                && card_metadata_is_current(&self.asound.join("cards"), index, &listed_card);
+            let card_name = metadata_current
+                .then_some(card.name.as_str())
+                .unwrap_or_default();
+            let card_driver = metadata_current
+                .then_some(card.driver.as_str())
+                .unwrap_or_default();
             let mut issues = Vec::new();
             if device.is_none() {
                 issue(
@@ -603,10 +616,10 @@ impl AlsaProvider {
             }
             let info = parse_key_values(info.as_deref().unwrap_or_default());
             let pcm_name = info.get("name").cloned().unwrap_or_default();
-            let name = [&card.name, &pcm_name, &card.id]
+            let name = [card_name, &pcm_name, &card.id]
                 .into_iter()
                 .find(|name| !name.is_empty())
-                .cloned()
+                .map(|name| name.to_string())
                 .unwrap_or_else(|| format!("ALSA capture PCM {pcm}"));
 
             let mut capture_target = json!({"card_id": card.id, "device": pcm});
@@ -644,10 +657,10 @@ impl AlsaProvider {
                 "pcm_node": pcm_node.to_string_lossy(),
             });
             let optional = [
-                ("card_id", &card.id),
-                ("card_name", &card.name),
-                ("card_driver", &card.driver),
-                ("pcm_name", &pcm_name),
+                ("card_id", card.id.as_str()),
+                ("card_name", card_name),
+                ("card_driver", card_driver),
+                ("pcm_name", pcm_name.as_str()),
             ];
             for (key, value) in optional {
                 if !value.is_empty() {
@@ -696,7 +709,12 @@ impl AlsaProvider {
             // was collected can otherwise leave a plausible stale record.
             // Drop all records for this card when either the card device or
             // this capture PCM vanished during the scan.
-            if device.as_ref().is_some_and(|device| vanished(device)) || vanished(&pcm_entry) {
+            let same_card = match &device {
+                Some(expected) => fs::canonicalize(&link)
+                    .is_ok_and(|current| current.as_path() == expected.as_path()),
+                None => parentless(sys, &entry, &link),
+            };
+            if !same_card || vanished(&pcm_entry) {
                 return Ok(Vec::new());
             }
             records.push(Record {
