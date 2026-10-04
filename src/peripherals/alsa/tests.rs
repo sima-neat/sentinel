@@ -619,8 +619,9 @@ fn card_without_a_parent_device_is_listed_beside_usb_microphones() {
     assert_eq!(keys, expected);
 }
 
-/// A microphone unplugged between its `idVendor` and `idProduct` reads is
-/// skipped; a present device with only `idVendor` still fails the scan.
+/// A microphone unplugged before or between its `idVendor` and `idProduct`
+/// reads is skipped; a present device with only `idVendor` still fails the
+/// scan.
 #[test]
 fn microphone_unplugged_between_identity_reads_is_skipped() {
     /// Removes the USB device at port 1-3.2 when its `idProduct` is read
@@ -631,16 +632,24 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
         }
         read_text_file(path)
     }
-    let scan = |board: &Board| {
+    /// Removes the whole USB device before the first identity attribute can
+    /// be read, so identity has no partial pair to report as an error.
+    fn unplug_before_identity(path: &Path) -> Option<String> {
+        if path.ends_with("1-3.2/idVendor") && path.exists() {
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+        read_text_file(path)
+    }
+    let scan = |board: &Board, read: AttributeReader| {
         let paths = ["proc/asound", "sys", "dev"].map(|path| board.path(path));
         let mut provider = AlsaProvider::with_roots(&paths[0], &paths[1], &paths[2]);
-        provider.read_usb_attribute = unplug;
+        provider.read_usb_attribute = read;
         on_board(board.root.path(), provider.discover())
     };
     let mut board = Board::new();
     board.usb_mic(1, "1-3.1", "Other", MONO_STREAM);
     board.usb_mic(2, "1-3.2", "Nano", MONO_STREAM);
-    let records = scan(&board).unwrap();
+    let records = scan(&board, unplug).unwrap();
     let ids = Vec::from_iter(
         records
             .iter()
@@ -654,8 +663,16 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
 
     let mut board = Board::new();
     board.usb_mic(2, "1-3.2", "Nano", MONO_STREAM);
+    assert!(scan(&board, unplug_before_identity).unwrap().is_empty());
+    assert!(
+        !board.path(&format!("sys/{XHCI}/1-3.2")).exists(),
+        "no race"
+    );
+
+    let mut board = Board::new();
+    board.usb_mic(2, "1-3.2", "Nano", MONO_STREAM);
     fs::remove_file(board.path(&format!("sys/{XHCI}/1-3.2/idProduct"))).unwrap();
-    let error = scan(&board).unwrap_err();
+    let error = scan(&board, unplug).unwrap_err();
     assert_eq!(error.code, "io.open");
     let incomplete = "incomplete vendor/product attributes";
     assert!(error.reason.contains(incomplete), "{}", error.reason);

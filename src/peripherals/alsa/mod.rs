@@ -496,6 +496,13 @@ impl AlsaProvider {
                     Err(_) if vanished(device) => return Ok(Vec::new()),
                     usb => usb?,
                 };
+                // If the whole device disappeared before the first USB
+                // attribute read, identity returns `None` rather than an
+                // incomplete-pair error. Do not misclassify that stale path
+                // as a platform microphone.
+                if usb.is_none() && vanished(device) {
+                    return Ok(Vec::new());
+                }
                 (format!("sysfs:{}", topology.to_string_lossy()), usb)
             }
             // No device path to key on: the card id is the only attribute
