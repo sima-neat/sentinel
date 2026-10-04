@@ -620,10 +620,7 @@ fn imx477_sensor_timing_sets_max_fps_and_rates() {
         .intervals
         .push(((fourcc(b"NV12"), 1920, 1080), discrete_interval(1, 30)));
     let fallback = nv12_isp(&[SIZES[0]]);
-    let details = imx477(
-        [isp(constrained), isp(fallback)],
-        imx477_timed(|_| ()),
-    );
+    let details = imx477([isp(constrained), isp(fallback)], imx477_timed(|_| ()));
     let expected = json!([mode("NV12", SIZES[0], (30, 1), "isp")]);
     assert_eq!(details["modes"], expected);
 }
