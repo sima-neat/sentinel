@@ -20,6 +20,8 @@ pub const DEBOUNCE: Duration = Duration::from_millis(250);
 pub const NICE: libc::c_int = 10;
 /// A steady stream of events cannot postpone a scan by more than this.
 pub const MAX_EVENT_WAIT: Duration = Duration::from_secs(1);
+/// How often a failed catalog write is retried.
+pub const PUBLISH_RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct Schedule {
@@ -30,6 +32,9 @@ struct Schedule {
     /// False once the thread has exited, so refreshes are refused instead of
     /// promising a scan that will never run.
     alive: bool,
+    /// Why the last catalog write failed, until one succeeds. The file is
+    /// behind meanwhile, so it must not be served as current.
+    publish_error: Option<String>,
 }
 
 /// Shared between the peripherals thread and its callers (API, daemon).
@@ -80,6 +85,11 @@ impl Control {
     /// False once the peripherals thread has exited, cleanly or by a panic.
     pub fn is_alive(&self) -> bool {
         self.schedule().alive
+    }
+
+    /// Why the catalog file is behind the catalog, while writes fail.
+    pub fn publish_error(&self) -> Option<String> {
+        self.schedule().publish_error.clone()
     }
 
     fn request_stop(&self) {
@@ -225,9 +235,14 @@ fn run(
     // Refresh requests within one debounce window of the last scan share the
     // next scan, so a client that spams refresh cannot keep the thread busy.
     let mut last_scan_end: Option<Instant> = None;
+    // While the catalog cannot be written, when to try again.
+    let mut retry_publish: Option<Instant> = None;
     loop {
         // A pending scan re-reads the rules, so it supersedes a reclassify.
-        let next = due.or(reclassify_due);
+        let next = [due.or(reclassify_due), retry_publish]
+            .into_iter()
+            .flatten()
+            .min();
         let timeout = next.map_or(-1, |at| {
             at.saturating_duration_since(Instant::now())
                 .as_millis()
@@ -308,7 +323,7 @@ fn run(
                             &format!("hot-plug events stopped: {error}"),
                         );
                         uevents = None;
-                        let _ = publish(&config.catalog_path, &catalog.document());
+                        retry_publish = write(&control, &config.catalog_path, &catalog);
                     }
                 }
             }
@@ -331,9 +346,7 @@ fn run(
             if let Err(error) = scanner.reclassify(&mut catalog) {
                 eprintln!("Sentinel peripheral reclassification rejected: {error}");
             }
-            if let Err(error) = publish(&config.catalog_path, &catalog.document()) {
-                eprintln!("Sentinel peripheral catalog write failed: {error:#}");
-            }
+            retry_publish = write(&control, &config.catalog_path, &catalog);
         }
         if due.is_some_and(|at| Instant::now() >= at) {
             due = None;
@@ -350,12 +363,32 @@ fn run(
                 schedule.scanning = false;
                 schedule.completed = catalog.scan_sequence();
             }
-            if let Err(error) = publish(&config.catalog_path, &catalog.document()) {
-                eprintln!("Sentinel peripheral catalog write failed: {error:#}");
-            }
+            retry_publish = write(&control, &config.catalog_path, &catalog);
             last_scan_end = Some(Instant::now());
         }
+        if retry_publish.is_some_and(|at| Instant::now() >= at) {
+            retry_publish = write(&control, &config.catalog_path, &catalog);
+        }
     }
+}
+
+/// Publish the catalog and record the outcome in `control`, so the API
+/// refuses the stale file while writes fail (for example, `/run` is full)
+/// and serves it again once one succeeds. Returns when to retry, if it failed.
+fn write(control: &Control, path: &Path, catalog: &Catalog) -> Option<Instant> {
+    let error = publish(path, &catalog.document())
+        .err()
+        .map(|error| format!("{error:#}"));
+    let previous = std::mem::replace(&mut control.schedule().publish_error, error.clone());
+    match &error {
+        // Retries repeat the same error every second; log each new one.
+        Some(error) if previous.as_ref() != Some(error) => {
+            eprintln!("Sentinel peripheral catalog write failed: {error}")
+        }
+        None if previous.is_some() => eprintln!("Sentinel peripheral catalog written again"),
+        _ => {}
+    }
+    error.map(|_| Instant::now() + PUBLISH_RETRY)
 }
 
 /// When to scan after a hot-plug event: a trailing debounce, capped at

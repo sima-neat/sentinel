@@ -216,8 +216,10 @@ fn route(
             }))
         }
         ("POST", "/v1/peripherals/refresh") => {
+            let peripherals = serving(peripherals)?;
             let control = peripherals
-                .and_then(|peripherals| peripherals.control.as_ref())
+                .control
+                .as_ref()
                 .ok_or_else(peripherals_disabled)?;
             let target = control.request_refresh().ok_or_else(peripherals_stopped)?;
             Ok(json!({"accepted": true, "target_scan_sequence": target}))
@@ -369,13 +371,23 @@ fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
 }
 
 /// The peripherals API while its catalog is current. After the discovery
-/// thread exits (a panic included), the file keeps its last contents, so it
-/// is refused like a refresh instead of being served as live.
+/// thread exits (a panic included), or while the catalog cannot be written,
+/// the file keeps its last contents, so it is refused instead of being served
+/// as live. Writes are retried, and the first that succeeds lifts the refusal.
 fn serving(peripherals: Option<&PeripheralsApi>) -> std::result::Result<&PeripheralsApi, ApiError> {
     let peripherals = peripherals.ok_or_else(peripherals_disabled)?;
-    match &peripherals.control {
-        Some(control) if !control.is_alive() => Err(peripherals_stopped()),
-        _ => Ok(peripherals),
+    let Some(control) = &peripherals.control else {
+        return Ok(peripherals);
+    };
+    if !control.is_alive() {
+        return Err(peripherals_stopped());
+    }
+    match control.publish_error() {
+        Some(error) => Err(unavailable(format!(
+            "peripheral catalog could not be written: {error}; \
+see `journalctl -u simaai-sentinel`"
+        ))),
+        None => Ok(peripherals),
     }
 }
 
@@ -640,18 +652,7 @@ mod tests {
         let (socket, stopped) = (root.join("api.sock"), Arc::new(AtomicBool::new(false)));
         let (cache, runs) = (root.join("cache.json"), root.join("runs"));
         let handle = spawn(&socket, &cache, &runs, peripherals, stopped.clone()).unwrap();
-        let payload = CachePayload {
-            schema: 1,
-            version: "test".into(),
-            updated_at: Utc::now(),
-            metrics: Vec::new(),
-            latest: None,
-            samples: Vec::new(),
-            processes: Vec::new(),
-            power: None,
-            errors: Vec::new(),
-        };
-        cache::write_cache(cache.to_str().unwrap(), &payload).unwrap();
+        write_empty_cache(&cache);
         let get = "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let health = "GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n";
         assert!(request(&socket, get).starts_with("HTTP/1.1 200"));
@@ -676,6 +677,101 @@ mod tests {
         stopped.store(true, Ordering::Relaxed);
         handle.join().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// While the catalog cannot be written (a directory blocks the temporary
+    /// file here, as a full or read-only `/run` would on a board), the file
+    /// falls behind, so the catalog, refresh and health refuse it with the
+    /// write error. The thread retries, and the first write that succeeds
+    /// serves the catalog, with the refreshed scan, again.
+    #[test]
+    fn catalog_is_refused_while_it_cannot_be_written() {
+        use crate::peripherals::scan::testing::{record, Fake};
+        use crate::peripherals::service;
+        let root = std::env::temp_dir().join(format!("sentinel-api-w-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let catalog_path = root.join("peripherals.json");
+        let config = service::Config {
+            catalog_path: catalog_path.clone(),
+            support_rules_path: root.join("neat-core.json"),
+            instance_id: "instance-a".into(),
+            debounce: Duration::from_millis(10),
+            listen_for_uevents: false,
+        };
+        let camera = record("p", "camera:x", json!({}));
+        let provider = Fake("p", move || Ok(vec![camera.clone()]));
+        let thread = service::spawn(config, vec![Box::new(provider)]).unwrap();
+        let peripherals = Some(PeripheralsApi {
+            catalog_path: catalog_path.clone(),
+            control: Some(thread.control()),
+        });
+        let (socket, stopped) = (root.join("api.sock"), Arc::new(AtomicBool::new(false)));
+        let (cache, runs) = (root.join("cache.json"), root.join("runs"));
+        let handle = spawn(&socket, &cache, &runs, peripherals, stopped.clone()).unwrap();
+        write_empty_cache(&cache);
+        let get = "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let health = "GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let refresh = "POST /v1/peripherals/refresh HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        let get_until = |done: &dyn Fn(&str) -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let reply = request(&socket, get);
+                if done(&reply) {
+                    return reply;
+                }
+                assert!(std::time::Instant::now() < deadline, "last reply: {reply}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        get_until(&|reply| reply.contains(r#""scan_sequence":1"#));
+
+        let blocker = root.join(".peripherals.json.tmp");
+        fs::create_dir(&blocker).unwrap();
+        let accepted = response_json(&request(&socket, refresh));
+        assert_eq!(accepted["target_scan_sequence"], 2);
+        let refused = get_until(&|reply| reply.starts_with("HTTP/1.1 503"));
+        let error = response_json(&refused)["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let cause = format!("could not be written: create {}: ", blocker.display());
+        assert!(
+            error.starts_with(&format!("peripheral catalog {cause}")),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("; see `journalctl -u simaai-sentinel`"),
+            "{error}"
+        );
+        assert_eq!(service::read(&catalog_path).unwrap().scan_sequence, 1);
+        assert_eq!(response_json(&request(&socket, refresh))["error"], error);
+        assert!(response_json(&request(&socket, health))["peripherals"].is_null());
+
+        fs::remove_dir(&blocker).unwrap();
+        let served = get_until(&|reply| reply.starts_with("HTTP/1.1 200"));
+        assert_eq!(response_json(&served)["scan_sequence"], 2);
+        let summary = &response_json(&request(&socket, health))["peripherals"];
+        assert_eq!(summary["scan_sequence"], 2);
+
+        thread.stop();
+        stopped.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_empty_cache(cache: &Path) {
+        let payload = CachePayload {
+            schema: 1,
+            version: "test".into(),
+            updated_at: Utc::now(),
+            metrics: Vec::new(),
+            latest: None,
+            samples: Vec::new(),
+            processes: Vec::new(),
+            power: None,
+            errors: Vec::new(),
+        };
+        cache::write_cache(cache.to_str().unwrap(), &payload).unwrap();
     }
 
     fn request(socket_path: &Path, request: &str) -> String {

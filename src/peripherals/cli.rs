@@ -44,13 +44,13 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
             .map(|document| document.instance_id)
             .context(CATALOG_UNAVAILABLE)?;
         let target = request_refresh(api_socket)?;
-        wait_for_scan(catalog_path, &instance, target)?;
+        wait_for_scan(api_socket, catalog_path, &instance, target)?;
     }
     let document = read(catalog_path).context(CATALOG_UNAVAILABLE)?;
     if !daemon_serves_catalog(api_socket, &document.instance_id) {
         eprintln!(
-            "Warning: the Sentinel daemon is not running, so this catalog may be out of date; \
-check `systemctl status simaai-sentinel`."
+            "Warning: no running Sentinel daemon is serving this catalog, so it may be out of \
+date; check `systemctl status simaai-sentinel`."
         );
     }
     if json {
@@ -149,9 +149,15 @@ fn request_refresh(api_socket: &Path) -> Result<u64> {
     })
 }
 
-fn wait_for_scan(catalog_path: &Path, instance: &str, target: u64) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline {
+fn wait_for_scan(
+    api_socket: &Path,
+    catalog_path: &Path,
+    instance: &str,
+    target: u64,
+) -> Result<()> {
+    let start = Instant::now();
+    let (mut revision, mut probed) = (0, start);
+    loop {
         if let Ok(document) = read(catalog_path) {
             if document.instance_id != instance {
                 bail!("Sentinel restarted during the refresh; run the command again");
@@ -159,10 +165,37 @@ fn wait_for_scan(catalog_path: &Path, instance: &str, target: u64) -> Result<()>
             if document.scan_sequence >= target {
                 return Ok(());
             }
+            revision = document.revision;
+        }
+        // While the daemon cannot write the file, it stops advancing; the
+        // daemon refuses its catalog and says why.
+        if probed.elapsed() >= Duration::from_secs(1) {
+            probed = Instant::now();
+            if let Some(reason) = catalog_refusal(api_socket, instance, revision) {
+                bail!("refresh did not complete: {reason}");
+            }
+        }
+        if start.elapsed() >= Duration::from_secs(15) {
+            bail!("refresh did not complete within 15 seconds");
         }
         thread::sleep(Duration::from_millis(100));
     }
-    bail!("refresh did not complete within 15 seconds")
+}
+
+/// The daemon's reason for refusing its catalog (HTTP 503), if it does. With
+/// the revision already read, a current catalog costs only a short reply.
+fn catalog_refusal(api_socket: &Path, instance: &str, revision: u64) -> Option<String> {
+    let request = format!(
+        "GET /v1/peripherals?since_revision={revision}&instance_id={instance} HTTP/1.1\r\n\
+Host: localhost\r\n\r\n"
+    );
+    let response = exchange(api_socket, request.as_bytes()).ok()?;
+    let (head, body) = response.split_once("\r\n\r\n")?;
+    if !head.starts_with("HTTP/1.1 503") {
+        return None;
+    }
+    let body: Value = serde_json::from_str(body).ok()?;
+    Some(body["error"].as_str()?.to_string())
 }
 
 /// Device names and errors come from the hardware; replace control
@@ -319,17 +352,7 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
             (r#"{"status":"ok"}"#, false),
             ("", false),
         ] {
-            let _ = std::fs::remove_file(&path);
-            let listener = UnixListener::bind(&path).unwrap();
-            let server = thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0u8; 256];
-                let length = stream.read(&mut request).unwrap();
-                let length_header = format!("Content-Length: {}", body.len());
-                let response = format!("HTTP/1.1 200 OK\r\n{length_header}\r\n\r\n{body}");
-                stream.write_all(response.as_bytes()).unwrap();
-                String::from_utf8_lossy(&request[..length]).into_owned()
-            });
+            let server = answer_once(&path, "200 OK", body);
             let served = daemon_serves_catalog(&path, "i");
             assert_eq!(served, live, "health body {body:?}");
             let request = server.join().unwrap();
@@ -337,5 +360,47 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
         }
         let stale = daemon_serves_catalog(&path, "i");
         assert!(!stale, "a stale socket file is not a running daemon");
+    }
+
+    /// While the daemon cannot write the catalog, the file stops advancing;
+    /// the wait reports the daemon's reason within about a second instead of
+    /// running out its 15 seconds.
+    #[test]
+    fn refresh_reports_a_catalog_the_daemon_cannot_write() {
+        let dir = TempDir::new();
+        let (socket, path) = (dir.path().join("api.sock"), dir.path().join("p.json"));
+        let mut catalog = Catalog::new("i", 8);
+        catalog.apply_success(vec![], vec![]).unwrap();
+        crate::peripherals::service::publish(&path, &catalog.document()).unwrap();
+        let reason = "peripheral catalog could not be written: replace p.json: No space left \
+on device (os error 28); see `journalctl -u simaai-sentinel`";
+        let body = json!({ "error": reason }).to_string();
+        let server = answer_once(&socket, "503 Service Unavailable", &body);
+        let started = Instant::now();
+        let error = wait_for_scan(&socket, &path, "i", 2).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("refresh did not complete: {reason}")
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let probe = "GET /v1/peripherals?since_revision=1&instance_id=i HTTP/1.1\r\n";
+        assert!(server.join().unwrap().starts_with(probe));
+    }
+
+    /// Answer one request on a fresh socket at `path`; returns the request.
+    fn answer_once(path: &Path, status: &str, body: &str) -> thread::JoinHandle<String> {
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path).unwrap();
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 256];
+            let length = stream.read(&mut request).unwrap();
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request[..length]).into_owned()
+        })
     }
 }

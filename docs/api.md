@@ -76,9 +76,12 @@ rejected with HTTP 400, because revisions restart with every daemon.
 `POST /v1/peripherals/refresh` schedules a scan and returns
 `{"accepted": true, "target_scan_sequence": N}`; the refresh is complete when
 `scan_sequence` reaches `N`. Requests that arrive together share one scan.
-HTTP 503 means peripheral discovery is not running or has stopped (see the
-journal), in which case `/v1/health` reports `"peripherals": null`, or the
-catalog cannot be read.
+HTTP 503 means peripheral discovery is not running or has stopped, or the
+catalog file could not be written (for example, `/run` is full) and is out of
+date; the `error` says which, and the journal has details. In these cases
+`/v1/health` reports `"peripherals": null`. Sentinel retries a failed write
+every second and serves the catalog again once one succeeds. HTTP 503 from
+`GET /v1/peripherals` can also mean the catalog cannot be read.
 
 ## Security and concurrency
 
