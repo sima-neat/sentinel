@@ -233,7 +233,10 @@ impl RulesWatch {
     /// Watch the rules file's directory. Package managers replace files by
     /// rename, so the directory, not the file, is watched.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         let file_name = path
             .file_name()
             .ok_or_else(|| {
@@ -441,6 +444,7 @@ mod tests {
     #[test]
     fn watch_reports_changes_to_the_rules_file_only() {
         assert!(RulesWatch::open(Path::new("/nonexistent/sentinel/neat-core.json")).is_err());
+        RulesWatch::open(Path::new("neat-core.json")).unwrap();
         let dir = TempDir::new();
         let path = dir.path().join("neat-core.json");
         let watch = RulesWatch::open(&path).unwrap();
