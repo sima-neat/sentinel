@@ -164,27 +164,23 @@ fn wait_for_scan(catalog_path: &Path, instance: &str, target: u64) -> Result<()>
     bail!("refresh did not complete within 15 seconds")
 }
 
-/// Device names come from the hardware; strip control characters so a device
-/// cannot send escape sequences to the administrator's terminal.
+/// Device names and errors come from the hardware; replace control
+/// characters, newlines included, so a device can neither send escape
+/// sequences to the administrator's terminal nor forge rows. Applied to each
+/// field, so the renderer's own newlines stay.
 fn printable(text: &str) -> String {
     text.chars()
-        .map(|ch| {
-            if ch.is_control() && ch != '\n' {
-                '?'
-            } else {
-                ch
-            }
-        })
+        .map(|ch| if ch.is_control() { '?' } else { ch })
         .collect()
 }
 
 fn render(document: &CatalogDocument) -> String {
     let mut out = format!(
         "Peripherals  {}  revision {}  scan {}  updated {}\n",
-        document.state,
+        printable(&document.state),
         document.revision,
         document.scan_sequence,
-        document.last_attempt_at.as_deref().unwrap_or("never"),
+        printable(document.last_attempt_at.as_deref().unwrap_or("never")),
     );
     if document.stale {
         out.push_str("  Showing last-good records for a provider that could not be refreshed.\n");
@@ -212,15 +208,16 @@ fn render(document: &CatalogDocument) -> String {
                     .filter(|mode| mode["supported"].as_bool() == Some(true))
                     .count()
             });
+            let name = printable(name);
             let summary = match modes {
                 Some(modes) => format!("{name}  ({} modes, {supported} supported)", modes.len()),
-                None => name.to_string(),
+                None => name,
             };
             out.push_str(&format!(
                 "  {:<8} {:<36} {:<26} {}\n",
-                kind,
-                device["id"].as_str().unwrap_or("?"),
-                device["provider"].as_str().unwrap_or("?"),
+                printable(kind),
+                printable(device["id"].as_str().unwrap_or("?")),
+                printable(device["provider"].as_str().unwrap_or("?")),
                 summary
             ));
         }
@@ -228,17 +225,19 @@ fn render(document: &CatalogDocument) -> String {
     for issue in &document.issues {
         out.push_str(&format!(
             "  ! {} {}: {}\n",
-            issue.provider, issue.code, issue.reason
+            printable(&issue.provider),
+            printable(&issue.code),
+            printable(&issue.reason)
         ));
     }
     if let Some(error) = &document.error {
         out.push_str(&format!(
             "  ! {}: {}\n",
-            error["code"].as_str().unwrap_or("error"),
-            error["reason"].as_str().unwrap_or("")
+            printable(error["code"].as_str().unwrap_or("error")),
+            printable(error["reason"].as_str().unwrap_or(""))
         ));
     }
-    printable(&out)
+    out
 }
 
 #[cfg(test)]
@@ -262,8 +261,9 @@ mod tests {
         assert!(error.to_string().ends_with(names), "{error}");
     }
 
-    /// Device names come from the hardware, so control characters are
-    /// replaced before they reach the terminal.
+    /// Device names and errors come from the hardware, so control characters,
+    /// newlines included, are replaced before they reach the terminal and
+    /// cannot forge rows.
     #[test]
     fn renders_devices_modes_and_states_without_terminal_escapes() {
         let mut catalog = Catalog::new("i", 8);
@@ -280,22 +280,22 @@ mod tests {
         assert_eq!(text(&catalog), format!("{empty}  No peripherals found.\n"));
         let modes = json!([{"supported": true}, {"supported": false}]);
         let imx477 = json!({"camera_name": "imx477 5-001a", "model": "imx477", "modes": modes});
-        let evil = json!({"model": "evil\u{1b}]0;owned\u{7}cam"});
-        let devices = vec![record("p", "a", imx477), record("p", "b", evil)];
-        let issue = json!({"provider": "p", "code": "io.open", "reason": "gone\u{1b}[2J",
+        let evil = json!({"model": "evil\u{1b}]0;owned\u{7}cam\n  ! forged row"});
+        let devices = vec![record("p", "a", imx477), record("p\n", "b\nc", evil)];
+        let issue = json!({"provider": "p", "code": "io.open", "reason": "gone\u{1b}[2J\n",
                            "retained_last_good": true});
         let issue: Issue = serde_json::from_value(issue).unwrap();
         catalog.apply_success(devices, vec![issue]).unwrap();
-        catalog.apply_error("peripherals.monitor_failed", "events stopped");
+        catalog.apply_error("peripherals.monitor_failed", "events\nstopped");
         let expected = "\
 Peripherals  degraded  revision 3  scan 2  updated <time>
   Showing last-good records for a provider that could not be refreshed.
 
   TYPE     ID                                   PROVIDER                   NAME / MODES
   camera   a                                    p                          imx477 5-001a  (2 modes, 1 supported)
-  camera   b                                    p                          evil?]0;owned?cam
-  ! p io.open: gone?[2J
-  ! peripherals.monitor_failed: events stopped
+  camera   b?c                                  p?                         evil?]0;owned?cam?  ! forged row
+  ! p io.open: gone?[2J?
+  ! peripherals.monitor_failed: events?stopped
 ";
         assert_eq!(text(&catalog), expected);
     }
