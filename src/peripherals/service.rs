@@ -433,10 +433,13 @@ fn run(
             refresh_pending = false;
             burst_start = None;
             // A scan re-reads the rules too.
-            reclassify_due = None;
+            let pending_reclassification = reclassify_due.take();
             control.schedule().scanning = true;
             if let Err(error) = scanner.scan(&mut catalog) {
                 eprintln!("Sentinel peripheral scan rejected: {error}");
+                // The rejected result did not commit the rules it read, so
+                // the retained catalog still needs the pending rules update.
+                reclassify_due = pending_reclassification;
             }
             {
                 let mut schedule = control.schedule();
@@ -602,6 +605,14 @@ mod tests {
 
     /// Start the thread on `<root>/peripherals.json`, with uevents off.
     fn start(root: &Path, debounce: u64, provider: impl Provider + 'static) -> PeripheralsHandle {
+        start_with(root, debounce, vec![Box::new(provider)])
+    }
+
+    fn start_with(
+        root: &Path,
+        debounce: u64,
+        providers: Vec<Box<dyn Provider>>,
+    ) -> PeripheralsHandle {
         let config = Config {
             catalog_path: root.join("peripherals.json"),
             support_rules_path: root.join("support/neat-core.json"),
@@ -611,7 +622,7 @@ mod tests {
             listen_for_uevents: false,
             temporary_path: None,
         };
-        spawn(config, vec![Box::new(provider)]).unwrap()
+        spawn(config, providers).unwrap()
     }
 
     /// The first catalog under `root` to satisfy `predicate`, summarised as
@@ -698,6 +709,46 @@ mod tests {
         fs::rename(&staged, rules_dir.join("neat-core.json")).unwrap();
         let after = wait_for(root.path(), |d| supported(d, Some("neat-core 0.4.0")));
         assert_eq!(after, "ready rev=2 scan=1 devices=1 last=changed");
+        handle.stop();
+    }
+
+    #[test]
+    fn rejected_scan_preserves_pending_rules_reclassification() {
+        let root = TempDir::new();
+        let rules_dir = root.path().join("support");
+        fs::create_dir_all(&rules_dir).unwrap();
+        let mode = json!({"format": "NV12", "width": 1920, "height": 1080,
+                          "framerate_num": 30, "framerate_den": 1, "isp_output": true});
+        let details = json!({"backend": "mipi", "modes": [mode]});
+        let first = record("test.one", "camera:one", details);
+        let one = Fake("test.one", move || Ok(vec![first.clone()]));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let two = Fake("test.two", move || {
+            let id = if count.fetch_add(1, SeqCst) == 0 {
+                "camera:two"
+            } else {
+                "camera:one"
+            };
+            Ok(vec![record("test.two", id, json!({}))])
+        });
+        let handle = start_with(root.path(), 50, vec![Box::new(one), Box::new(two)]);
+        let ready = wait_for(root.path(), |d| d.ready && d.scan_sequence == 1);
+        assert_eq!(ready, "ready rev=1 scan=1 devices=2 last=-");
+
+        let staged = rules_dir.join("neat-core.json.dpkg-new");
+        fs::write(&staged, core_rules().to_string()).unwrap();
+        fs::rename(&staged, rules_dir.join("neat-core.json")).unwrap();
+        assert_eq!(handle.control().request_refresh(), Some(2));
+        let updated = wait_for(root.path(), |d| {
+            d.scan_sequence >= 2
+                && d.support
+                    .as_ref()
+                    .and_then(|support| support.source.as_deref())
+                    == Some("neat-core 0.4.0")
+                && d.devices[0]["camera"]["modes"][0]["supported"] == true
+        });
+        assert_eq!(updated, "degraded rev=3 scan=2 devices=2 last=changed");
         handle.stop();
     }
 
