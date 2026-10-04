@@ -314,6 +314,25 @@ fn reference_microphones_produce_the_microphone_schema() {
     assert_eq!(AlsaProvider::new().subsystems(), ["sound"]);
 }
 
+/// ALSA's empty-list marker is an exact line, not a substring: card names are
+/// hardware-provided text and may contain the same lowercase words.
+#[test]
+fn card_names_cannot_imitate_the_no_soundcards_marker() {
+    let mut board = Board::new();
+    board.usb("1-1.2", ("b58e", "0005"), &[]);
+    let device = format!("{XHCI}/1-1.2/1-1.2:1.0");
+    board.card(
+        0,
+        ("Nano", "USB-Audio", "no soundcards microphone"),
+        &device,
+    );
+    board.capture(0, 0, (1, 1), Some(YETI_STREAM));
+
+    let details = board.details();
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["name"], "no soundcards microphone");
+}
+
 /// Stream parsing across the class: mono to multichannel, 16/24/32-bit,
 /// several altsets and interfaces, discrete lists and continuous ranges,
 /// several formats on one altset, unknown channel positions, and values the

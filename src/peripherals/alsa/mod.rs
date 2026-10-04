@@ -417,7 +417,7 @@ impl AlsaProvider {
         let (cards, directories) = match text {
             Some(text) => {
                 let directories = numbered(&self.asound, "card", "")?;
-                let no_cards = text.contains("no soundcards");
+                let no_cards = text.trim() == "--- no soundcards ---";
                 let cards = if no_cards {
                     BTreeMap::new()
                 } else {
