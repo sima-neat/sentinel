@@ -298,231 +298,117 @@ fn issue_error(issues: &[Issue]) -> Value {
 mod tests {
     use super::*;
 
-    fn camera(id: &str, model: &str) -> Record {
-        Record {
-            id: id.into(),
-            kind: "camera".into(),
-            provider: "test.camera".into(),
-            details: json!({"model": model}),
-        }
+    /// Cameras from `"id:model"` pairs.
+    fn cameras(pairs: &[&str]) -> Vec<Record> {
+        let camera = |pair: &&str| {
+            let (id, model) = pair.split_once(':').unwrap();
+            crate::peripherals::scan::testing::record("p", id, json!({"model": model}))
+        };
+        pairs.iter().map(camera).collect()
     }
 
     fn issue(retained: bool) -> Issue {
-        Issue {
-            provider: "test.camera".into(),
-            code: "io.permission_denied".into(),
-            reason: "permission denied".into(),
-            retained_last_good: retained,
-        }
+        let issue = json!({"provider": "p", "code": "io.permission_denied", "reason": "denied",
+                           "retained_last_good": retained});
+        serde_json::from_value(issue).unwrap()
     }
 
-    #[test]
-    fn starts_unready_and_first_scan_is_revision_one() {
-        let mut catalog = Catalog::new("a", 8);
-        let starting = catalog.document();
-        assert_eq!(starting.state, "starting");
-        assert!(!starting.ready);
-        assert_eq!(starting.revision, 0);
-
-        catalog.apply_success(vec![], vec![]).unwrap();
-        let ready = catalog.document();
-        assert_eq!(ready.state, "ready");
-        assert!(ready.ready);
-        assert_eq!((ready.revision, ready.scan_sequence), (1, 1));
-        assert!(ready.devices.is_empty());
-        assert!(ready.last_success_at.is_some());
+    /// `state ready=… stale=… rev=… scan=… seq=…` of the document.
+    #[track_caller]
+    fn state(catalog: &Catalog, expected: &str) {
+        let d = catalog.document();
+        let (state, ready, stale) = (d.state, d.ready, d.stale);
+        let (rev, scan, seq) = (d.revision, d.scan_sequence, d.sequence);
+        let text = format!("{state} ready={ready} stale={stale} rev={rev} scan={scan} seq={seq}");
+        assert_eq!(text, expected);
     }
 
-    #[test]
-    fn unchanged_scan_advances_scan_sequence_but_not_revision() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_success(vec![camera("c1", "x")], vec![])
-            .unwrap();
-        catalog
-            .apply_success(vec![camera("c1", "x")], vec![])
-            .unwrap();
-        let document = catalog.document();
-        assert_eq!((document.revision, document.scan_sequence), (1, 2));
-        assert!(document.changes.is_empty());
+    /// The change log as `kind subject@revision`, the subject being a device
+    /// id or an error code.
+    #[track_caller]
+    fn log(catalog: &Catalog, expected: &str) {
+        let entry = |change: &Change| {
+            let error = change.error.as_ref().map(|e| e["code"].as_str().unwrap());
+            let subject = change.device_id.as_deref().or(error).unwrap_or("-");
+            format!("{} {subject}@{}", change.kind, change.revision)
+        };
+        let changes = catalog.document().changes;
+        let changes = Vec::from_iter(changes.iter().map(entry));
+        assert_eq!(changes.join(", "), expected);
     }
 
+    /// The first scan is revision 1 and logs no device changes; an unchanged
+    /// scan advances only `scan_sequence`; one revision carries every device
+    /// change. Reclassification changes the revision but not `scan_sequence`
+    /// or the timestamps, and does nothing before the first scan.
     #[test]
-    fn diff_emits_added_removed_and_changed_in_one_revision() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_success(vec![camera("a", "1"), camera("b", "1")], vec![])
-            .unwrap();
-        catalog
-            .apply_success(vec![camera("b", "2"), camera("c", "1")], vec![])
-            .unwrap();
-        let document = catalog.document();
-        assert_eq!(document.revision, 2);
-        let kinds: Vec<_> = document
-            .changes
-            .iter()
-            .map(|change| (change.kind.as_str(), change.device_id.as_deref().unwrap()))
-            .collect();
-        assert_eq!(
-            kinds,
-            vec![("removed", "a"), ("changed", "b"), ("added", "c")]
-        );
-        assert!(document.changes.iter().all(|change| change.revision == 2));
-        assert_eq!(document.sequence, 3);
-        assert_eq!(document.devices[0]["camera"]["model"], "2");
+    fn revisions_follow_visible_changes() {
+        let mut c = Catalog::new("a", 8);
+        let starting = "starting ready=false stale=false rev=0 scan=0 seq=0";
+        state(&c, starting);
+        c.apply_reclassification(cameras(&["a:1"]), vec![]).unwrap();
+        state(&c, starting);
+        c.apply_success(cameras(&["b:1", "a:1"]), vec![]).unwrap();
+        c.apply_success(cameras(&["a:1", "b:1"]), vec![]).unwrap();
+        state(&c, "ready ready=true stale=false rev=1 scan=2 seq=0");
+        log(&c, "");
+        assert!(c.document().last_success_at.is_some());
+        c.apply_success(cameras(&["b:2", "c:1"]), vec![]).unwrap();
+        assert_eq!(c.document().devices[0]["camera"]["model"], "2");
+        let attempted = c.document().last_attempt_at;
+        let devices = cameras(&["b:3", "c:1"]);
+        c.apply_reclassification(devices, vec![]).unwrap();
+        state(&c, "ready ready=true stale=false rev=3 scan=3 seq=4");
+        log(&c, "removed a@2, changed b@2, added c@2, changed b@3");
+        assert_eq!(c.document().last_attempt_at, attempted);
     }
 
+    /// Provider issues degrade the catalog, are logged and are visible
+    /// changes; issues on retained records mark it stale. Invalid input is
+    /// rejected without counting a scan. A monitor error survives later
+    /// scans and is never reported recovered; repeating it changes nothing.
     #[test]
-    fn retained_issue_marks_catalog_stale_and_recovery_is_logged() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![])
-            .unwrap();
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![issue(true)])
-            .unwrap();
-        let degraded = catalog.document();
-        assert_eq!(degraded.state, "degraded");
-        assert!(degraded.stale);
-        assert!(degraded.error.is_none());
-        let logged = degraded.changes.last().unwrap();
-        assert_eq!(logged.kind, "error");
-        assert_eq!(
-            logged.error.as_ref().unwrap()["code"],
-            "peripherals.provider_degraded"
-        );
+    fn issues_and_errors_degrade_the_catalog() {
+        let mut c = Catalog::new("a", 8);
+        c.apply_provider_failure(vec![issue(false)]).unwrap();
+        assert!(c.apply_provider_failure(vec![]).is_err());
+        assert!(c.apply_success(cameras(&["a:1", "a:2"]), vec![]).is_err());
+        let mut empty_reason = issue(false);
+        empty_reason.reason.clear();
+        assert!(c.apply_success(vec![], vec![empty_reason]).is_err());
+        state(&c, "degraded ready=false stale=false rev=0 scan=1 seq=1");
+        let degraded = "error peripherals.provider_degraded";
+        log(&c, &format!("{degraded}@0"));
+        assert!(c.document().last_success_at.is_none());
 
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![])
-            .unwrap();
-        let recovered = catalog.document();
-        assert_eq!(recovered.state, "ready");
-        assert!(!recovered.stale);
-        assert_eq!(recovered.changes.last().unwrap().kind, "recovered");
-        assert_eq!(
-            (degraded.revision, recovered.revision),
-            (2, 3),
-            "issue changes are visible changes"
-        );
-    }
+        let a1 = || cameras(&["a:1"]);
+        c.apply_success(a1(), vec![]).unwrap();
+        c.apply_success(a1(), vec![issue(true)]).unwrap();
+        c.apply_success(a1(), vec![issue(true)]).unwrap();
+        state(&c, "degraded ready=true stale=true rev=2 scan=4 seq=3");
+        c.apply_success(a1(), vec![]).unwrap();
+        state(&c, "ready ready=true stale=false rev=3 scan=5 seq=4");
+        let recovered = format!("{degraded}@0, recovered -@1, {degraded}@2, recovered -@3");
+        log(&c, &recovered);
 
-    #[test]
-    fn provider_failure_before_any_success_stays_unready() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog.apply_provider_failure(vec![issue(false)]).unwrap();
-        let document = catalog.document();
-        assert!(!document.ready);
-        assert_eq!(document.state, "degraded");
-        assert!(!document.stale);
-        assert_eq!(document.scan_sequence, 1);
-        assert!(catalog.apply_provider_failure(vec![]).is_err());
-    }
-
-    #[test]
-    fn duplicate_identities_and_empty_issue_fields_are_rejected() {
-        let mut catalog = Catalog::new("a", 8);
-        assert!(catalog
-            .apply_success(vec![camera("a", "1"), camera("a", "2")], vec![])
-            .is_err());
-        let mut bad = issue(false);
-        bad.reason.clear();
-        assert!(catalog.apply_success(vec![], vec![bad]).is_err());
-        assert_eq!(catalog.scan_sequence(), 0);
-    }
-
-    #[test]
-    fn reclassification_changes_revision_but_not_scan_sequence() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_reclassification(vec![camera("a", "1")], vec![])
-            .unwrap();
-        assert_eq!(
-            catalog.document().revision,
-            0,
-            "nothing before the first scan"
-        );
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![])
-            .unwrap();
-        let attempted = catalog.document().last_attempt_at;
-        catalog
-            .apply_reclassification(vec![camera("a", "2")], vec![])
-            .unwrap();
-        let document = catalog.document();
-        assert_eq!((document.revision, document.scan_sequence), (2, 1));
-        assert_eq!(document.last_attempt_at, attempted);
-        assert_eq!(document.changes.last().unwrap().kind, "changed");
-    }
-
-    #[test]
-    fn monitor_error_survives_later_scans_and_is_never_reported_recovered() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog.apply_error("peripherals.monitor_failed", "uevent socket unavailable");
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![])
-            .unwrap();
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![])
-            .unwrap();
-        let document = catalog.document();
-        assert_eq!(document.state, "degraded");
-        assert!(document.stale);
-        assert_eq!(
-            document.error.unwrap()["code"],
-            "peripherals.monitor_failed"
-        );
-        assert!(document
-            .changes
-            .iter()
-            .all(|change| change.kind != "recovered"));
-    }
-
-    #[test]
-    fn unchanged_rescans_and_repeated_errors_keep_the_revision() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![issue(true)])
-            .unwrap();
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![issue(true)])
-            .unwrap();
-        catalog.apply_error("peripherals.monitor_failed", "x");
-        let first = catalog.document();
-        catalog.apply_error("peripherals.monitor_failed", "x");
-        let second = catalog.document();
-        assert_eq!(first.revision, 2);
-        assert_eq!(
-            (second.revision, second.sequence),
-            (first.revision, first.sequence)
-        );
+        c.apply_error("peripherals.monitor_failed", "uevent socket closed");
+        c.apply_error("peripherals.monitor_failed", "uevent socket closed");
+        c.apply_success(a1(), vec![]).unwrap();
+        state(&c, "degraded ready=true stale=true rev=4 scan=6 seq=5");
+        let monitor = "error peripherals.monitor_failed";
+        log(&c, &format!("{recovered}, {monitor}@4"));
     }
 
     #[test]
     fn change_log_is_bounded() {
-        let mut catalog = Catalog::new("a", 2);
-        for index in 0..5 {
-            catalog
-                .apply_success(vec![camera(&format!("c{index}"), "x")], vec![])
-                .unwrap();
+        let mut c = Catalog::new("a", 2);
+        c.apply_error("peripherals.monitor_failed", "x");
+        state(&c, "degraded ready=false stale=false rev=0 scan=0 seq=1");
+        for index in 0..3 {
+            let devices = cameras(&[&format!("c{index}:x")]);
+            c.apply_success(devices, vec![]).unwrap();
         }
-        let document = catalog.document();
-        assert_eq!(document.changes.len(), 2);
-        assert_eq!(document.changes[1].sequence, document.sequence);
-    }
-
-    #[test]
-    fn monitor_error_marks_initialized_catalog_stale() {
-        let mut catalog = Catalog::new("a", 8);
-        catalog
-            .apply_success(vec![camera("a", "1")], vec![])
-            .unwrap();
-        catalog.apply_error("peripherals.monitor_failed", "uevent socket closed");
-        let document = catalog.document();
-        assert!(document.stale);
-        assert_eq!(
-            document.error.unwrap()["code"],
-            "peripherals.monitor_failed"
-        );
-        assert_eq!(document.scan_sequence, 1);
+        state(&c, "degraded ready=true stale=true rev=3 scan=3 seq=5");
+        log(&c, "removed c1@3, added c2@3");
     }
 }

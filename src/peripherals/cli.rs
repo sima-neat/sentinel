@@ -245,8 +245,11 @@ fn render(document: &CatalogDocument) -> String {
 mod tests {
     use super::*;
     use crate::peripherals::catalog::Catalog;
-    use crate::peripherals::model::Record;
+    use crate::peripherals::model::Issue;
+    use crate::peripherals::scan::testing::record;
+    use crate::peripherals::sysutil::testing::TempDir;
     use serde_json::json;
+    use std::os::unix::net::UnixListener;
 
     #[test]
     fn unknown_provider_names_list_the_built_in_ones() {
@@ -255,117 +258,78 @@ mod tests {
             support_rules_path: "/nonexistent/neat-core.json".into(),
         };
         let error = test_provider("no.such.provider", &settings).unwrap_err();
-        assert!(error.to_string().contains("daemon.camera.mipi"), "{error}");
-        assert!(error.to_string().contains("daemon.camera.v4l2"), "{error}");
+        let names = "built-in providers: daemon.camera.mipi, daemon.camera.v4l2";
+        assert!(error.to_string().ends_with(names), "{error}");
     }
 
+    /// Device names come from the hardware, so control characters are
+    /// replaced before they reach the terminal.
     #[test]
-    fn device_text_cannot_inject_terminal_escapes() {
+    fn renders_devices_modes_and_states_without_terminal_escapes() {
         let mut catalog = Catalog::new("i", 8);
-        catalog
-            .apply_success(
-                vec![Record {
-                    id: "camera:x".into(),
-                    kind: "camera".into(),
-                    provider: "p".into(),
-                    details: json!({"model": "evil\u{1b}]0;owned\u{7}cam"}),
-                }],
-                vec![],
-            )
-            .unwrap();
-        let text = render(&catalog.document());
-        assert!(
-            !text.contains('\u{1b}') && !text.contains('\u{7}'),
-            "{text:?}"
-        );
-        assert!(text.contains("evil?]0;owned?cam"));
+        let text = |catalog: &Catalog| {
+            let document = catalog.document();
+            let (text, updated) = (render(&document), document.last_attempt_at);
+            updated.map_or(text.clone(), |at| text.replace(&at, "<time>"))
+        };
+        let starting = "Peripherals  starting  revision 0  scan 0  updated never\n";
+        let first = "  The first scan has not completed.\n";
+        assert_eq!(text(&catalog), format!("{starting}{first}"));
+        catalog.apply_success(vec![], vec![]).unwrap();
+        let empty = "Peripherals  ready  revision 1  scan 1  updated <time>\n";
+        assert_eq!(text(&catalog), format!("{empty}  No peripherals found.\n"));
+        let modes = json!([{"supported": true}, {"supported": false}]);
+        let imx477 = json!({"camera_name": "imx477 5-001a", "model": "imx477", "modes": modes});
+        let evil = json!({"model": "evil\u{1b}]0;owned\u{7}cam"});
+        let devices = vec![record("p", "a", imx477), record("p", "b", evil)];
+        let issue = json!({"provider": "p", "code": "io.open", "reason": "gone\u{1b}[2J",
+                           "retained_last_good": true});
+        let issue: Issue = serde_json::from_value(issue).unwrap();
+        catalog.apply_success(devices, vec![issue]).unwrap();
+        catalog.apply_error("peripherals.monitor_failed", "events stopped");
+        let expected = "\
+Peripherals  degraded  revision 3  scan 2  updated <time>
+  Showing last-good records for a provider that could not be refreshed.
+
+  TYPE     ID                                   PROVIDER                   NAME / MODES
+  camera   a                                    p                          imx477 5-001a  (2 modes, 1 supported)
+  camera   b                                    p                          evil?]0;owned?cam
+  ! p io.open: gone?[2J
+  ! peripherals.monitor_failed: events stopped
+";
+        assert_eq!(text(&catalog), expected);
     }
 
-    /// Answer one request on `path` with a health `body`; returns the request.
-    fn answer_health(
-        listener: std::os::unix::net::UnixListener,
-        body: &'static str,
-    ) -> std::thread::JoinHandle<String> {
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0u8; 256];
-            let length = stream.read(&mut request).unwrap();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            String::from_utf8_lossy(&request[..length]).into_owned()
-        })
-    }
-
+    /// The catalog file outlives the daemon, so only a running daemon whose
+    /// health reports a peripheral summary vouches for it. The probe is one
+    /// complete health request, so the daemon logs nothing.
     #[test]
-    fn a_missing_or_dead_socket_means_the_daemon_is_not_running() {
-        assert!(!daemon_serves_catalog(Path::new(
-            "/nonexistent/sentinel/api.sock"
-        )));
-        let dir = std::env::temp_dir().join(format!("sentinel-cli-socket-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("api.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        // The daemon answers a complete health request, so it logs nothing.
-        let server = answer_health(listener, r#"{"status":"ok","peripherals":{"ready":true}}"#);
-        assert!(daemon_serves_catalog(&path));
-        assert!(server
-            .join()
-            .unwrap()
-            .starts_with("GET /v1/health HTTP/1.1\r\n"));
-        assert!(
-            !daemon_serves_catalog(&path),
-            "a stale socket file is not a running daemon"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_daemon_without_peripheral_discovery_does_not_vouch_for_the_catalog() {
-        let dir = std::env::temp_dir().join(format!("sentinel-cli-nodisc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("api.sock");
-        // `--no-peripherals`, or discovery failed to start: health answers,
-        // but has no peripheral summary, so an old catalog file is stale.
-        for body in [
-            r#"{"status":"ok","peripherals":null}"#,
-            r#"{"status":"ok"}"#,
-            "",
+    fn only_a_daemon_with_peripheral_discovery_vouches_for_the_catalog() {
+        assert!(!daemon_serves_catalog(Path::new("/nonexistent/api.sock")));
+        let dir = TempDir::new();
+        let path = dir.path().join("api.sock");
+        for (body, live) in [
+            (r#"{"status":"ok","peripherals":{"ready":true}}"#, true),
+            (r#"{"status":"ok","peripherals":null}"#, false), // --no-peripherals
+            (r#"{"status":"ok"}"#, false),
+            ("", false),
         ] {
             let _ = std::fs::remove_file(&path);
-            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-            let server = answer_health(listener, body);
-            assert!(!daemon_serves_catalog(&path), "health body {body:?}");
-            server.join().unwrap();
+            let listener = UnixListener::bind(&path).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 256];
+                let length = stream.read(&mut request).unwrap();
+                let length_header = format!("Content-Length: {}", body.len());
+                let response = format!("HTTP/1.1 200 OK\r\n{length_header}\r\n\r\n{body}");
+                stream.write_all(response.as_bytes()).unwrap();
+                String::from_utf8_lossy(&request[..length]).into_owned()
+            });
+            assert_eq!(daemon_serves_catalog(&path), live, "health body {body:?}");
+            let request = server.join().unwrap();
+            assert!(request.starts_with("GET /v1/health HTTP/1.1\r\n"));
         }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn renders_devices_modes_and_states() {
-        let mut catalog = Catalog::new("i", 8);
-        assert!(render(&catalog.document()).contains("first scan has not completed"));
-        catalog.apply_success(vec![], vec![]).unwrap();
-        assert!(render(&catalog.document()).contains("No peripherals found"));
-        catalog
-            .apply_success(
-                vec![Record {
-                    id: "camera:imx477 5-001a".into(),
-                    kind: "camera".into(),
-                    provider: "daemon.camera.libcamera".into(),
-                    details: json!({"camera_name": "imx477 5-001a", "modes": [
-                        {"supported": true}, {"supported": false}
-                    ]}),
-                }],
-                vec![],
-            )
-            .unwrap();
-        let text = render(&catalog.document());
-        assert!(
-            text.contains("imx477 5-001a  (2 modes, 1 supported)"),
-            "{text}"
-        );
+        let stale = daemon_serves_catalog(&path);
+        assert!(!stale, "a stale socket file is not a running daemon");
     }
 }

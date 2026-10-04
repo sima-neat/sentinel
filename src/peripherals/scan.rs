@@ -201,161 +201,132 @@ fn provider_issue(provider: &str, error: ProviderError, retained_last_good: bool
     }
 }
 
+/// The fake provider shared by the scan and service tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
-    use serde_json::json;
-    use std::collections::VecDeque;
 
-    struct Scripted {
-        name: String,
-        subsystems: Vec<String>,
-        script: VecDeque<Result<Vec<Record>, ProviderError>>,
-    }
+    /// A provider named `.0` whose scans return what `.1` does.
+    pub(crate) struct Fake<F>(pub &'static str, pub F);
 
-    impl Scripted {
-        fn boxed(name: &str, script: Vec<Result<Vec<Record>, ProviderError>>) -> Box<dyn Provider> {
-            Box::new(Self {
-                name: name.into(),
-                subsystems: vec!["video4linux".into()],
-                script: script.into(),
-            })
-        }
-    }
-
-    impl Provider for Scripted {
+    impl<F: FnMut() -> Result<Vec<Record>, ProviderError> + Send> Provider for Fake<F> {
         fn name(&self) -> &str {
-            &self.name
+            self.0
         }
         fn subsystems(&self) -> &[String] {
-            &self.subsystems
+            &[]
         }
         fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
-            if self.name == "panics" {
-                panic!("scripted panic");
-            }
-            self.script.pop_front().unwrap_or(Ok(Vec::new()))
+            (self.1)()
         }
     }
 
-    fn record(provider: &str, id: &str) -> Record {
+    pub(crate) fn record(provider: &str, id: &str, details: serde_json::Value) -> Record {
+        let (id, kind, provider) = (id.into(), "camera".into(), provider.into());
         Record {
-            id: id.into(),
-            kind: "camera".into(),
-            provider: provider.into(),
-            details: json!({}),
+            id,
+            kind,
+            provider,
+            details,
         }
     }
+}
 
-    fn denied() -> ProviderError {
-        ProviderError::new("io.permission_denied", "denied")
+#[cfg(test)]
+mod tests {
+    use super::testing::{record, Fake};
+    use super::*;
+    use crate::peripherals::model::CatalogDocument;
+    use serde_json::json;
+
+    type Outcome = Result<Vec<Record>, ProviderError>;
+    type Scanned = (CatalogDocument, Result<(), String>);
+
+    /// A provider that returns `script` in order, then nothing.
+    fn scripted(name: &'static str, script: Vec<Outcome>) -> Box<dyn Provider> {
+        let mut script = script.into_iter();
+        Box::new(Fake(name, move || script.next().unwrap_or(Ok(Vec::new()))))
     }
 
-    fn scanner(providers: Vec<Box<dyn Provider>>) -> Scanner {
-        Scanner::new(
-            providers,
-            SupportStage::new("/nonexistent/sentinel/neat-core.json"),
-        )
+    fn found(provider: &str, ids: &[&str]) -> Outcome {
+        let record = |id: &&str| record(provider, id, json!({}));
+        Ok(ids.iter().map(record).collect())
     }
 
-    fn ids(catalog: &Catalog) -> Vec<String> {
-        catalog
-            .document()
-            .devices
-            .iter()
-            .map(|device| device["id"].as_str().unwrap().to_string())
-            .collect()
+    fn denied() -> Outcome {
+        Err(ProviderError::new("io.permission_denied", "denied"))
     }
 
+    /// The catalog after `scans` scans of `providers`, and the last result.
+    fn scan(providers: Vec<Box<dyn Provider>>, scans: usize) -> Scanned {
+        let support = SupportStage::new("/nonexistent/sentinel/neat-core.json");
+        let (mut scanner, mut catalog) = (Scanner::new(providers, support), Catalog::new("i", 16));
+        let mut result = Ok(());
+        for _ in 0..scans {
+            result = scanner.scan(&mut catalog);
+        }
+        (catalog.document(), result)
+    }
+
+    /// `provider code [retained]` of each issue.
+    fn issues(document: &CatalogDocument) -> String {
+        let issue = |i: &Issue| {
+            let kept = i.retained_last_good.then_some(" retained");
+            format!("{} {}{}", i.provider, i.code, kept.unwrap_or_default())
+        };
+        Vec::from_iter(document.issues.iter().map(issue)).join(", ")
+    }
+
+    /// A failed provider keeps only its own last-good records and marks the
+    /// catalog stale; a panic is a failure too. A catalog whose providers
+    /// have all only failed is not ready; one without providers is.
     #[test]
-    fn failed_provider_keeps_its_last_good_records_beside_healthy_ones() {
-        let mut scanner = scanner(vec![
-            Scripted::boxed("mipi", vec![Ok(vec![record("mipi", "m1")]), Err(denied())]),
-            Scripted::boxed("usb", vec![Ok(vec![]), Ok(vec![record("usb", "u1")])]),
-        ]);
-        let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
-        scanner.scan(&mut catalog).unwrap();
-
-        assert_eq!(ids(&catalog), vec!["m1", "u1"]);
-        let document = catalog.document();
-        assert!(document.stale);
-        assert_eq!(document.issues.len(), 1);
-        assert_eq!(document.issues[0].provider, "mipi");
-        assert!(document.issues[0].retained_last_good);
+    fn providers_fail_independently() {
+        let panics = || -> Outcome { panic!("scripted panic") };
+        let providers: Vec<Box<dyn Provider>> = vec![
+            scripted("mipi", vec![found("mipi", &["m1"]), denied()]),
+            scripted("usb", vec![found("usb", &[]), found("usb", &["u1"])]),
+            scripted("never", vec![denied(), denied()]),
+            Box::new(Fake("panics", panics)),
+        ];
+        let (document, result) = scan(providers, 2);
+        result.unwrap();
+        let ids = Vec::from_iter(document.devices.iter().map(|device| &device["id"]));
+        assert_eq!(ids, ["m1", "u1"]);
+        assert!(document.ready && document.stale);
+        let expected = "mipi io.permission_denied retained, never io.permission_denied, \
+                        panics peripherals.discovery_failed";
+        assert_eq!(issues(&document), expected);
+        assert!(!scan(vec![scripted("never", vec![denied()])], 1).0.ready);
+        let (empty, _) = scan(vec![], 1);
+        assert_eq!((empty.state.as_str(), empty.devices.len()), ("ready", 0));
     }
 
+    /// One provider's invalid records are its own issue; ids that collide
+    /// across providers reject the scan, which still counts.
     #[test]
-    fn provider_failing_before_any_success_leaves_catalog_unready_until_another_succeeds() {
-        let mut scanner = scanner(vec![Scripted::boxed("mipi", vec![Err(denied())])]);
-        let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
-        let document = catalog.document();
-        assert!(!document.ready);
-        assert!(!document.issues[0].retained_last_good);
-    }
-
-    #[test]
-    fn panicking_provider_becomes_an_issue() {
-        let mut scanner = scanner(vec![
-            Scripted::boxed("panics", vec![]),
-            Scripted::boxed("usb", vec![Ok(vec![record("usb", "u1")])]),
-        ]);
-        let mut catalog = Catalog::new("i", 16);
-        scanner.scan(&mut catalog).unwrap();
-        let document = catalog.document();
-        assert_eq!(ids(&catalog), vec!["u1"]);
-        assert_eq!(document.issues[0].provider, "panics");
-        assert_eq!(document.issues[0].code, "peripherals.discovery_failed");
-    }
-
-    #[test]
-    fn invalid_records_are_rejected_per_provider() {
-        let mut wrong_owner = record("other", "x");
-        wrong_owner.provider = "other".into();
-        let mut bad_type = record("usb", "y");
+    fn invalid_and_colliding_results_are_rejected() {
+        let mut bad_type = record("usb", "y", json!({}));
         bad_type.kind = "Camera".into();
-        for invalid in [
-            vec![wrong_owner],
-            vec![bad_type],
-            vec![record("usb", "d"), record("usb", "d")],
-        ] {
-            let mut scanner = scanner(vec![Scripted::boxed("usb", vec![Ok(invalid)])]);
-            let mut catalog = Catalog::new("i", 16);
-            scanner.scan(&mut catalog).unwrap();
-            assert_eq!(
-                catalog.document().issues[0].code,
-                "peripherals.invalid_provider_result"
-            );
+        let invalid = [
+            (found("other", &["x"]), "owned by other"),
+            (Ok(vec![bad_type]), "valid type token"),
+            (found("usb", &["d", "d"]), "identity: d"),
+        ];
+        for (records, reason) in invalid {
+            let (document, _) = scan(vec![scripted("usb", vec![records])], 1);
+            let issue = &document.issues[0];
+            assert_eq!(issue.code, "peripherals.invalid_provider_result");
+            assert!(issue.reason.contains(reason), "{}", issue.reason);
         }
-    }
-
-    #[test]
-    fn colliding_ids_reject_the_scan_but_count_it() {
-        let mut scanner = scanner(vec![
-            Scripted::boxed("a", vec![Ok(vec![record("a", "same")])]),
-            Scripted::boxed("b", vec![Ok(vec![record("b", "same")])]),
-        ]);
-        let mut catalog = Catalog::new("i", 16);
-        assert!(scanner.scan(&mut catalog).is_err());
-        let document = catalog.document();
+        let same = |name| scripted(name, vec![found(name, &["same"])]);
+        let (document, result) = scan(vec![same("a"), same("b")], 1);
+        assert!(result.is_err());
         assert_eq!(document.scan_sequence, 1, "refresh targets still advance");
-        assert_eq!(document.issues[0].provider, "catalog");
+        let expected = "catalog peripherals.invalid_provider_result";
+        assert_eq!(issues(&document), expected);
         assert!(document.issues[0].reason.contains("same"));
-    }
 
-    #[test]
-    fn no_providers_publish_a_ready_empty_catalog() {
-        let mut catalog = Catalog::new("i", 16);
-        scanner(vec![]).scan(&mut catalog).unwrap();
-        let document = catalog.document();
-        assert!(document.ready);
-        assert_eq!(document.state, "ready");
-        assert!(document.devices.is_empty());
-    }
-
-    #[test]
-    fn type_tokens_follow_the_json_key_rules() {
         for good in ["camera", "microphone", "lidar_2d", "imu-6dof"] {
             assert!(valid_type_token(good), "{good}");
         }

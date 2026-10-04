@@ -427,115 +427,83 @@ pub fn new_instance_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peripherals::model::{ProviderError, Record};
+    use crate::peripherals::scan::testing::{record, Fake};
+    use crate::peripherals::support::core_rules;
     use crate::peripherals::sysutil::testing::TempDir;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct Counting {
-        calls: Arc<AtomicUsize>,
-        subsystems: Vec<String>,
-    }
-
-    impl Provider for Counting {
-        fn name(&self) -> &str {
-            "test.camera"
-        }
-        fn subsystems(&self) -> &[String] {
-            &self.subsystems
-        }
-        fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok((0..=call)
-                .map(|index| Record {
-                    id: format!("camera:{index}"),
-                    kind: "camera".into(),
-                    provider: "test.camera".into(),
-                    details: json!({}),
-                })
-                .collect())
-        }
-    }
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
     /// Start the thread on `<root>/peripherals.json`, with uevents off.
-    fn start(
-        root: &Path,
-        debounce_ms: u64,
-        providers: Vec<Box<dyn Provider>>,
-    ) -> (PathBuf, PeripheralsHandle) {
-        let path = root.join("peripherals.json");
+    fn start(root: &Path, debounce: u64, provider: impl Provider + 'static) -> PeripheralsHandle {
         let config = Config {
-            catalog_path: path.clone(),
+            catalog_path: root.join("peripherals.json"),
             support_rules_path: root.join("support/neat-core.json"),
             instance_id: "test-instance".into(),
-            debounce: Duration::from_millis(debounce_ms),
+            debounce: Duration::from_millis(debounce),
             listen_for_uevents: false,
         };
-        (path, spawn(config, providers).unwrap())
+        spawn(config, vec![Box::new(provider)]).unwrap()
     }
 
-    fn wait_for(path: &Path, predicate: impl Fn(&CatalogDocument) -> bool) -> CatalogDocument {
+    /// The first catalog under `root` to satisfy `predicate`, summarised as
+    /// `state rev=… scan=… devices=… last=<newest change>`.
+    fn wait_for(root: &Path, predicate: impl Fn(&CatalogDocument) -> bool) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let Ok(document) = read(path) {
-                if predicate(&document) {
-                    return document;
+            match read(&root.join("peripherals.json")) {
+                Ok(d) if predicate(&d) => {
+                    let (state, rev, scan) = (&d.state, d.revision, d.scan_sequence);
+                    let (devices, last) = (d.devices.len(), d.changes.last());
+                    let last = last.map_or("-", |change| &change.kind);
+                    return format!("{state} rev={rev} scan={scan} devices={devices} last={last}");
                 }
+                _ => assert!(Instant::now() < deadline, "the catalog never got there"),
             }
-            assert!(
-                Instant::now() < deadline,
-                "catalog never reached the expected state"
-            );
             thread::sleep(Duration::from_millis(10));
         }
     }
 
+    /// The first scan is published at once; a refresh promises the scan that
+    /// covers it, and a burst of refreshes shares one scan; nothing else
+    /// scans. Scans run niced. Stopping marks the catalog stopped and refuses
+    /// later refreshes.
     #[test]
-    fn publishes_initial_scan_and_honours_refresh_targets() {
+    fn scans_on_start_and_refresh_until_stopped() {
         let root = TempDir::new();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counting = Counting {
-            calls: calls.clone(),
-            subsystems: vec!["video4linux".into()],
-        };
-        let (path, handle) = start(root.path(), 10, vec![Box::new(counting)]);
+        let (calls, nice) = (Arc::new(AtomicUsize::new(0)), Arc::new(Mutex::new(None)));
+        let (counter, seen) = (calls.clone(), nice.clone());
+        let provider = Fake("test.camera", move || {
+            // SAFETY: reads this thread's own scheduling priority.
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::id_t;
+            *seen.lock().unwrap() = Some(unsafe { libc::getpriority(libc::PRIO_PROCESS, tid) });
+            let call = counter.fetch_add(1, SeqCst);
+            let camera = |index| record("test.camera", &format!("camera:{index}"), json!({}));
+            Ok((0..=call).map(camera).collect())
+        });
+        let handle = start(root.path(), 100, provider);
+        let ready = wait_for(root.path(), |d| d.ready && d.instance_id == "test-instance");
+        assert_eq!(ready, "ready rev=1 scan=1 devices=1 last=-");
 
-        let first = wait_for(&path, |document| document.ready);
-        assert_eq!(first.instance_id, "test-instance");
-        assert_eq!((first.revision, first.scan_sequence), (1, 1));
-        assert_eq!(first.devices.len(), 1);
-
-        let target = handle.control().request_refresh().unwrap();
-        assert_eq!(target, 2);
-        let refreshed = wait_for(&path, |document| document.scan_sequence >= target);
-        assert_eq!(refreshed.revision, 2);
-        assert_eq!(refreshed.devices.len(), 2);
-        assert_eq!(refreshed.changes.last().unwrap().kind, "added");
+        let control = handle.control();
+        assert_eq!(control.request_refresh(), Some(2));
+        let burst = (0..200).map(|_| control.request_refresh().unwrap());
+        let target = burst.max().unwrap();
+        assert!(target <= 3, "200 requests promise at most two more scans");
+        let refreshed = wait_for(root.path(), |d| d.scan_sequence >= target);
+        let expected = format!("ready rev={target} scan={target} devices={target} last=added");
+        assert_eq!(refreshed, expected);
 
         handle.stop();
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "no scan without a trigger");
-    }
-
-    struct OneMipiCamera;
-
-    impl Provider for OneMipiCamera {
-        fn name(&self) -> &str {
-            "test.mipi"
-        }
-        fn subsystems(&self) -> &[String] {
-            &[]
-        }
-        fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
-            Ok(vec![Record {
-                id: "camera:imx477 5-001a".into(),
-                kind: "camera".into(),
-                provider: "test.mipi".into(),
-                details: json!({"backend": "mipi", "modes": [{
-                    "format": "NV12", "width": 1920, "height": 1080,
-                    "framerate_num": 30, "framerate_den": 1, "isp_output": true
-                }]}),
-            }])
-        }
+        let code = |d: &CatalogDocument| d.error.as_ref().map(|error| error["code"].clone());
+        let stopped = |d: &CatalogDocument| code(d) == Some(json!("peripherals.stopped"));
+        let (scans, revision) = (calls.load(SeqCst), calls.load(SeqCst) + 1);
+        let expected = format!("degraded rev={revision} scan={scans} devices={scans} last=error");
+        let stopped = wait_for(root.path(), stopped);
+        assert_eq!(stopped, expected, "no scan without a trigger");
+        assert_eq!(control.request_refresh(), None);
+        // The process may already run niced; discovery adds NICE on top.
+        let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        assert_eq!(*nice.lock().unwrap(), Some((base + NICE).min(19)));
     }
 
     #[test]
@@ -543,136 +511,37 @@ mod tests {
         let root = TempDir::new();
         let rules_dir = root.path().join("support");
         fs::create_dir_all(&rules_dir).unwrap();
-        let (path, handle) = start(root.path(), 10, vec![Box::new(OneMipiCamera)]);
-
-        let before = wait_for(&path, |document| document.ready);
-        assert_eq!(before.support.as_ref().unwrap().state, "not_installed");
-        assert_eq!(before.devices[0]["camera"]["modes"][0]["supported"], false);
+        let mode = json!({"format": "NV12", "width": 1920, "height": 1080,
+                          "framerate_num": 30, "framerate_den": 1, "isp_output": true});
+        let details = json!({"backend": "mipi", "modes": [mode]});
+        let camera = record("test.mipi", "camera:imx477 5-001a", details);
+        let provider = Fake("test.mipi", move || Ok(vec![camera.clone()]));
+        let handle = start(root.path(), 10, provider);
+        let supported = |d: &CatalogDocument, source: Option<&str>| {
+            let support = d.support.as_ref().unwrap().source.as_deref();
+            d.devices[0]["camera"]["modes"][0]["supported"] == source.is_some() && support == source
+        };
+        let before = wait_for(root.path(), |d| d.ready && supported(d, None));
+        assert_eq!(before, "ready rev=1 scan=1 devices=1 last=-");
 
         let staged = rules_dir.join("neat-core.json.dpkg-new");
-        fs::write(
-            &staged,
-            json!({"format": 1, "source": "neat-core 0.4.0", "camera": {
-                "backends": {"accept": ["mipi"], "reason": "MIPI only."},
-                "formats": {"accept": ["NV12"], "reason": "NV12 only."},
-                "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "30/1 only."},
-                "isp_output": {"reason": "Not an ISP output size."}
-            }})
-            .to_string(),
-        )
-        .unwrap();
+        fs::write(&staged, core_rules().to_string()).unwrap();
         fs::rename(&staged, rules_dir.join("neat-core.json")).unwrap();
-
-        let after = wait_for(&path, |document| document.revision > before.revision);
-        assert_eq!(after.devices[0]["camera"]["modes"][0]["supported"], true);
-        assert_eq!(
-            after.support.as_ref().unwrap().source.as_deref(),
-            Some("neat-core 0.4.0")
-        );
-        assert_eq!(
-            after.scan_sequence, before.scan_sequence,
-            "no hardware rescan"
-        );
-        assert_eq!(after.changes.last().unwrap().kind, "changed");
-
+        let after = wait_for(root.path(), |d| supported(d, Some("neat-core 0.4.0")));
+        assert_eq!(after, "ready rev=2 scan=1 devices=1 last=changed");
         handle.stop();
-    }
-
-    struct NiceProbe(Arc<std::sync::Mutex<Option<i32>>>);
-
-    impl Provider for NiceProbe {
-        fn name(&self) -> &str {
-            "test.nice"
-        }
-        fn subsystems(&self) -> &[String] {
-            &[]
-        }
-        fn discover(&mut self) -> Result<Vec<Record>, ProviderError> {
-            // SAFETY: reads this thread's own scheduling priority.
-            let nice = unsafe {
-                libc::getpriority(
-                    libc::PRIO_PROCESS,
-                    libc::syscall(libc::SYS_gettid) as libc::id_t,
-                )
-            };
-            *self.0.lock().unwrap() = Some(nice);
-            Ok(Vec::new())
-        }
-    }
-
-    #[test]
-    fn scans_run_at_lower_priority() {
-        let root = TempDir::new();
-        let seen = Arc::new(std::sync::Mutex::new(None));
-        let (path, handle) = start(root.path(), 10, vec![Box::new(NiceProbe(seen.clone()))]);
-        wait_for(&path, |document| document.ready);
-        handle.stop();
-        // The process may already run niced; discovery adds NICE on top.
-        let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
-        assert_eq!(*seen.lock().unwrap(), Some((base + NICE).min(19)));
-    }
-
-    #[test]
-    fn a_burst_of_refresh_requests_shares_one_scan() {
-        let root = TempDir::new();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counting = Counting {
-            calls: calls.clone(),
-            subsystems: vec![],
-        };
-        let (path, handle) = start(root.path(), 100, vec![Box::new(counting)]);
-        wait_for(&path, |document| document.ready);
-        let control = handle.control();
-        let mut target = 0;
-        for _ in 0..200 {
-            target = control.request_refresh().unwrap();
-        }
-        let document = wait_for(&path, |document| document.scan_sequence >= target);
-        handle.stop();
-        assert!(
-            target <= 3,
-            "200 requests promise at most two more scans, got {target}"
-        );
-        assert!(
-            calls.load(Ordering::SeqCst) <= 3,
-            "200 refresh requests ran {} scans",
-            calls.load(Ordering::SeqCst)
-        );
-        assert!(document.scan_sequence <= 3);
     }
 
     #[test]
     fn events_cannot_postpone_a_scan_forever_or_delay_a_refresh() {
-        let start = Instant::now();
-        let debounce = Duration::from_millis(250);
-        // Trailing debounce inside a burst.
-        assert_eq!(
-            scan_due_after_event(start, start, debounce, None, false),
-            start + debounce
-        );
-        // An event stream 900 ms in is capped at one second after it began.
+        let (start, debounce) = (Instant::now(), Duration::from_millis(250));
+        let due = |now, due, refresh| scan_due_after_event(now, start, debounce, due, refresh);
+        let trailing = due(start, None, false);
+        assert_eq!(trailing, start + debounce);
         let late = start + Duration::from_millis(900);
-        assert_eq!(
-            scan_due_after_event(late, start, debounce, Some(late), false),
-            start + MAX_EVENT_WAIT
-        );
-        // A refresh due now is not pushed back by a new event.
-        assert_eq!(
-            scan_due_after_event(start, start, debounce, Some(start), true),
-            start
-        );
-    }
-
-    #[test]
-    fn stopping_marks_the_catalog_stopped_and_refuses_refreshes() {
-        let root = TempDir::new();
-        let (path, handle) = start(root.path(), 10, vec![]);
-        wait_for(&path, |document| document.ready);
-        let control = handle.control();
-        handle.stop();
-        let document = read(&path).unwrap();
-        assert_eq!(document.state, "degraded");
-        assert_eq!(document.error.unwrap()["code"], "peripherals.stopped");
-        assert_eq!(control.request_refresh(), None);
+        let capped = due(late, Some(late), false);
+        assert_eq!(capped, start + MAX_EVENT_WAIT);
+        let refresh = due(start, Some(start), true);
+        assert_eq!(refresh, start, "a waiting refresh is not delayed");
     }
 }

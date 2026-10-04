@@ -561,78 +561,38 @@ mod tests {
 
     #[test]
     fn peripheral_catalog_is_served_as_written() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-api-peripherals-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = std::env::temp_dir().join(format!("sentinel-api-p-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let catalog_path = root.join("peripherals.json");
         let mut catalog = crate::peripherals::catalog::Catalog::new("instance-a", 8);
-        catalog
-            .apply_success(
-                vec![crate::peripherals::model::Record {
-                    id: "camera:imx477 5-001a".into(),
-                    kind: "camera".into(),
-                    provider: "daemon.camera.mipi".into(),
-                    details: json!({"modes": []}),
-                }],
-                vec![],
-            )
-            .unwrap();
+        let camera = crate::peripherals::scan::testing::record("p", "camera:x", json!({}));
+        catalog.apply_success(vec![camera], vec![]).unwrap();
         crate::peripherals::service::publish(&catalog_path, &catalog.document()).unwrap();
-        let socket_path = root.join("api.sock");
-        let stopped = Arc::new(AtomicBool::new(false));
-        let handle = spawn(
-            &socket_path,
-            &root.join("cache.json"),
-            &root.join("runs"),
-            Some(PeripheralsApi {
-                catalog_path: catalog_path.clone(),
-                control: None,
-            }),
-            stopped.clone(),
-        )
-        .unwrap();
+        let (socket, stopped) = (root.join("api.sock"), Arc::new(AtomicBool::new(false)));
+        let peripherals = Some(PeripheralsApi {
+            catalog_path: catalog_path.clone(),
+            control: None,
+        });
+        let (cache, runs) = (root.join("cache.json"), root.join("runs"));
+        let handle = spawn(&socket, &cache, &runs, peripherals, stopped.clone()).unwrap();
+        let get = |query: &str| {
+            let get = format!("GET /v1/peripherals{query} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            request(&socket, &get)
+        };
 
-        let full = request(
-            &socket_path,
-            "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        );
+        let full = get("");
         let body = full.split_once("\r\n\r\n").unwrap().1;
         assert_eq!(body.as_bytes(), fs::read(&catalog_path).unwrap());
-
-        let current = response_json(&request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=1&instance_id=instance-a HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
+        let current = response_json(&get("?since_revision=1&instance_id=instance-a"));
         assert_eq!(current["unchanged"], true);
-        let other_instance = response_json(&request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=1&instance_id=instance-b HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ));
-        assert_eq!(other_instance["devices"][0]["id"], "camera:imx477 5-001a");
-        let invalid = request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=x HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        );
-        assert!(invalid.starts_with("HTTP/1.1 400"));
-        let no_instance = request(
-            &socket_path,
-            "GET /v1/peripherals?since_revision=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        );
-        assert!(no_instance.starts_with("HTTP/1.1 400"), "{no_instance}");
-        let refresh = request(
-            &socket_path,
-            "POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-        );
-        assert!(
-            refresh.starts_with("HTTP/1.1 503"),
-            "no control, no refresh"
-        );
+        let other_instance = response_json(&get("?since_revision=1&instance_id=instance-b"));
+        assert_eq!(other_instance["devices"][0]["id"], "camera:x");
+        for query in ["?since_revision=x", "?since_revision=1"] {
+            assert!(get(query).starts_with("HTTP/1.1 400"), "{query}");
+        }
+        let refresh = "POST /v1/peripherals/refresh HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+        let refresh = request(&socket, refresh);
+        assert!(refresh.starts_with("HTTP/1.1 503"), "no control");
 
         stopped.store(true, Ordering::Relaxed);
         handle.join().unwrap();

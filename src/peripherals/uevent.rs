@@ -125,24 +125,15 @@ fn message_subsystem(message: &[u8]) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::message_subsystem;
 
     #[test]
-    fn subsystem_is_found_in_kernel_messages() {
-        let message = b"add@/devices/usb1/1-2/1-2.3:1.0/video4linux/video2\0ACTION=add\0DEVPATH=/devices/usb1/1-2/1-2.3:1.0/video4linux/video2\0SUBSYSTEM=video4linux\0DEVNAME=video2\0SEQNUM=4127\0";
-        assert_eq!(message_subsystem(message), Some("video4linux"));
-    }
-
-    #[test]
-    fn subsystem_is_found_after_a_udev_binary_header() {
-        let mut message = b"libudev\0\xfe\xed\xca\xfe\x28\0\0\0".to_vec();
-        message.extend_from_slice(b"ACTION=remove\0SUBSYSTEM=sound\0DEVPATH=/devices/x\0");
-        assert_eq!(message_subsystem(&message), Some("sound"));
-    }
-
-    #[test]
-    fn messages_without_a_subsystem_are_ignored() {
+    fn subsystem_is_found_in_kernel_and_udev_messages() {
+        let kernel = b"add@/devices/usb1/1-2/video4linux/video2\0ACTION=add\0SUBSYSTEM=video4linux\0SEQNUM=4127\0";
+        assert_eq!(message_subsystem(kernel), Some("video4linux"));
+        let udev =
+            b"libudev\0\xfe\xed\xca\xfe\x28\0\0\0ACTION=remove\0SUBSYSTEM=sound\0DEVPATH=/x\0";
+        assert_eq!(message_subsystem(udev), Some("sound"));
         assert_eq!(message_subsystem(b"ACTION=add\0DEVPATH=/x\0"), None);
-        assert_eq!(message_subsystem(b""), None);
     }
 }

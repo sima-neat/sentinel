@@ -331,16 +331,13 @@ pub(crate) fn core_rules() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peripherals::scan::testing::record;
     use crate::peripherals::sysutil::testing::TempDir;
     use serde_json::json;
 
     fn camera(backend: &str, modes: Value) -> Record {
-        Record {
-            id: format!("camera:{backend}"),
-            kind: "camera".into(),
-            provider: "test".into(),
-            details: json!({"backend": backend, "modes": modes}),
-        }
+        let details = json!({"backend": backend, "modes": modes});
+        record("test", &format!("camera:{backend}"), details)
     }
 
     fn mode(format: &str, width: u32, rate: (u32, u32), isp_output: bool) -> Value {
@@ -348,122 +345,102 @@ mod tests {
                "framerate_num": rate.0, "framerate_den": rate.1, "isp_output": isp_output})
     }
 
-    fn verdicts(record: &Record) -> Vec<(bool, String)> {
-        record.details["modes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|mode| {
-                (
-                    mode["supported"].as_bool().unwrap(),
-                    mode["reason"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect()
+    fn verdicts(record: &Record) -> Vec<(bool, Value)> {
+        let modes = record.details["modes"].as_array().unwrap().iter();
+        let verdict = |mode: &Value| (mode["supported"] == true, mode["reason"].clone());
+        modes.map(verdict).collect()
     }
 
+    /// Rules are checked in a fixed order and the first failure is the
+    /// reason; 60/2 is 30/1; ranges are never supported; only cameras are
+    /// classified.
     #[test]
     fn core_rules_classify_each_mode_with_the_first_failing_reason() {
         let dir = TempDir::new();
         let path = dir.path().join("neat-core.json");
         fs::write(&path, core_rules().to_string()).unwrap();
-        let mut stage = SupportStage::new(&path);
-        let mut devices = vec![
-            camera(
-                "mipi",
-                json!([
-                    mode("NV12", 1920, (30, 1), true),
-                    mode("NV12", 1280, (30, 1), false),
-                    mode("RGB", 1920, (30, 1), true),
-                    mode("NV12", 1920, (60, 2), true),
-                    mode("NV12", 1920, (15, 1), true),
-                    {"format": "NV12", "framerate_num": 30, "framerate_den": 1,
-                     "size_range": {"min_width": 640, "min_height": 480, "max_width": 1920,
-                                    "max_height": 1080, "step_width": 16, "step_height": 8}}
-                ]),
-            ),
-            camera("v4l2", json!([mode("NV12", 1920, (30, 1), true)])),
-        ];
+        let range = json!({"format": "NV12", "framerate_num": 30, "framerate_den": 1,
+            "size_range": {"min_width": 640, "min_height": 480, "max_width": 1920,
+                           "max_height": 1080, "step_width": 16, "step_height": 8}});
+        let mipi = json!([
+            mode("NV12", 1920, (30, 1), true),
+            mode("NV12", 1280, (30, 1), false),
+            mode("RGB", 1920, (15, 1), false),
+            mode("NV12", 1920, (60, 2), true),
+            mode("NV12", 1920, (15, 1), false),
+            range
+        ]);
+        let usb = camera("v4l2", json!([mode("YUYV", 1920, (15, 1), false)]));
+        let mut microphone = camera("mipi", json!([{}]));
+        microphone.kind = "microphone".into();
+        let mut devices = [camera("mipi", mipi), usb, microphone];
         let mut issues = Vec::new();
-        let status = stage.apply(&mut devices, &mut issues);
+        let status = SupportStage::new(&path).apply(&mut devices, &mut issues);
         assert_eq!(status.state, "applied");
-        assert_eq!(status.source.as_deref(), Some("neat-core 0.4.0"));
+        assert_eq!(status.source.unwrap(), "neat-core 0.4.0");
         assert!(issues.is_empty());
-
-        let mipi = verdicts(&devices[0]);
-        assert_eq!(mipi[0], (true, String::new()));
-        assert!(mipi[1].1.contains("not an ISP output size"));
-        assert!(mipi[2].1.contains("NV12 output only"));
-        assert_eq!(mipi[3], (true, String::new()), "60/2 equals 30/1");
-        assert!(mipi[4].1.contains("30/1 frame rate"));
-        assert!(mipi[5].1.contains("Size ranges are advisory"));
-        assert!(verdicts(&devices[1])[0].1.contains("MIPI cameras only"));
+        let rules = core_rules();
+        let reason = |rule: &str| rules["camera"][rule]["reason"].clone();
+        let expected = [
+            (true, json!("")),
+            (false, reason("isp_output")),
+            (false, reason("formats")),
+            (true, json!("")),
+            (false, reason("framerates")),
+            (false, json!(RANGE_REASON)),
+        ];
+        assert_eq!(verdicts(&devices[0]), expected);
+        assert_eq!(verdicts(&devices[1]), [(false, reason("backends"))]);
+        assert_eq!(devices[2].details["modes"], json!([{}]), "not a camera");
     }
 
+    /// Every rules-file state. Without valid rules every mode is unknown;
+    /// `stale` (an invalid update) keeps the previous rules, and a newer
+    /// format asks for a Sentinel update.
     #[test]
-    fn missing_rules_mark_every_mode_unknown_with_a_reason() {
-        let dir = TempDir::new();
-        let mut stage = SupportStage::new(dir.path().join("neat-core.json"));
-        let mut devices = vec![camera("mipi", json!([mode("NV12", 1920, (30, 1), true)]))];
-        let mut issues = Vec::new();
-        let status = stage.apply(&mut devices, &mut issues);
-        assert_eq!(status.state, "not_installed");
-        assert!(status.source.is_none());
-        assert!(issues.is_empty());
-        assert_eq!(verdicts(&devices[0])[0], (false, NOT_INSTALLED.into()));
-    }
-
-    #[test]
-    fn invalid_update_keeps_the_last_good_rules_and_reports_an_issue() {
+    fn rules_file_states() {
         let dir = TempDir::new();
         let path = dir.path().join("neat-core.json");
-        fs::write(&path, core_rules().to_string()).unwrap();
         let mut stage = SupportStage::new(&path);
-        let mut devices = vec![camera("mipi", json!([mode("NV12", 1920, (30, 1), true)]))];
-        stage.apply(&mut devices, &mut Vec::new());
-
-        fs::write(&path, r#"{"format": 2, "source": "x", "camera": {}}"#).unwrap();
-        let mut issues = Vec::new();
-        let status = stage.apply(&mut devices, &mut issues);
-        assert_eq!(status.state, "stale");
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].code, "peripherals.invalid_support_rules");
+        // `state source supported[, issue]` after writing `contents` ("" removes
+        // the file), and the issues.
+        let mut apply = |contents: &str| {
+            let _ = fs::remove_file(&path);
+            if !contents.is_empty() {
+                fs::write(&path, contents).unwrap();
+            }
+            let mut devices = [camera("mipi", json!([mode("NV12", 1920, (30, 1), true)]))];
+            let mut issues = Vec::new();
+            let status = stage.apply(&mut devices, &mut issues);
+            assert_eq!(status.path, path.display().to_string());
+            let (supported, reason) = verdicts(&devices[0]).remove(0);
+            assert_eq!(reason, if supported { "" } else { NOT_INSTALLED });
+            let source = status.source.unwrap_or("-".into());
+            let mut text = format!("{} {source} {supported}", status.state);
+            for issue in &issues {
+                let (provider, code) = (&issue.provider, &issue.code);
+                let retained = issue.retained_last_good;
+                text += &format!(", {provider} {code} retained={retained}");
+            }
+            (text, issues)
+        };
+        assert_eq!(apply("").0, "not_installed - false");
+        let issue = "support peripherals.invalid_support_rules";
+        let expected = format!("invalid - false, {issue} retained=false");
+        assert_eq!(apply("not json").0, expected);
+        let (text, _) = apply(&core_rules().to_string());
+        assert_eq!(text, "applied neat-core 0.4.0 true");
+        let (text, issues) = apply(r#"{"format": 2, "source": "x", "camera": {}}"#);
+        let expected = format!("stale neat-core 0.4.0 true, {issue} retained=true");
+        assert_eq!(text, expected);
         assert!(issues[0].reason.contains("format 2"));
         assert!(issues[0].reason.contains("sima-cli neat install sentinel"));
-        assert!(issues[0].retained_last_good);
-        assert_eq!(verdicts(&devices[0])[0], (true, String::new()));
-    }
-
-    #[test]
-    fn invalid_rules_without_a_previous_version_report_invalid() {
-        let dir = TempDir::new();
-        let path = dir.path().join("neat-core.json");
-        fs::write(&path, "not json").unwrap();
-        let mut stage = SupportStage::new(&path);
-        let mut devices = vec![camera("mipi", json!([mode("NV12", 1920, (30, 1), true)]))];
-        let mut issues = Vec::new();
-        let status = stage.apply(&mut devices, &mut issues);
-        assert_eq!(status.state, "invalid");
-        assert!(!issues[0].retained_last_good);
-        assert!(!verdicts(&devices[0])[0].0);
-    }
-
-    #[test]
-    fn non_camera_records_are_left_alone() {
-        let dir = TempDir::new();
-        let mut stage = SupportStage::new(dir.path().join("missing.json"));
-        let mut devices = vec![Record {
-            id: "microphone:x".into(),
-            kind: "microphone".into(),
-            provider: "test".into(),
-            details: json!({"modes": [{"format": "S16_LE"}]}),
-        }];
-        stage.apply(&mut devices, &mut Vec::new());
-        assert!(devices[0].details["modes"][0].get("supported").is_none());
+        assert_eq!(apply("").0, "not_installed - false");
     }
 
     #[test]
     fn watch_reports_changes_to_the_rules_file_only() {
+        assert!(RulesWatch::open(Path::new("/nonexistent/sentinel/neat-core.json")).is_err());
         let dir = TempDir::new();
         let path = dir.path().join("neat-core.json");
         let watch = RulesWatch::open(&path).unwrap();
@@ -473,16 +450,8 @@ mod tests {
         let staged = dir.path().join("neat-core.json.dpkg-new");
         fs::write(&staged, core_rules().to_string()).unwrap();
         fs::rename(&staged, &path).unwrap();
-        assert!(
-            watch.drain().unwrap(),
-            "a package-manager style rename is seen"
-        );
+        assert!(watch.drain().unwrap(), "a package-manager rename");
         fs::remove_file(&path).unwrap();
         assert!(watch.drain().unwrap(), "removal is seen");
-    }
-
-    #[test]
-    fn watch_needs_an_existing_directory() {
-        assert!(RulesWatch::open(Path::new("/nonexistent/sentinel/neat-core.json")).is_err());
     }
 }

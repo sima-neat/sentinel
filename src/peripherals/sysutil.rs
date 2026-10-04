@@ -51,12 +51,14 @@ pub(crate) fn disappeared(errno: i32) -> bool {
     errno == libc::ENOENT || errno == libc::ENODEV || errno == libc::ENXIO
 }
 
-/// Temporary-directory fixtures shared by the provider tests.
+/// Fixtures shared by the peripheral tests.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::peripherals::model::{ProviderError, Record};
 
     /// A fresh directory under the system temp directory, removed on drop.
     pub(crate) struct TempDir(PathBuf);
@@ -64,13 +66,11 @@ pub(crate) mod testing {
     impl TempDir {
         pub(crate) fn new() -> Self {
             static COUNTER: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "sentinel-peripherals-test-{}-{}",
-                std::process::id(),
-                COUNTER.fetch_add(1, Ordering::SeqCst)
-            ));
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let name = format!("sentinel-peripherals-test-{}-{n}", std::process::id());
+            let path = std::env::temp_dir().join(name);
             let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).expect("create fixture directory");
+            fs::create_dir_all(&path).unwrap();
             Self(path)
         }
 
@@ -89,5 +89,19 @@ pub(crate) mod testing {
     pub(crate) fn write_file(path: &Path, value: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, value).unwrap();
+    }
+
+    /// A scan of a tree under `root`, with its paths as on a board
+    /// (`/dev/video0`, not `/tmp/…/dev/video0`).
+    pub(crate) fn on_board(
+        root: &Path,
+        result: Result<Vec<Record>, ProviderError>,
+    ) -> Result<Vec<Record>, ProviderError> {
+        let strip = |text: String| text.replace(root.to_str().unwrap(), "");
+        let mut records = result.map_err(|e| ProviderError::new(e.code, strip(e.reason)))?;
+        for record in &mut records {
+            record.details = serde_json::from_str(&strip(record.details.to_string())).unwrap();
+        }
+        Ok(records)
     }
 }

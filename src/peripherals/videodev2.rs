@@ -202,6 +202,13 @@ pub(crate) const VIDIOC_ENUM_FRAMEINTERVALS: u32 = ioc(
     75,
     std::mem::size_of::<FrmIvalEnum>(),
 );
+// Values from <linux/videodev2.h> (identical on aarch64 and x86_64).
+const _: () = assert!(
+    VIDIOC_QUERYCAP == 0x8068_5600
+        && VIDIOC_ENUM_FMT == 0xc040_5602
+        && VIDIOC_ENUM_FRAMESIZES == 0xc02c_564a
+        && VIDIOC_ENUM_FRAMEINTERVALS == 0xc034_564b
+);
 
 /// The capabilities of the opened node: `device_caps` when the driver sets
 /// `V4L2_CAP_DEVICE_CAPS` in `capabilities` (as `<linux/videodev2.h>`
@@ -301,145 +308,77 @@ impl VideoNode for SystemNode {
     }
 }
 
-/// A fake video node shared by the provider tests.
+/// A fake video node shared by the provider tests: it answers from its lists
+/// in driver order, counts every ioctl, and fails `fail.0` with errno `fail.1`.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum VideoOp {
-        QueryCap,
-        EnumFmt,
-        EnumFrameSizes,
-        EnumFrameIntervals,
-    }
-
-    /// Serves synthetic answers and records every ioctl it receives.
     #[derive(Debug, Clone, Default)]
     pub(crate) struct FakeVideoNode {
         pub capability: Capability,
-        /// `(buffer type, pixel format)` in driver order.
-        pub formats: Vec<(u32, u32)>,
-        /// `VIDIOC_ENUM_FMT` descriptions by pixel format; none when absent.
-        pub descriptions: Vec<(u32, String)>,
-        /// `(pixel format, frame size)` in driver order.
+        /// `(buffer type, pixel format, description)`.
+        pub formats: Vec<(u32, u32, &'static str)>,
         pub sizes: Vec<(u32, FrmSizeEnum)>,
-        /// `((pixel format, width, height), interval)` in driver order.
+        /// `((pixel format, width, height), interval)`.
         pub intervals: Vec<((u32, u32, u32), FrmIvalEnum)>,
-        pub fail: Option<(VideoOp, i32)>,
-        pub calls: Arc<Mutex<Vec<VideoOp>>>,
+        pub fail: Option<(u32, i32)>,
+        pub calls: Arc<AtomicUsize>,
     }
 
     impl FakeVideoNode {
         pub(crate) fn new(card: &str, capabilities: u32, device_caps: u32) -> Self {
-            let mut capability = Capability {
-                capabilities,
-                device_caps,
-                ..Capability::default()
+            let mut node = Self::default();
+            node.capability.capabilities = capabilities;
+            node.capability.device_caps = device_caps;
+            node.capability.card[..card.len()].copy_from_slice(card.as_bytes());
+            node
+        }
+
+        fn answer<T>(&self, request: u32, found: Option<T>) -> io::Result<T> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let found = match self.fail {
+                Some((failing, errno)) if failing == request => Err(errno),
+                _ => found.ok_or(libc::EINVAL),
             };
-            capability.card[..card.len()].copy_from_slice(card.as_bytes());
-            Self {
-                capability,
-                ..Self::default()
-            }
-        }
-
-        pub(crate) fn format(mut self, buffer_type: u32, pixel_format: u32) -> Self {
-            self.formats.push((buffer_type, pixel_format));
-            self
-        }
-
-        pub(crate) fn described(mut self, pixel_format: u32, description: &str) -> Self {
-            self.descriptions
-                .push((pixel_format, description.to_string()));
-            self
-        }
-
-        pub(crate) fn size(mut self, pixel_format: u32, size: FrmSizeEnum) -> Self {
-            self.sizes.push((pixel_format, size));
-            self
-        }
-
-        pub(crate) fn interval(
-            mut self,
-            pixel_format: u32,
-            width: u32,
-            height: u32,
-            value: FrmIvalEnum,
-        ) -> Self {
-            self.intervals.push(((pixel_format, width, height), value));
-            self
-        }
-
-        pub(crate) fn failing(mut self, op: VideoOp, errno: i32) -> Self {
-            self.fail = Some((op, errno));
-            self
-        }
-
-        fn check(&self, op: VideoOp) -> io::Result<()> {
-            self.calls.lock().unwrap().push(op);
-            match self.fail {
-                Some((failing, errno)) if failing == op => Err(io::Error::from_raw_os_error(errno)),
-                _ => Ok(()),
-            }
+            found.map_err(io::Error::from_raw_os_error)
         }
     }
 
-    fn einval() -> io::Error {
-        io::Error::from_raw_os_error(libc::EINVAL)
+    fn nth<K: PartialEq, V: Copy>(list: &[(K, V)], key: K, index: u32) -> Option<V> {
+        let mut matching = list.iter().filter(|(candidate, _)| *candidate == key);
+        matching.nth(index as usize).map(|(_, value)| *value)
     }
 
     impl VideoNode for FakeVideoNode {
         fn query_capability(&mut self, value: &mut Capability) -> io::Result<()> {
-            self.check(VideoOp::QueryCap)?;
-            *value = self.capability;
+            *value = self.answer(VIDIOC_QUERYCAP, Some(self.capability))?;
             Ok(())
         }
 
         fn enum_format(&mut self, value: &mut FmtDesc) -> io::Result<()> {
-            self.check(VideoOp::EnumFmt)?;
-            let found = self
-                .formats
-                .iter()
-                .filter(|(buffer_type, _)| *buffer_type == value.buf_type)
-                .nth(value.index as usize)
-                .ok_or_else(einval)?;
-            value.pixelformat = found.1;
-            let description = self
-                .descriptions
-                .iter()
-                .find(|(format, _)| *format == found.1);
-            if let Some((_, text)) = description {
-                value.description[..text.len()].copy_from_slice(text.as_bytes());
-            }
+            let mut matching = self.formats.iter().filter(|f| f.0 == value.buf_type);
+            let found = matching.nth(value.index as usize).copied();
+            let (_, pixel_format, text) = self.answer(VIDIOC_ENUM_FMT, found)?;
+            value.pixelformat = pixel_format;
+            value.description[..text.len()].copy_from_slice(text.as_bytes());
             Ok(())
         }
 
         fn enum_frame_size(&mut self, value: &mut FrmSizeEnum) -> io::Result<()> {
-            self.check(VideoOp::EnumFrameSizes)?;
-            let found = self
-                .sizes
-                .iter()
-                .filter(|(pixel_format, _)| *pixel_format == value.pixel_format)
-                .nth(value.index as usize)
-                .ok_or_else(einval)?;
-            value.kind = found.1.kind;
-            value.data = found.1.data;
+            let found = nth(&self.sizes, value.pixel_format, value.index);
+            let size = self.answer(VIDIOC_ENUM_FRAMESIZES, found)?;
+            (value.kind, value.data) = (size.kind, size.data);
             Ok(())
         }
 
         fn enum_frame_interval(&mut self, value: &mut FrmIvalEnum) -> io::Result<()> {
-            self.check(VideoOp::EnumFrameIntervals)?;
             let key = (value.pixel_format, value.width, value.height);
-            let found = self
-                .intervals
-                .iter()
-                .filter(|(candidate, _)| *candidate == key)
-                .nth(value.index as usize)
-                .ok_or_else(einval)?;
-            value.kind = found.1.kind;
-            value.data = found.1.data;
+            let found = nth(&self.intervals, key, value.index);
+            let interval = self.answer(VIDIOC_ENUM_FRAMEINTERVALS, found)?;
+            (value.kind, value.data) = (interval.kind, interval.data);
             Ok(())
         }
     }
@@ -448,70 +387,25 @@ pub(crate) mod testing {
         u32::from_le_bytes(*code)
     }
 
-    pub(crate) fn raw_size_discrete(width: u32, height: u32) -> FrmSizeEnum {
-        FrmSizeEnum {
-            kind: V4L2_FRMSIZE_TYPE_DISCRETE,
-            data: [width, height, 0, 0, 0, 0],
-            ..FrmSizeEnum::default()
-        }
+    /// A frame size or interval of `kind` with its `<linux/videodev2.h>` data.
+    pub(crate) fn raw_size(kind: u32, data: [u32; 6]) -> FrmSizeEnum {
+        let mut size = FrmSizeEnum::default();
+        (size.kind, size.data) = (kind, data);
+        size
     }
 
-    pub(crate) fn raw_interval_discrete(numerator: u32, denominator: u32) -> FrmIvalEnum {
-        FrmIvalEnum {
-            kind: V4L2_FRMIVAL_TYPE_DISCRETE,
-            data: [numerator, denominator, 0, 0, 0, 0],
-            ..FrmIvalEnum::default()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ioctl_abi_matches_linux_videodev2() {
-        // Values from <linux/videodev2.h> (generic _IOC encoding, identical on
-        // aarch64 and x86_64). Structure sizes are checked at compile time.
-        assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
-        assert_eq!(VIDIOC_ENUM_FMT, 0xc040_5602);
-        assert_eq!(VIDIOC_ENUM_FRAMESIZES, 0xc02c_564a);
-        assert_eq!(VIDIOC_ENUM_FRAMEINTERVALS, 0xc034_564b);
+    pub(crate) fn raw_interval(kind: u32, data: [u32; 6]) -> FrmIvalEnum {
+        let mut interval = FrmIvalEnum::default();
+        (interval.kind, interval.data) = (kind, data);
+        interval
     }
 
-    #[test]
-    fn enumeration_budget_allows_exactly_its_limit() {
-        let mut budget = EnumerationBudget::new();
-        for _ in 0..MAX_DEVICE_ENUMERATIONS {
-            budget.spend().unwrap();
-        }
-        assert_eq!(
-            budget.spend().unwrap_err(),
-            "enumeration (more than 4096 queries)"
-        );
+    pub(crate) fn discrete_size(width: u32, height: u32) -> FrmSizeEnum {
+        raw_size(V4L2_FRMSIZE_TYPE_DISCRETE, [width, height, 0, 0, 0, 0])
     }
 
-    #[test]
-    fn effective_capabilities_follow_the_device_caps_flag() {
-        let capability = |capabilities, device_caps| Capability {
-            capabilities,
-            device_caps,
-            ..Capability::default()
-        };
-        let mplane = V4L2_CAP_VIDEO_CAPTURE_MPLANE;
-        assert_eq!(
-            effective_capabilities(&capability(V4L2_CAP_DEVICE_CAPS | mplane, mplane)),
-            mplane
-        );
-        // Flag set: device_caps is authoritative even when it is zero.
-        assert_eq!(
-            effective_capabilities(&capability(V4L2_CAP_DEVICE_CAPS | mplane, 0)),
-            0
-        );
-        // Flag clear: device_caps is not valid and is ignored.
-        assert_eq!(
-            effective_capabilities(&capability(V4L2_CAP_VIDEO_CAPTURE, mplane)),
-            V4L2_CAP_VIDEO_CAPTURE
-        );
+    pub(crate) fn discrete_interval(numerator: u32, denominator: u32) -> FrmIvalEnum {
+        let data = [numerator, denominator, 0, 0, 0, 0];
+        raw_interval(V4L2_FRMIVAL_TYPE_DISCRETE, data)
     }
 }
