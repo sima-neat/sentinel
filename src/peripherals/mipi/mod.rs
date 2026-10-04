@@ -78,12 +78,6 @@ impl MipiProvider {
     }
 }
 
-impl Default for MipiProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Provider for MipiProvider {
     fn name(&self) -> &str {
         PROVIDER_NAME
@@ -123,8 +117,9 @@ impl Provider for MipiProvider {
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
         let records = sensors.into_iter().map(|sensor| {
-            let timing =
-                (sensor.subdev).and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
+            let timing = sensor
+                .subdev
+                .and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
             let mut details = json!({
                 "camera_name": sensor.name,
                 "backend": "mipi",
@@ -331,9 +326,11 @@ fn media_device_paths(dev_root: &Path) -> Result<Vec<PathBuf>, ProviderError> {
         Err(error) if errno_of(&error) == libc::ENOENT => return Ok(Vec::new()),
         names => names.map_err(|error| listing_failure(dev_root, &error))?,
     };
-    let number = |name: &OsString| name.to_str()?.strip_prefix("media").map(str::to_owned);
-    let digits = |n: String| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
-    let names = names.into_iter().filter(|n| number(n).is_some_and(digits));
+    let media = |name: &OsString| {
+        let number = name.to_str().and_then(|name| name.strip_prefix("media"));
+        number.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let names = names.into_iter().filter(media);
     Ok(names.map(|name| dev_root.join(name)).collect())
 }
 

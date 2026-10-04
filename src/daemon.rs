@@ -26,21 +26,17 @@ pub fn run(
 ) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stopped.clone());
-    let peripherals_thread = match peripherals {
-        Some(settings) => match crate::peripherals::start(settings) {
-            Ok(handle) => Some((settings.catalog_path.clone(), handle)),
-            Err(error) => {
-                eprintln!("Sentinel peripheral discovery failed to start: {error:#}");
-                None
-            }
-        },
-        None => None,
-    };
+    let peripherals_thread = peripherals.and_then(|settings| {
+        crate::peripherals::start(settings)
+            .map_err(|error| eprintln!("Sentinel peripheral discovery failed to start: {error:#}"))
+            .ok()
+            .map(|handle| (settings, handle))
+    });
     let peripherals_api =
         peripherals_thread
             .as_ref()
-            .map(|(path, handle)| crate::api::PeripheralsApi {
-                catalog_path: path.clone(),
+            .map(|(settings, handle)| crate::api::PeripheralsApi {
+                catalog_path: settings.catalog_path.clone(),
                 control: Some(handle.control()),
             });
     let api_thread = crate::api::spawn(

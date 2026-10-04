@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -56,12 +56,17 @@ impl Control {
         })
     }
 
+    /// The schedule, even if a thread panicked while holding it.
+    fn schedule(&self) -> MutexGuard<'_, Schedule> {
+        self.schedule.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Ask for a scan now. Returns the `scan_sequence` whose completion
     /// guarantees the result reflects the hardware as of this call, or `None`
     /// if the peripherals thread is no longer running.
     pub fn request_refresh(&self) -> Option<u64> {
         let target = {
-            let mut schedule = self.schedule.lock().unwrap_or_else(|e| e.into_inner());
+            let mut schedule = self.schedule();
             if !schedule.alive {
                 return None;
             }
@@ -73,7 +78,7 @@ impl Control {
     }
 
     fn request_stop(&self) {
-        self.schedule.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
+        self.schedule().stop = true;
         self.wake();
     }
 
@@ -167,11 +172,7 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
         })
         .ok();
     publish(&config.catalog_path, &catalog.document())?;
-    control
-        .schedule
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .alive = true;
+    control.schedule().alive = true;
     let thread_control = control.clone();
     let thread = thread::Builder::new()
         .name("peripherals".into())
@@ -194,11 +195,7 @@ struct AliveGuard(Arc<Control>);
 
 impl Drop for AliveGuard {
     fn drop(&mut self) {
-        self.0
-            .schedule
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .alive = false;
+        self.0.schedule().alive = false;
     }
 }
 
@@ -266,7 +263,7 @@ fn run(
             control.drain_wake();
         }
         {
-            let mut schedule = control.schedule.lock().unwrap_or_else(|e| e.into_inner());
+            let mut schedule = control.schedule();
             if schedule.stop {
                 drop(schedule);
                 // Like the metrics cache, leave no catalog that looks live.
@@ -339,16 +336,12 @@ fn run(
             burst_start = None;
             // A scan re-reads the rules too.
             reclassify_due = None;
-            control
-                .schedule
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .scanning = true;
+            control.schedule().scanning = true;
             if let Err(error) = scanner.scan(&mut catalog) {
                 eprintln!("Sentinel peripheral scan rejected: {error}");
             }
             {
-                let mut schedule = control.schedule.lock().unwrap_or_else(|e| e.into_inner());
+                let mut schedule = control.schedule();
                 schedule.scanning = false;
                 schedule.completed = catalog.scan_sequence();
             }
@@ -434,13 +427,10 @@ pub fn new_instance_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Keeps temporary directories distinct when tests start in the same instant.
-    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     use crate::peripherals::model::{ProviderError, Record};
+    use crate::peripherals::sysutil::testing::TempDir;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::SystemTime;
 
     struct Counting {
         calls: Arc<AtomicUsize>,
@@ -467,6 +457,23 @@ mod tests {
         }
     }
 
+    /// Start the thread on `<root>/peripherals.json`, with uevents off.
+    fn start(
+        root: &Path,
+        debounce_ms: u64,
+        providers: Vec<Box<dyn Provider>>,
+    ) -> (PathBuf, PeripheralsHandle) {
+        let path = root.join("peripherals.json");
+        let config = Config {
+            catalog_path: path.clone(),
+            support_rules_path: root.join("support/neat-core.json"),
+            instance_id: "test-instance".into(),
+            debounce: Duration::from_millis(debounce_ms),
+            listen_for_uevents: false,
+        };
+        (path, spawn(config, providers).unwrap())
+    }
+
     fn wait_for(path: &Path, predicate: impl Fn(&CatalogDocument) -> bool) -> CatalogDocument {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -485,31 +492,13 @@ mod tests {
 
     #[test]
     fn publishes_initial_scan_and_honours_refresh_targets() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-peripherals-{}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
+        let root = TempDir::new();
         let calls = Arc::new(AtomicUsize::new(0));
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "test-instance".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(Counting {
-                calls: calls.clone(),
-                subsystems: vec!["video4linux".into()],
-            })],
-        )
-        .unwrap();
+        let counting = Counting {
+            calls: calls.clone(),
+            subsystems: vec!["video4linux".into()],
+        };
+        let (path, handle) = start(root.path(), 10, vec![Box::new(counting)]);
 
         let first = wait_for(&path, |document| document.ready);
         assert_eq!(first.instance_id, "test-instance");
@@ -525,7 +514,6 @@ mod tests {
 
         handle.stop();
         assert_eq!(calls.load(Ordering::SeqCst), 2, "no scan without a trigger");
-        fs::remove_dir_all(root).unwrap();
     }
 
     struct OneMipiCamera;
@@ -552,29 +540,10 @@ mod tests {
 
     #[test]
     fn installing_core_rules_reclassifies_without_rescanning() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-rules-{}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let rules_dir = root.join("support");
+        let root = TempDir::new();
+        let rules_dir = root.path().join("support");
         fs::create_dir_all(&rules_dir).unwrap();
-        let path = root.join("peripherals.json");
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: rules_dir.join("neat-core.json"),
-                instance_id: "rules".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(OneMipiCamera)],
-        )
-        .unwrap();
+        let (path, handle) = start(root.path(), 10, vec![Box::new(OneMipiCamera)]);
 
         let before = wait_for(&path, |document| document.ready);
         assert_eq!(before.support.as_ref().unwrap().state, "not_installed");
@@ -607,7 +576,6 @@ mod tests {
         assert_eq!(after.changes.last().unwrap().kind, "changed");
 
         handle.stop();
-        fs::remove_dir_all(root).unwrap();
     }
 
     struct NiceProbe(Arc<std::sync::Mutex<Option<i32>>>);
@@ -634,27 +602,11 @@ mod tests {
 
     #[test]
     fn scans_run_at_lower_priority() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-nice-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
+        let root = TempDir::new();
         let seen = Arc::new(std::sync::Mutex::new(None));
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "nice".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(NiceProbe(seen.clone()))],
-        )
-        .unwrap();
+        let (path, handle) = start(root.path(), 10, vec![Box::new(NiceProbe(seen.clone()))]);
         wait_for(&path, |document| document.ready);
         handle.stop();
-        fs::remove_dir_all(root).unwrap();
         // The process may already run niced; discovery adds NICE on top.
         let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
         assert_eq!(*seen.lock().unwrap(), Some((base + NICE).min(19)));
@@ -662,27 +614,13 @@ mod tests {
 
     #[test]
     fn a_burst_of_refresh_requests_shares_one_scan() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-burst-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
+        let root = TempDir::new();
         let calls = Arc::new(AtomicUsize::new(0));
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "burst".into(),
-                debounce: Duration::from_millis(100),
-                listen_for_uevents: false,
-            },
-            vec![Box::new(Counting {
-                calls: calls.clone(),
-                subsystems: vec![],
-            })],
-        )
-        .unwrap();
+        let counting = Counting {
+            calls: calls.clone(),
+            subsystems: vec![],
+        };
+        let (path, handle) = start(root.path(), 100, vec![Box::new(counting)]);
         wait_for(&path, |document| document.ready);
         let control = handle.control();
         let mut target = 0;
@@ -691,7 +629,6 @@ mod tests {
         }
         let document = wait_for(&path, |document| document.scan_sequence >= target);
         handle.stop();
-        fs::remove_dir_all(root).unwrap();
         assert!(
             target <= 3,
             "200 requests promise at most two more scans, got {target}"
@@ -728,28 +665,12 @@ mod tests {
 
     #[test]
     fn stopping_marks_the_catalog_stopped_and_refuses_refreshes() {
-        let root = std::env::temp_dir().join(format!(
-            "sentinel-stop-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let path = root.join("peripherals.json");
-        let handle = spawn(
-            Config {
-                catalog_path: path.clone(),
-                support_rules_path: root.join("support/neat-core.json"),
-                instance_id: "stop".into(),
-                debounce: Duration::from_millis(10),
-                listen_for_uevents: false,
-            },
-            vec![],
-        )
-        .unwrap();
+        let root = TempDir::new();
+        let (path, handle) = start(root.path(), 10, vec![]);
         wait_for(&path, |document| document.ready);
         let control = handle.control();
         handle.stop();
         let document = read(&path).unwrap();
-        fs::remove_dir_all(root).unwrap();
         assert_eq!(document.state, "degraded");
         assert_eq!(document.error.unwrap()["code"], "peripherals.stopped");
         assert_eq!(control.request_refresh(), None);

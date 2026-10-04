@@ -4,6 +4,7 @@ use std::thread;
 use super::catalog::Catalog;
 use super::model::{Issue, Provider, ProviderError, Record};
 use super::support::SupportStage;
+use super::sysutil::CODE_DISCOVERY_FAILED;
 
 /// A provider plus the records it returned in its last successful scan.
 pub struct ProviderSlot {
@@ -22,12 +23,6 @@ impl ProviderSlot {
     pub fn name(&self) -> &str {
         self.provider.name()
     }
-}
-
-struct ScanResult {
-    discovered: Vec<Record>,
-    accepted: bool,
-    issue: Option<Issue>,
 }
 
 /// Owns the providers, their last-good records, and the support stage.
@@ -124,7 +119,7 @@ fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
             .map(|handle| {
                 handle.join().unwrap_or_else(|_| {
                     Err(ProviderError::new(
-                        "peripherals.discovery_failed",
+                        CODE_DISCOVERY_FAILED,
                         "The provider panicked.",
                     ))
                 })
@@ -132,33 +127,14 @@ fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
             .collect()
     });
 
-    let results: Vec<ScanResult> = slots
-        .iter()
-        .zip(outcomes)
-        .map(|(slot, outcome)| {
-            let retained = slot.last_good.is_some();
-            match outcome.and_then(|records| validate(slot.name(), records)) {
-                Ok(discovered) => ScanResult {
-                    discovered,
-                    accepted: true,
-                    issue: None,
-                },
-                Err(error) => ScanResult {
-                    discovered: Vec::new(),
-                    accepted: false,
-                    issue: Some(provider_issue(slot.name(), error, retained)),
-                },
-            }
-        })
-        .collect();
-
     let mut issues = Vec::new();
-    for (slot, result) in slots.iter_mut().zip(results) {
-        if result.accepted {
-            slot.last_good = Some(result.discovered);
-        }
-        if let Some(issue) = result.issue {
-            issues.push(issue);
+    for (slot, outcome) in slots.iter_mut().zip(outcomes) {
+        match outcome.and_then(|records| validate(slot.name(), records)) {
+            Ok(records) => slot.last_good = Some(records),
+            Err(error) => {
+                let retained = slot.last_good.is_some();
+                issues.push(provider_issue(slot.name(), error, retained));
+            }
         }
     }
     issues
@@ -212,7 +188,7 @@ fn provider_issue(provider: &str, error: ProviderError, retained_last_good: bool
     Issue {
         provider: provider.into(),
         code: if error.code.is_empty() {
-            "peripherals.discovery_failed".into()
+            CODE_DISCOVERY_FAILED.into()
         } else {
             error.code
         },

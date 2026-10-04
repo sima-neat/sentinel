@@ -13,6 +13,9 @@ use super::service::read;
 use super::support::SupportStage;
 use super::{builtin_providers, Settings};
 
+const CATALOG_UNAVAILABLE: &str =
+    "peripheral catalog unavailable; check `systemctl status simaai-sentinel`";
+
 /// `simaai-sentinel peripherals [--json] [--refresh] [--test-provider NAME]`
 pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()> {
     let catalog_path = settings.catalog_path.as_path();
@@ -39,13 +42,11 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
     if refresh {
         let instance = read(catalog_path)
             .map(|document| document.instance_id)
-            .context("peripheral catalog unavailable; check `systemctl status simaai-sentinel`")?;
+            .context(CATALOG_UNAVAILABLE)?;
         let target = request_refresh(api_socket)?;
         wait_for_scan(catalog_path, &instance, target)?;
     }
-    let document = read(catalog_path).with_context(|| {
-        "peripheral catalog unavailable; check `systemctl status simaai-sentinel`"
-    })?;
+    let document = read(catalog_path).context(CATALOG_UNAVAILABLE)?;
     if !daemon_running(api_socket) {
         eprintln!(
             "Warning: the Sentinel daemon is not running, so this catalog may be out of date; \

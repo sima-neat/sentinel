@@ -14,7 +14,7 @@ pub mod uevent;
 pub mod v4l2;
 mod videodev2;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 
@@ -52,7 +52,7 @@ pub fn start(settings: &Settings) -> Result<PeripheralsHandle> {
 
 pub fn default_settings() -> Settings {
     Settings {
-        catalog_path: Path::new(model::DEFAULT_CATALOG_PATH).to_path_buf(),
-        support_rules_path: Path::new(support::DEFAULT_RULES_PATH).to_path_buf(),
+        catalog_path: PathBuf::from(model::DEFAULT_CATALOG_PATH),
+        support_rules_path: PathBuf::from(support::DEFAULT_RULES_PATH),
     }
 }

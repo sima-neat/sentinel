@@ -9,14 +9,9 @@ pub(crate) const CODE_IO_OPEN: &str = "io.open";
 pub(crate) const CODE_PERMISSION_DENIED: &str = "io.permission_denied";
 pub(crate) const CODE_DISCOVERY_FAILED: &str = "peripherals.discovery_failed";
 
-/// `isspace` in the C locale.
-fn is_c_space(character: char) -> bool {
-    matches!(character, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r')
-}
-
-/// `value` without leading or trailing C-locale whitespace.
+/// `value` without leading or trailing C-locale (`isspace`) whitespace.
 pub(crate) fn trim_c_space(value: &str) -> &str {
-    value.trim_matches(is_c_space)
+    value.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'))
 }
 
 /// A sysfs attribute as trimmed text; `None` when it cannot be read.

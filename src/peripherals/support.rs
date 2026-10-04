@@ -142,11 +142,10 @@ fn load(path: &Path) -> Result<Option<RulesFile>, String> {
     let value: Value =
         serde_json::from_slice(&data).map_err(|error| format!("invalid rules: {error}"))?;
     let format = value.get("format").and_then(Value::as_u64);
-    if format.is_some_and(|format| format > u64::from(RULES_FORMAT)) {
+    if let Some(format) = format.filter(|&format| format > u64::from(RULES_FORMAT)) {
         return Err(format!(
-            "Neat Core's rules use format {}, but this Sentinel reads format {RULES_FORMAT}. \
-Update Sentinel: sima-cli neat install sentinel",
-            format.unwrap_or_default()
+            "Neat Core's rules use format {format}, but this Sentinel reads format {RULES_FORMAT}. \
+Update Sentinel: sima-cli neat install sentinel"
         ));
     }
     let rules: RulesFile =
@@ -314,58 +313,26 @@ fn events_concern(mut buffer: &[u8], file_name: &[u8]) -> bool {
 }
 
 /// The rules Neat Core ships (`src/peripherals/sentinel-support-rules.json.in`
-/// in Core), for tests elsewhere in Sentinel.
+/// in Core), matching its current CameraInput, for tests across Sentinel.
 #[cfg(test)]
 pub(crate) fn core_rules() -> Value {
-    tests::core_rules()
+    serde_json::json!({
+        "format": 1,
+        "source": "neat-core 0.4.0",
+        "camera": {
+            "backends": {"accept": ["mipi"], "reason": "CameraInput currently accepts MIPI cameras only; direct V4L2 capture is not supported."},
+            "formats": {"accept": ["NV12"], "reason": "CameraInput's current camera-memory path supports NV12 output only."},
+            "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "This mode does not advertise CameraInput's 30/1 frame rate."},
+            "isp_output": {"reason": "This resolution is not an ISP output size on this board."}
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Keeps temporary directories distinct when tests start in the same instant.
-    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    use crate::peripherals::sysutil::testing::TempDir;
     use serde_json::json;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    /// The rules Neat Core 0.4 would ship, matching its current CameraInput.
-    pub fn core_rules() -> Value {
-        json!({
-            "format": 1,
-            "source": "neat-core 0.4.0",
-            "camera": {
-                "backends": {"accept": ["mipi"], "reason": "CameraInput currently accepts MIPI cameras only; direct V4L2 capture is not supported."},
-                "formats": {"accept": ["NV12"], "reason": "CameraInput's current camera-memory path supports NV12 output only."},
-                "framerates": {"accept": [{"num": 30, "den": 1}], "reason": "This mode does not advertise CameraInput's 30/1 frame rate."},
-                "isp_output": {"reason": "This resolution is not an ISP output size on this board."}
-            }
-        })
-    }
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "sentinel-support-{}-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-                UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn camera(backend: &str, modes: Value) -> Record {
         Record {
@@ -398,7 +365,7 @@ mod tests {
     #[test]
     fn core_rules_classify_each_mode_with_the_first_failing_reason() {
         let dir = TempDir::new();
-        let path = dir.0.join("neat-core.json");
+        let path = dir.path().join("neat-core.json");
         fs::write(&path, core_rules().to_string()).unwrap();
         let mut stage = SupportStage::new(&path);
         let mut devices = vec![
@@ -436,7 +403,7 @@ mod tests {
     #[test]
     fn missing_rules_mark_every_mode_unknown_with_a_reason() {
         let dir = TempDir::new();
-        let mut stage = SupportStage::new(dir.0.join("neat-core.json"));
+        let mut stage = SupportStage::new(dir.path().join("neat-core.json"));
         let mut devices = vec![camera("mipi", json!([mode("NV12", 1920, (30, 1), true)]))];
         let mut issues = Vec::new();
         let status = stage.apply(&mut devices, &mut issues);
@@ -449,7 +416,7 @@ mod tests {
     #[test]
     fn invalid_update_keeps_the_last_good_rules_and_reports_an_issue() {
         let dir = TempDir::new();
-        let path = dir.0.join("neat-core.json");
+        let path = dir.path().join("neat-core.json");
         fs::write(&path, core_rules().to_string()).unwrap();
         let mut stage = SupportStage::new(&path);
         let mut devices = vec![camera("mipi", json!([mode("NV12", 1920, (30, 1), true)]))];
@@ -470,7 +437,7 @@ mod tests {
     #[test]
     fn invalid_rules_without_a_previous_version_report_invalid() {
         let dir = TempDir::new();
-        let path = dir.0.join("neat-core.json");
+        let path = dir.path().join("neat-core.json");
         fs::write(&path, "not json").unwrap();
         let mut stage = SupportStage::new(&path);
         let mut devices = vec![camera("mipi", json!([mode("NV12", 1920, (30, 1), true)]))];
@@ -484,7 +451,7 @@ mod tests {
     #[test]
     fn non_camera_records_are_left_alone() {
         let dir = TempDir::new();
-        let mut stage = SupportStage::new(dir.0.join("missing.json"));
+        let mut stage = SupportStage::new(dir.path().join("missing.json"));
         let mut devices = vec![Record {
             id: "microphone:x".into(),
             kind: "microphone".into(),
@@ -498,12 +465,12 @@ mod tests {
     #[test]
     fn watch_reports_changes_to_the_rules_file_only() {
         let dir = TempDir::new();
-        let path = dir.0.join("neat-core.json");
+        let path = dir.path().join("neat-core.json");
         let watch = RulesWatch::open(&path).unwrap();
         assert!(!watch.drain().unwrap());
-        fs::write(dir.0.join("other.json"), "{}").unwrap();
+        fs::write(dir.path().join("other.json"), "{}").unwrap();
         assert!(!watch.drain().unwrap(), "unrelated files are ignored");
-        let staged = dir.0.join("neat-core.json.dpkg-new");
+        let staged = dir.path().join("neat-core.json.dpkg-new");
         fs::write(&staged, core_rules().to_string()).unwrap();
         fs::rename(&staged, &path).unwrap();
         assert!(

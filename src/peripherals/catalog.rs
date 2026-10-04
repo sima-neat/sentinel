@@ -99,24 +99,25 @@ impl Catalog {
             }
         }
 
-        if !self.initialized {
+        let first = !self.initialized;
+        let devices_changed = self.devices != devices;
+        if first {
             self.initialized = true;
             self.revision = 1;
             self.support_changed = false;
-            self.devices = devices;
-            self.push_status_changes(recovered, issues_changed, &issues);
-            self.issues = issues;
-            return Ok(());
-        }
-
-        // `revision` changes whenever anything a client can see changes, so
-        // polling with `since_revision` never hides a new state.
-        let devices_changed = self.devices != devices;
-        if devices_changed || issues_changed || std::mem::take(&mut self.support_changed) {
+        } else if devices_changed || issues_changed || std::mem::take(&mut self.support_changed) {
+            // `revision` changes whenever anything a client can see changes,
+            // so polling with `since_revision` never hides a new state.
             self.revision += 1;
         }
-        self.push_status_changes(recovered, issues_changed, &issues);
-        if devices_changed {
+        if recovered {
+            self.push_change("recovered", None, None, None);
+        }
+        if issues_changed && !issues.is_empty() {
+            self.push_change("error", None, None, Some(issue_error(&issues)));
+        }
+        // The first scan logs no device changes.
+        if !first && devices_changed {
             let previous = std::mem::take(&mut self.devices);
             let (mut old, mut new) = (0, 0);
             while old < previous.len() || new < devices.len() {
@@ -148,16 +149,7 @@ impl Catalog {
         if issues.is_empty() {
             return Err("a provider failure scan must contain an issue".into());
         }
-        self.scan_sequence += 1;
-        self.last_attempt_at = Some(utc_now());
-        if self.issues != issues {
-            if self.initialized {
-                self.revision += 1;
-            }
-            let error = issue_error(&issues);
-            self.push_change("error", None, None, Some(error));
-        }
-        self.issues = issues;
+        self.apply_failed_scan(issues);
         Ok(())
     }
 
@@ -165,20 +157,24 @@ impl Catalog {
     /// two providers returning one id). Devices keep their previous values;
     /// the scan still counts, so refresh targets are reached.
     pub fn apply_rejected_scan(&mut self, reason: &str) {
-        self.scan_sequence += 1;
-        self.last_attempt_at = Some(utc_now());
-        let issues = vec![Issue {
+        self.apply_failed_scan(vec![Issue {
             provider: "catalog".into(),
             code: "peripherals.invalid_provider_result".into(),
             reason: reason.into(),
             retained_last_good: self.initialized,
-        }];
+        }]);
+    }
+
+    /// Count a scan that left the devices as they were; a new set of issues
+    /// is a visible change.
+    fn apply_failed_scan(&mut self, issues: Vec<Issue>) {
+        self.scan_sequence += 1;
+        self.last_attempt_at = Some(utc_now());
         if self.issues != issues {
             if self.initialized {
                 self.revision += 1;
             }
-            let error = issue_error(&issues);
-            self.push_change("error", None, None, Some(error));
+            self.push_change("error", None, None, Some(issue_error(&issues)));
             self.issues = issues;
         }
     }
@@ -224,16 +220,6 @@ impl Catalog {
             changes: self.changes.iter().cloned().collect(),
             support: self.support.clone(),
             devices: self.devices.iter().map(Record::to_catalog_value).collect(),
-        }
-    }
-
-    fn push_status_changes(&mut self, recovered: bool, issues_changed: bool, issues: &[Issue]) {
-        if recovered {
-            self.push_change("recovered", None, None, None);
-        }
-        if issues_changed && !issues.is_empty() {
-            let error = issue_error(issues);
-            self.push_change("error", None, None, Some(error));
         }
     }
 

@@ -74,12 +74,6 @@ fn open_system(path: &Path) -> io::Result<Box<dyn VideoNode>> {
     Ok(Box::new(open_read_only(path)?))
 }
 
-impl Default for V4l2Provider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Provider for V4l2Provider {
     fn name(&self) -> &str {
         PROVIDER_NAME
@@ -342,15 +336,16 @@ impl Enumerator<'_> {
                 V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             ),
         ] {
+            if capabilities & capture == 0 {
+                continue;
+            }
             for index in 0.. {
                 let mut value = FmtDesc {
                     index,
                     buf_type,
                     ..FmtDesc::default()
                 };
-                if capabilities & capture == 0
-                    || !self.query("format", index, |node| node.enum_format(&mut value))?
-                {
+                if !self.query("format", index, |node| node.enum_format(&mut value))? {
                     break;
                 }
                 let sizes = self.sizes(value.pixelformat)?;
@@ -570,11 +565,10 @@ impl V4l2Provider {
             });
         }
 
-        let budget = EnumerationBudget::new();
         let modes = Enumerator {
             node,
             path: device_path,
-            budget,
+            budget: EnumerationBudget::new(),
         }
         .modes(capabilities)?;
 
