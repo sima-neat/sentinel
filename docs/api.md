@@ -20,6 +20,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/traces/active` | Active trace or `null`. |
 | `POST /v1/traces` | Start a named trace. |
 | `POST /v1/traces/stop` | Stop and persist the active trace. |
+| `POST /v1/traces/{id}/stop` | Stop the active trace only if its ID still matches. |
 | `GET /v1/runs` | List active and completed run summaries. |
 | `GET /v1/runs/{name-or-id}` | Retrieve a saved run and raw samples. |
 | `GET /v1/compare?runs=A,B` | Compare two or more runs; the first is the baseline. |
@@ -40,6 +41,17 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
   -X POST http://localhost/v1/traces/stop
 ```
 
+Clients that first read the active trace should include its ID when stopping it:
+
+```bash
+curl --unix-socket /run/simaai-sentinel/api.sock \
+  -X POST http://localhost/v1/traces/20261004T120000.000Z-baseline/stop
+```
+
+The conditional form returns HTTP 409 without stopping anything if another
+client has replaced the trace. The ID comparison and stop occur under the same
+run-store lock.
+
 Names must be unique, and only one trace may be active. Conflicting lifecycle
 operations return HTTP 409. Unknown runs and routes return HTTP 404. Invalid
 requests return HTTP 400. Responses use JSON `null` for unavailable metrics.
@@ -56,8 +68,8 @@ authenticated Kerrigan/Fleet Manager proxy, not by forwarding this socket or
 adding an unauthenticated TCP listener.
 
 Cache writes use atomic rename. Run operations use the same exclusive file
-lock as the CLI, TUI, and daemon recorder. A trace started through the API is
-therefore safe to inspect or stop through any supported interface.
+lock as the CLI, TUI, and daemon recorder. Use the ID-bearing stop route when a
+client must not stop a trace that replaced the one it observed.
 
 ## Agent skill
 

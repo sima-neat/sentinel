@@ -17,6 +17,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/traces/active` | 啟用追蹤或 `null`。 |
 | `POST /v1/traces` | 啟動一個具名稱的追蹤。 |
 | `POST /v1/traces/stop` | 停止並繼續目前的追蹤。 |
+| `POST /v1/traces/{id}/stop` | 僅在 ID 仍相符時停止目前的追蹤。 |
 | `GET /v1/runs` | 列出目前正在執行的任務和已完成任務的摘要。 |
 | `GET /v1/runs/{name-or-id}` | 檢索已儲存的執行結果和原始樣本。 |
 | `GET /v1/compare?runs=A,B` | 比較兩次或多次的執行結果；第一次的結果作為基準。 |
@@ -37,6 +38,15 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
   -X POST http://localhost/v1/traces/stop
 ```
 
+先讀取目前追蹤的用戶端，停止時應包含其 ID：
+
+```bash
+curl --unix-socket /run/simaai-sentinel/api.sock \
+  -X POST http://localhost/v1/traces/20261004T120000.000Z-baseline/stop
+```
+
+若其他用戶端已替換追蹤，條件式形式會傳回 HTTP 409，且不會停止任何追蹤。ID 比對與停止會在相同的執行儲存區鎖定下進行。
+
 名稱必須是唯一的，且僅能有一個追蹤記錄處於作用狀態。如果生命週期作業發生衝突，則會傳回 HTTP 409。未知的執行和路由會傳回 HTTP 404。無效的請求會傳回 HTTP 400。回應會使用 JSON `null` 來表示無法取得的指標。
 
 比較回應預設會包含執行中繼資料、統計資料和基準差異。只有在需要帶有時間戳記的樣本時，才新增 `raw=1`。
@@ -47,7 +57,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 
 它會刻意讓本機使用者可以存取，因為支援的控制作業僅限於啟動和停止遙測追蹤；API 不會刪除執行、執行工作負載或修改硬體。遠端存取應由經過驗證的 Kerrigan/Fleet Manager 代理伺服器提供，而不是透過轉發此通訊端或新增未經驗證的 TCP 監聽程式來提供。
 
-快取寫入使用原子重新命名。執行作業使用與 CLI、TUI 和守護程式記錄器相同的獨佔檔案鎖定。因此，透過 API 啟動的追蹤可以安全地透過任何支援的介面進行檢查或停止。
+快取寫入使用原子重新命名。執行作業使用與 CLI、TUI 和守護程式記錄器相同的獨佔檔案鎖定。若用戶端不得停止取代其先前所見追蹤的新追蹤，請使用含 ID 的停止路由。
 
 ## AI 代理人技能
 

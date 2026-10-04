@@ -17,6 +17,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/traces/active` | 활성 추적 또는 `null`. |
 | `POST /v1/traces` | 이름이 지정된 추적을 시작합니다. |
 | `POST /v1/traces/stop` | 현재 추적을 중지하고 계속합니다. |
+| `POST /v1/traces/{id}/stop` | ID가 여전히 일치하는 경우에만 활성 추적을 중지합니다. |
 | `GET /v1/runs` | 현재 진행 중인 작업과 완료된 작업의 요약 목록을 표시합니다. |
 | `GET /v1/runs/{name-or-id}` | 저장된 실행 기록과 원본 샘플을 불러옵니다. |
 | `GET /v1/compare?runs=A,B` | 두 개 이상의 실행 결과를 비교합니다. 첫 번째 실행 결과는 기준선입니다. |
@@ -37,6 +38,15 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
   -X POST http://localhost/v1/traces/stop
 ```
 
+먼저 활성 추적을 읽는 클라이언트는 중지할 때 해당 ID를 포함해야 합니다.
+
+```bash
+curl --unix-socket /run/simaai-sentinel/api.sock \
+  -X POST http://localhost/v1/traces/20261004T120000.000Z-baseline/stop
+```
+
+다른 클라이언트가 추적을 교체한 경우 조건부 형식은 아무것도 중지하지 않고 HTTP 409를 반환합니다. ID 비교와 중지는 동일한 실행 저장소 잠금 아래에서 수행됩니다.
+
 이름은 고유해야 하며, 활성화될 수 있는 추적은 하나뿐입니다. 충돌하는 라이프사이클 작업은 HTTP 409 오류를 반환합니다. 알 수 없는 실행 및 경로는 HTTP 404 오류를 반환합니다. 유효하지 않은 요청은 HTTP 400 오류를 반환합니다. 응답은 사용할 수 없는 지표에 대해 JSON `null` 형식을 사용합니다. 비교 응답에는 기본적으로 실행 메타데이터, 통계 및 기준선 차이가 포함됩니다. 타임스탬프가 지정된 샘플이 필요한 경우에만 `raw=1`을 추가합니다.
 
 ## 보안 및 동시성
@@ -45,7 +55,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 
 지원되는 제어 작업은 텔레메트리 추적을 시작하고 중지하는 것뿐이므로, 로컬 사용자가 접근할 수 있도록 의도적으로 설계되었습니다. API는 실행을 삭제하거나, 워크로드를 실행하거나, 하드웨어를 수정하지 않습니다. 원격 접근은 이 소켓을 포워딩하거나 인증되지 않은 TCP 리스너를 추가하는 대신, 인증된 Kerrigan/Fleet Manager 프록시를 통해 제공해야 합니다.
 
-캐시 쓰기 작업은 원자적 이름 변경을 사용합니다. 실행 작업은 CLI, TUI 및 데몬 레코더와 동일한 배타적 파일 잠금을 사용합니다. 따라서 API를 통해 시작된 추적은 지원되는 모든 인터페이스를 통해 안전하게 검사하거나 중지할 수 있습니다.
+캐시 쓰기 작업은 원자적 이름 변경을 사용합니다. 실행 작업은 CLI, TUI 및 데몬 레코더와 동일한 배타적 파일 잠금을 사용합니다. 클라이언트가 확인한 추적을 교체한 다른 추적을 중지하면 안 되는 경우 ID가 포함된 중지 경로를 사용합니다.
 
 ## 에이전트 기술
 
