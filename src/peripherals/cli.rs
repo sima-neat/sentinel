@@ -210,7 +210,7 @@ fn render(document: &CatalogDocument) -> String {
         out.push_str("  No peripherals found.\n");
     } else {
         out.push_str(&format!(
-            "\n  {:<8} {:<36} {:<26} {}\n",
+            "\n  {:<10} {:<36} {:<26} {}\n",
             "TYPE", "ID", "PROVIDER", "NAME / MODES"
         ));
         for device in &document.devices {
@@ -221,6 +221,9 @@ fn render(document: &CatalogDocument) -> String {
                 .find_map(|key| details[*key].as_str())
                 .unwrap_or("-");
             let modes = details["modes"].as_array();
+            // Only types with support rules (cameras) carry `supported`.
+            let classified =
+                modes.is_some_and(|modes| modes.iter().any(|mode| mode.get("supported").is_some()));
             let supported = modes.map_or(0, |modes| {
                 modes
                     .iter()
@@ -229,11 +232,14 @@ fn render(document: &CatalogDocument) -> String {
             });
             let name = printable(name);
             let summary = match modes {
-                Some(modes) => format!("{name}  ({} modes, {supported} supported)", modes.len()),
+                Some(modes) if classified => {
+                    format!("{name}  ({} modes, {supported} supported)", modes.len())
+                }
+                Some(modes) => format!("{name}  ({} modes)", modes.len()),
                 None => name,
             };
             out.push_str(&format!(
-                "  {:<8} {:<36} {:<26} {}\n",
+                "  {:<10} {:<36} {:<26} {}\n",
                 printable(kind),
                 printable(device["id"].as_str().unwrap_or("?")),
                 printable(device["provider"].as_str().unwrap_or("?")),
@@ -276,13 +282,14 @@ mod tests {
             support_rules_path: "/nonexistent/neat-core.json".into(),
         };
         let error = test_provider("no.such.provider", &settings).unwrap_err();
-        let names = "built-in providers: daemon.camera.mipi, daemon.camera.v4l2";
+        let names = "built-in providers: daemon.camera.mipi, daemon.camera.v4l2, daemon.audio.alsa";
         assert!(error.to_string().ends_with(names), "{error}");
     }
 
     /// Device names and errors come from the hardware, so control characters,
     /// newlines included, are replaced before they reach the terminal and
-    /// cannot forge rows.
+    /// cannot forge rows. Types without support rules show only their mode
+    /// count.
     #[test]
     fn renders_devices_modes_and_states_without_terminal_escapes() {
         let mut catalog = Catalog::new("i", 8);
@@ -301,7 +308,14 @@ mod tests {
         let imx477 = json!({"camera_name": "imx477 5-001a", "model": "imx477", "modes": modes});
         let evil =
             json!({"model": "evil\u{1b}]0;owned\u{7}cam\n  ! forged row\u{202e}rtl\u{2066}"});
-        let devices = vec![record("p", "a", imx477), record("p\n", "b\nc", evil)];
+        let yeti = json!({"name": "Yeti\nNano\u{1b}[2J", "modes": [{}, {}]});
+        let mut microphone = record("p", "microphone:\u{7}c", yeti);
+        microphone.kind = "microphone".into();
+        let devices = vec![
+            record("p", "a", imx477),
+            record("p\n", "b\nc", evil),
+            microphone,
+        ];
         let issue = json!({"provider": "p", "code": "io.open", "reason": "gone\u{1b}[2J\n",
                            "retained_last_good": true});
         let issue: Issue = serde_json::from_value(issue).unwrap();
@@ -311,9 +325,10 @@ mod tests {
 Peripherals  degraded  revision 3  scan 2  updated <time>
   Showing last-good records for a provider that could not be refreshed.
 
-  TYPE     ID                                   PROVIDER                   NAME / MODES
-  camera   a                                    p                          imx477 5-001a  (2 modes, 1 supported)
-  camera   b?c                                  p?                         evil?]0;owned?cam?  ! forged row?rtl?
+  TYPE       ID                                   PROVIDER                   NAME / MODES
+  camera     a                                    p                          imx477 5-001a  (2 modes, 1 supported)
+  camera     b?c                                  p?                         evil?]0;owned?cam?  ! forged row?rtl?
+  microphone microphone:?c                        p                          Yeti?Nano?[2J  (2 modes)
   ! p io.open: gone?[2J?
   ! peripherals.monitor_failed: events?stopped
 ";

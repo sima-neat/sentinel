@@ -2,6 +2,7 @@
 //! uevents, runs read-only discovery providers, and publishes
 //! `peripherals.json`; the API and CLI only read that file.
 
+pub mod alsa;
 pub mod catalog;
 pub mod cli;
 pub mod mipi;
@@ -33,6 +34,7 @@ pub fn builtin_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(mipi::MipiProvider::new()),
         Box::new(v4l2::V4l2Provider::new()),
+        Box::new(alsa::AlsaProvider::new()),
     ]
 }
 
