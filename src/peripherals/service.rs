@@ -77,6 +77,11 @@ impl Control {
         Some(target)
     }
 
+    /// False once the peripherals thread has exited, cleanly or by a panic.
+    pub fn is_alive(&self) -> bool {
+        self.schedule().alive
+    }
+
     fn request_stop(&self) {
         self.schedule().stop = true;
         self.wake();

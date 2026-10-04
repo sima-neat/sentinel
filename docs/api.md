@@ -76,7 +76,8 @@ rejected with HTTP 400, because revisions restart with every daemon.
 `POST /v1/peripherals/refresh` schedules a scan and returns
 `{"accepted": true, "target_scan_sequence": N}`; the refresh is complete when
 `scan_sequence` reaches `N`. Requests that arrive together share one scan.
-HTTP 503 means peripheral discovery is not running (see the journal) or the
+HTTP 503 means peripheral discovery is not running or has stopped (see the
+journal), in which case `/v1/health` reports `"peripherals": null`, or the
 catalog cannot be read.
 
 ## Security and concurrency
