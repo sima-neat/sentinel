@@ -271,6 +271,16 @@ fn numbered(
     Ok(entries)
 }
 
+/// Actual `/proc/asound/cardN` directories, excluding `card<ID>` symlinks
+/// that ALSA also creates when an ID itself looks like `cardN`.
+fn card_directories(asound: &Path) -> Result<BTreeMap<u32, PathBuf>, ProviderError> {
+    let mut entries = numbered(asound, "card", "")?;
+    entries.retain(|_, path| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+    });
+    Ok(entries)
+}
+
 /// The first link, in name order, in `directory` that points at `target`
 /// (udev's `/dev/snd/by-path` and `/dev/snd/by-id` links to `controlCN`).
 fn link_to(directory: &Path, target: &str) -> Option<String> {
@@ -421,7 +431,7 @@ impl AlsaProvider {
         };
         let (cards, directories) = match text {
             Some(text) => {
-                let directories = numbered(&self.asound, "card", "")?;
+                let directories = card_directories(&self.asound)?;
                 let no_cards = text.trim() == "--- no soundcards ---";
                 let cards = if no_cards {
                     BTreeMap::new()

@@ -207,6 +207,20 @@ impl Board {
     }
 }
 
+/// ALSA creates `/proc/asound/card<ID>` aliases. An ID such as `card7` must
+/// not make card 0 look like a second card at index 7.
+#[test]
+fn card_id_aliases_are_not_card_indices() {
+    let mut board = Board::new();
+    board.usb_mic(0, "1-3.2", "card7", MONO_STREAM);
+    symlink("card0", board.path("proc/asound/card7")).unwrap();
+
+    let details = board.details();
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["identity"]["card_index"], 0);
+    assert_eq!(details[0]["identity"]["card_id"], "card7");
+}
+
 /// The three reference microphones, in full: their catalog entries are what
 /// Insight's microphone page reads. The Yeti's headphone output and the
 /// C920's camera are not reported.
