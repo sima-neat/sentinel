@@ -5,6 +5,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use super::model::ProviderError;
+
 pub(crate) const CODE_IO_OPEN: &str = "io.open";
 pub(crate) const CODE_PERMISSION_DENIED: &str = "io.permission_denied";
 pub(crate) const CODE_DISCOVERY_FAILED: &str = "peripherals.discovery_failed";
@@ -44,6 +46,19 @@ pub(crate) fn os_message(error: &io::Error) -> String {
 
 pub(crate) fn errno_of(error: &io::Error) -> i32 {
     error.raw_os_error().unwrap_or(0)
+}
+
+/// `what path: strerror`, coded `io.permission_denied` for EACCES, and for
+/// EPERM only when `eperm` is set (opening a device node; sysfs and directory
+/// reads say EPERM for other reasons), otherwise `io.open`.
+pub(crate) fn io_error(what: &str, path: &Path, error: &io::Error, eperm: bool) -> ProviderError {
+    let code = match errno_of(error) {
+        libc::EACCES => CODE_PERMISSION_DENIED,
+        libc::EPERM if eperm => CODE_PERMISSION_DENIED,
+        _ => CODE_IO_OPEN,
+    };
+    let reason = format!("{what} {}: {}", path.display(), os_message(error));
+    ProviderError::new(code, reason)
 }
 
 /// The device node or sysfs entry vanished (hot-unplug race).

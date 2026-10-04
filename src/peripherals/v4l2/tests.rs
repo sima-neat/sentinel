@@ -3,6 +3,7 @@
 //! served by `FakeVideoNode`, so no camera hardware is needed.
 
 use super::*;
+use crate::peripherals::sysutil::os_message;
 use crate::peripherals::sysutil::testing::{on_board, write_file, TempDir};
 use crate::peripherals::videodev2::testing::*;
 use crate::peripherals::videodev2::*;

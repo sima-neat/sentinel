@@ -29,8 +29,8 @@ use serde_json::json;
 
 use super::model::{Provider, ProviderError, Record};
 use super::sysutil::{
-    bounded_string, disappeared, errno_of, os_message, read_text_file, trim_c_space,
-    CODE_DISCOVERY_FAILED, CODE_IO_OPEN, CODE_PERMISSION_DENIED,
+    bounded_string, disappeared, errno_of, io_error, os_message, read_text_file, trim_c_space,
+    CODE_DISCOVERY_FAILED, CODE_IO_OPEN,
 };
 use super::videodev2::{
     effective_capabilities, fourcc_string, Capability, EnumerationBudget, FmtDesc, FrmIvalEnum,
@@ -295,13 +295,7 @@ fn describe(what: &str, path: &Path, error: &io::Error) -> String {
 
 /// `EACCES` and `EPERM` are permission failures; anything else is `io.open`.
 fn io_failure(what: &str, path: &Path, error: &io::Error) -> ProviderError {
-    let denied = matches!(errno_of(error), libc::EACCES | libc::EPERM);
-    let code = if denied {
-        CODE_PERMISSION_DENIED
-    } else {
-        CODE_IO_OPEN
-    };
-    ProviderError::new(code, describe(what, path, error))
+    io_error(what, path, error, true)
 }
 
 fn sorted_names(directory: &Path) -> io::Result<Vec<OsString>> {
@@ -313,11 +307,7 @@ fn sorted_names(directory: &Path) -> io::Result<Vec<OsString>> {
 
 /// Only `EACCES` is a permission failure when listing a directory.
 fn listing_failure(directory: &Path, error: &io::Error) -> ProviderError {
-    let code = match errno_of(error) {
-        libc::EACCES => CODE_PERMISSION_DENIED,
-        _ => CODE_IO_OPEN,
-    };
-    ProviderError::new(code, describe("failed to read", directory, error))
+    io_error("failed to read", directory, error, false)
 }
 
 /// `/dev/mediaN`, sorted; a missing device directory means none.

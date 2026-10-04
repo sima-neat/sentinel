@@ -9,6 +9,7 @@ use super::ioctl::*;
 use super::*;
 use crate::peripherals::support::{core_rules, SupportStage};
 use crate::peripherals::sysutil::testing::{on_board, write_file, TempDir};
+use crate::peripherals::sysutil::CODE_PERMISSION_DENIED;
 use crate::peripherals::videodev2::testing::*;
 use crate::peripherals::videodev2::*;
 

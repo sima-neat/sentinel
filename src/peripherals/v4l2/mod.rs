@@ -22,8 +22,8 @@ use serde_json::{json, Value};
 
 use super::model::{Provider, ProviderError, Record};
 use super::sysutil::{
-    bounded_string, disappeared, errno_of, os_message, read_text_file, trim_c_space,
-    CODE_DISCOVERY_FAILED, CODE_IO_OPEN, CODE_PERMISSION_DENIED,
+    bounded_string, disappeared, errno_of, io_error, read_text_file, trim_c_space,
+    CODE_DISCOVERY_FAILED, CODE_IO_OPEN,
 };
 use super::videodev2::{
     effective_capabilities, fourcc_string, open_read_only, Capability, EnumerationBudget, FmtDesc,
@@ -96,32 +96,14 @@ struct Failure {
 }
 
 fn os_failure(action: &str, path: &Path, error: &io::Error) -> Failure {
-    let errno = errno_of(error);
-    let code = if errno == libc::EACCES || errno == libc::EPERM {
-        CODE_PERMISSION_DENIED
-    } else {
-        CODE_IO_OPEN
-    };
-    let reason = format!("{action} {}: {}", path.display(), os_message(error));
-    Failure {
-        errno,
-        error: ProviderError::new(code, reason),
-    }
+    let (errno, error) = (errno_of(error), io_error(action, path, error, true));
+    Failure { errno, error }
 }
 
 /// A sysfs read error: only `EACCES` is a permission failure there.
 fn sysfs_failure(action: &str, path: &Path, error: &io::Error) -> Failure {
-    let errno = errno_of(error);
-    let code = if errno == libc::EACCES {
-        CODE_PERMISSION_DENIED
-    } else {
-        CODE_IO_OPEN
-    };
-    let reason = format!("{action} {}: {}", path.display(), os_message(error));
-    Failure {
-        errno,
-        error: ProviderError::new(code, reason),
-    }
+    let (errno, error) = (errno_of(error), io_error(action, path, error, false));
+    Failure { errno, error }
 }
 
 /// Whether a sysfs attribute exists; absence is ENOENT or ENOTDIR, and any
