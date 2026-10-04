@@ -470,11 +470,15 @@ fn probe_isp(sys_root: &Path, dev_root: &Path, backend: &dyn Backend) -> Result<
     let names = sorted_names(&class).map_err(|error| describe("could not read", &class, &error))?;
     let mut common: Option<IspModes> = None;
     for name in names {
-        if read_text_file(&class.join(&name).join("name")).as_deref() != Some(ISP_SYSFS_NAME) {
+        let entry = class.join(&name);
+        if read_text_file(&entry.join("name")).as_deref() != Some(ISP_SYSFS_NAME) {
             continue;
         }
         let path = dev_root.join(&name);
         let modes = isp_modes(backend, &path)?;
+        if vanished(&entry) {
+            continue;
+        }
         if modes.is_empty() {
             continue;
         }

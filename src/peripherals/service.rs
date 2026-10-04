@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -142,6 +142,9 @@ pub struct Config {
     pub refresh_cooldown: Duration,
     /// Tests turn this off so host hot-plug events cannot trigger scans.
     pub listen_for_uevents: bool,
+    /// Tests may choose the temporary path to exercise write failures.
+    #[cfg(test)]
+    pub temporary_path: Option<PathBuf>,
 }
 
 pub struct PeripheralsHandle {
@@ -198,7 +201,7 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
             )
         })
         .ok();
-    publish(&config.catalog_path, &catalog.document())?;
+    publish_config(&config, &catalog.document())?;
     control.schedule().alive = true;
     let thread_control = control.clone();
     let thread = thread::Builder::new()
@@ -287,7 +290,7 @@ fn run(
                     "peripherals.monitor_failed",
                     &format!("waiting for events failed: {error}"),
                 );
-                let _ = publish(&config.catalog_path, &catalog.document());
+                let _ = publish_config(&config, &catalog.document());
                 return;
             }
         }
@@ -300,7 +303,7 @@ fn run(
                 drop(schedule);
                 // Like the metrics cache, leave no catalog that looks live.
                 catalog.apply_error("peripherals.stopped", "The Sentinel daemon has stopped.");
-                let _ = publish(&config.catalog_path, &catalog.document());
+                let _ = publish_config(&config, &catalog.document());
                 return;
             }
             if std::mem::take(&mut schedule.refresh) {
@@ -333,7 +336,7 @@ fn run(
                             &format!("hot-plug events stopped: {error}"),
                         );
                         uevents = None;
-                        retry_publish = write(&control, &config.catalog_path, &catalog);
+                        retry_publish = write(&control, &config, &catalog);
                     }
                 }
             }
@@ -356,7 +359,7 @@ fn run(
             if let Err(error) = scanner.reclassify(&mut catalog) {
                 eprintln!("Sentinel peripheral reclassification rejected: {error}");
             }
-            retry_publish = write(&control, &config.catalog_path, &catalog);
+            retry_publish = write(&control, &config, &catalog);
         }
         if due.is_some_and(|at| Instant::now() >= at) {
             due = None;
@@ -373,11 +376,11 @@ fn run(
                 schedule.scanning = false;
                 schedule.completed = catalog.scan_sequence();
             }
-            retry_publish = write(&control, &config.catalog_path, &catalog);
+            retry_publish = write(&control, &config, &catalog);
             last_scan_end = Some(Instant::now());
         }
         if retry_publish.is_some_and(|at| Instant::now() >= at) {
-            retry_publish = write(&control, &config.catalog_path, &catalog);
+            retry_publish = write(&control, &config, &catalog);
         }
     }
 }
@@ -389,8 +392,8 @@ fn refresh_due(now: Instant, last_scan_end: Option<Instant>, cooldown: Duration)
 /// Publish the catalog and record the outcome in `control`, so the API
 /// refuses the stale file while writes fail (for example, `/run` is full)
 /// and serves it again once one succeeds. Returns when to retry, if it failed.
-fn write(control: &Control, path: &Path, catalog: &Catalog) -> Option<Instant> {
-    let error = publish(path, &catalog.document())
+fn write(control: &Control, config: &Config, catalog: &Catalog) -> Option<Instant> {
+    let error = publish_config(config, &catalog.document())
         .err()
         .map(|error| format!("{error:#}"));
     let previous = std::mem::replace(&mut control.schedule().publish_error, error.clone());
@@ -442,20 +445,42 @@ fn lower_priority() {
 pub fn publish(path: &Path, document: &CatalogDocument) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let temporary = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("peripherals.json")
-    ));
-    {
-        let mut file = fs::File::create(&temporary)
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("peripherals.json");
+    let temporary = parent.join(format!(".{name}.{}.tmp", new_instance_id()));
+    publish_to(path, document, &temporary)
+}
+
+fn publish_config(config: &Config, document: &CatalogDocument) -> Result<()> {
+    #[cfg(test)]
+    if let Some(temporary) = &config.temporary_path {
+        return publish_to(&config.catalog_path, document, temporary);
+    }
+    publish(&config.catalog_path, document)
+}
+
+fn publish_to(path: &Path, document: &CatalogDocument, temporary: &Path) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let result = (|| {
+        // The exclusive, randomized name cannot follow an attacker-created
+        // symlink when the catalog is placed in a shared directory.
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temporary)
             .with_context(|| format!("create {}", temporary.display()))?;
         serde_json::to_writer(&mut file, document).context("serialize peripheral catalog")?;
         file.write_all(b"\n")?;
+        fs::rename(temporary, path).with_context(|| format!("replace {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
     }
-    fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
+    result
 }
 
 pub fn read(path: &Path) -> Result<CatalogDocument> {
@@ -483,6 +508,7 @@ mod tests {
     use crate::peripherals::support::core_rules;
     use crate::peripherals::sysutil::testing::TempDir;
     use serde_json::json;
+    use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
     /// Start the thread on `<root>/peripherals.json`, with uevents off.
@@ -494,6 +520,7 @@ mod tests {
             debounce: Duration::from_millis(debounce),
             refresh_cooldown: Duration::from_millis(debounce),
             listen_for_uevents: false,
+            temporary_path: None,
         };
         spawn(config, vec![Box::new(provider)]).unwrap()
     }
@@ -608,5 +635,26 @@ mod tests {
         );
         let after = end + REFRESH_COOLDOWN + Duration::from_secs(1);
         assert_eq!(refresh_due(after, Some(end), REFRESH_COOLDOWN), after);
+    }
+
+    #[test]
+    fn catalog_publication_uses_random_exclusive_temporary_files() {
+        let root = TempDir::new();
+        let path = root.path().join("peripherals.json");
+        let target = root.path().join("target");
+        fs::write(&target, "do not overwrite").unwrap();
+
+        let attacker_path = root.path().join("attacker.tmp");
+        symlink(&target, &attacker_path).unwrap();
+        let document = Catalog::new("test-instance", DEFAULT_CHANGE_CAPACITY).document();
+        assert!(publish_to(&path, &document, &attacker_path).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "do not overwrite");
+        assert!(!path.exists());
+
+        symlink(&target, root.path().join(".peripherals.json.tmp")).unwrap();
+        publish(&path, &document).unwrap();
+
+        assert_eq!(fs::read_to_string(target).unwrap(), "do not overwrite");
+        assert_eq!(read(&path).unwrap().instance_id, "test-instance");
     }
 }

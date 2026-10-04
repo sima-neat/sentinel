@@ -662,6 +662,7 @@ mod tests {
             debounce: Duration::from_millis(10),
             refresh_cooldown: Duration::from_millis(10),
             listen_for_uevents: false,
+            temporary_path: None,
         };
         let camera = record("p", "camera:x", json!({}));
         let provider = Fake("p", move || Ok(vec![camera.clone()]));
@@ -712,6 +713,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("sentinel-api-w-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let catalog_path = root.join("peripherals.json");
+        let blocker = root.join(".peripherals.json.tmp");
         let config = service::Config {
             catalog_path: catalog_path.clone(),
             support_rules_path: root.join("neat-core.json"),
@@ -719,6 +721,7 @@ mod tests {
             debounce: Duration::from_millis(10),
             refresh_cooldown: Duration::from_millis(10),
             listen_for_uevents: false,
+            temporary_path: Some(blocker.clone()),
         };
         let camera = record("p", "camera:x", json!({}));
         let provider = Fake("p", move || Ok(vec![camera.clone()]));
@@ -747,7 +750,6 @@ mod tests {
         };
         get_until(&|reply| reply.contains(r#""scan_sequence":1"#));
 
-        let blocker = root.join(".peripherals.json.tmp");
         fs::create_dir(&blocker).unwrap();
         let accepted = response_json(&request(&socket, refresh));
         assert_eq!(accepted["target_scan_sequence"], 2);

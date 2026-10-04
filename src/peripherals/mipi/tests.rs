@@ -271,7 +271,40 @@ struct Fakes(
     Nodes<FakeVideoNode>,
     Nodes<FakeSubdev>,
     Option<PathBuf>,
+    Option<(PathBuf, PathBuf)>,
 );
+
+struct OpenFakeVideo {
+    node: FakeVideoNode,
+    unplug: Option<(PathBuf, PathBuf)>,
+}
+
+impl VideoNode for OpenFakeVideo {
+    fn query_capability(&mut self, value: &mut Capability) -> io::Result<()> {
+        self.node.query_capability(value)
+    }
+
+    fn enum_format(&mut self, value: &mut FmtDesc) -> io::Result<()> {
+        self.node.enum_format(value)
+    }
+
+    fn enum_frame_size(&mut self, value: &mut FrmSizeEnum) -> io::Result<()> {
+        self.node.enum_frame_size(value)
+    }
+
+    fn enum_frame_interval(&mut self, value: &mut FrmIvalEnum) -> io::Result<()> {
+        self.node.enum_frame_interval(value)
+    }
+}
+
+impl Drop for OpenFakeVideo {
+    fn drop(&mut self) {
+        if let Some((node, entry)) = self.unplug.take() {
+            let _ = fs::remove_file(node);
+            let _ = fs::remove_dir_all(entry);
+        }
+    }
+}
 
 /// Opening a node the test did not declare is a test failure.
 fn open<T: Clone>(nodes: &Nodes<T>, path: &Path) -> io::Result<T> {
@@ -293,7 +326,11 @@ impl Backend for Fakes {
         if let Some(media) = self.3.as_ref().filter(|media| media.exists()) {
             fs::remove_file(media).unwrap();
         }
-        Ok(Box::new(open(&self.1, path)?))
+        let unplug = self.4.as_ref().filter(|(node, _)| node == path).cloned();
+        Ok(Box::new(OpenFakeVideo {
+            node: open(&self.1, path)?,
+            unplug,
+        }))
     }
 
     fn open_subdev(&self, path: &Path) -> io::Result<Box<dyn SubdevNode>> {
@@ -310,7 +347,7 @@ fn scan(
     video: impl IntoIterator<Item = Video>,
     subdevs: impl IntoIterator<Item = Subdev>,
 ) -> Result<Vec<Record>, ProviderError> {
-    scan_with(OsString::from("dev"), media, video, subdevs, None)
+    scan_with(OsString::from("dev"), media, video, subdevs, None, None)
 }
 
 fn scan_in(
@@ -319,7 +356,7 @@ fn scan_in(
     video: impl IntoIterator<Item = Video>,
     subdevs: impl IntoIterator<Item = Subdev>,
 ) -> Result<Vec<Record>, ProviderError> {
-    scan_with(dev_name, media, video, subdevs, None)
+    scan_with(dev_name, media, video, subdevs, None, None)
 }
 
 fn scan_with(
@@ -328,6 +365,7 @@ fn scan_with(
     video: impl IntoIterator<Item = Video>,
     subdevs: impl IntoIterator<Item = Subdev>,
     unplug_during_video: Option<usize>,
+    unplug_isp: Option<usize>,
 ) -> Result<Vec<Record>, ProviderError> {
     let directory = TempDir::new();
     let (root, mut fakes) = (directory.path(), Fakes::default());
@@ -345,6 +383,11 @@ fn scan_with(
         write_file(&sysfs, &format!("{name}\n"));
         fakes.1.insert(dev.join(format!("video{index}")), node);
     }
+    fakes.4 = unplug_isp.map(|index| {
+        let node = dev.join(format!("video{index}"));
+        let entry = root.join(format!("sys/class/video4linux/video{index}"));
+        (node, entry)
+    });
     for (name, (major, minor), node) in subdevs {
         let link = root.join(format!("sys/dev/char/{major}:{minor}"));
         fs::create_dir_all(link.parent().unwrap()).unwrap();
@@ -556,10 +599,34 @@ fn media_device_unplugged_after_topology_is_skipped() {
         [isp(real_isp())],
         [],
         Some(0),
+        None,
     )
     .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].details["media_device"], "/dev/media1");
+}
+
+/// An ISP class entry removed after its open handle reports modes is skipped
+/// instead of being published as available with stale modes.
+#[test]
+fn isp_node_unplugged_after_mode_enumeration_is_not_published() {
+    let records = scan_with(
+        OsString::from("dev"),
+        [real_media(&[IMX477])],
+        [isp(real_isp())],
+        [],
+        None,
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    let details = &records[0].details;
+    assert_eq!(details["modes"], json!([]));
+    let unavailable = json!({
+        "state": "unavailable",
+        "reason": "no Modalix ISP output node was found"
+    });
+    assert_eq!(details["isp"], unavailable);
 }
 
 /// Several ISP nodes report the modes they share; a node with another card

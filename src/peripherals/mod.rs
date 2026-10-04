@@ -46,6 +46,8 @@ pub fn start(settings: &Settings) -> Result<PeripheralsHandle> {
             debounce: service::DEBOUNCE,
             refresh_cooldown: service::REFRESH_COOLDOWN,
             listen_for_uevents: true,
+            #[cfg(test)]
+            temporary_path: None,
         },
         builtin_providers(),
     )
