@@ -513,6 +513,13 @@ impl AlsaProvider {
         directory: &Path,
     ) -> Result<Vec<Record>, ProviderError> {
         if let Some(id) = read_text_file(&directory.join("id")).filter(|id| !id.is_empty()) {
+            if card.id != id {
+                // The card index may have been reused since the global list
+                // was read. Its name and driver belong to the listed ID, not
+                // to this newly registered card.
+                card.name.clear();
+                card.driver.clear();
+            }
             card.id = id;
         }
         let entry = self.sys_root.join(format!("class/sound/card{index}"));

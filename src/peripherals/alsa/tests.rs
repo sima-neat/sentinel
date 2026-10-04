@@ -603,6 +603,33 @@ fn capture_devices_do_not_require_alsa_procfs() {
     );
 }
 
+/// A card index can be reused after the global card list is read. A different
+/// live per-card ID invalidates the old card's optional name and driver.
+#[test]
+fn reused_card_index_discards_stale_global_metadata() {
+    let mut board = Board::new();
+    let port = "1-1.2";
+    board.usb_mic(0, port, "OldMic", MONO_STREAM);
+    board.write("proc/asound/card0/id", "NewMic\n");
+    board.write(
+        &format!("sys/{XHCI}/{port}/{port}:1.0/sound/card0/id"),
+        "NewMic\n",
+    );
+
+    let records = board.scan().unwrap();
+    assert_eq!(records.len(), 1);
+    let details = &records[0].details;
+    assert_eq!(details["name"], "USB Audio");
+    assert_eq!(details["capture_target"]["card_id"], "NewMic");
+    assert_eq!(
+        details["capture_target"]["selector"],
+        "plughw:CARD=NewMic,DEV=0"
+    );
+    assert_eq!(details["identity"]["card_id"], "NewMic");
+    assert!(details["identity"].get("card_name").is_none());
+    assert!(details["identity"].get("card_driver").is_none());
+}
+
 /// A one- or two-digit card id gets no selector: ALSA would read `CARD=7` as
 /// card index 7, not the card whose id is `7`. Longer numeric ids and ids
 /// with a letter are looked up by id and keep their selector.
