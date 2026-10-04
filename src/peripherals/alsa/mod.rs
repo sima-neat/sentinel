@@ -523,10 +523,14 @@ impl AlsaProvider {
         directory: &Path,
     ) -> Result<Vec<Record>, ProviderError> {
         let listed_card = card.clone();
-        if let Some(id) = read_text_file(&directory.join("id")).filter(|id| !id.is_empty()) {
-            card.id = id;
-        }
         let entry = self.sys_root.join(format!("class/sound/card{index}"));
+        // The class entry belongs to the live card at this index. Never keep
+        // the ID from an earlier global/procfs snapshot: the index may have
+        // been reused while the old card's per-card directory disappeared.
+        let Some(id) = read_text_file(&entry.join("id")).filter(|id| !id.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        card.id = id;
         let link = entry.join("device");
         let device = match fs::canonicalize(&link) {
             Ok(device) => Some(device),
@@ -563,12 +567,9 @@ impl AlsaProvider {
                 }
                 (format!("sysfs:{}", topology.to_string_lossy()), usb)
             }
-            // No device path to key on: the card id is the only attribute
-            // that survives renumbering, and ALSA keeps it unique among the
-            // registered cards. The kernel never registers a card without
-            // one; should the id read back empty, the card number keeps the
-            // records apart.
-            None if card.id.is_empty() => (format!("alsa-card-index:{index}"), None),
+            // No device path to key on: the live card id is the only
+            // attribute that survives renumbering, and ALSA keeps it unique
+            // among the registered cards.
             None => (format!("alsa-card-id:{}", card.id), None),
         };
         let control = format!("controlC{index}");

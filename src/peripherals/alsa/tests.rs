@@ -500,6 +500,10 @@ fn incomplete_captures_degrade_and_playback_only_cards_are_skipped() {
     fs::create_dir_all(board.path("proc/asound/card2/pcm0c")).unwrap();
     board.write("sys/class/sound/pcmC2D0c", "");
     board.write("proc/asound/card2/id", "bad id\n");
+    board.write(
+        &format!("sys/{XHCI}/1-1.6/1-1.6:1.0/sound/card2/id"),
+        "bad id\n",
+    );
     board.write("proc/asound/card2/stream0", MONO_STREAM);
 
     let details = board.details();
@@ -752,8 +756,8 @@ fn card_without_a_parent_device_is_listed_beside_usb_microphones() {
     let ids = |records: &[Record]| Vec::from_iter(records.iter().map(|r| r.id.clone()));
     assert_eq!(ids(&records), ids(&scan_as(5)), "renumbering keeps the ids");
 
-    // The kernel never registers a card without an id; if one reads back
-    // empty, the card number keeps two such cards apart.
+    // The kernel never registers a card without an id. An empty live id is a
+    // transient/invalid snapshot and is skipped rather than keyed by index.
     let mut board = Board::new();
     for index in [0, 1] {
         board.card(index, ("", "Dummy", "Dummy"), "devices/virtual");
@@ -761,15 +765,29 @@ fn card_without_a_parent_device_is_listed_beside_usb_microphones() {
         fs::remove_file(board.path(&link)).unwrap();
         board.capture(index, 0, (1, 1), None);
     }
-    let keys = Vec::from_iter(board.details().into_iter().map(|details| {
-        details["identity"]["stable_key"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    }));
-    let mut expected = ["alsa-card-index:0:pcm0c", "alsa-card-index:1:pcm0c"];
-    expected.sort_by_key(|key| fnv1a(key));
-    assert_eq!(keys, expected);
+    assert!(board.details().is_empty());
+}
+
+/// The global list can describe a departed card after its per-card ID has
+/// vanished. Never publish that retained ID against whichever device now
+/// occupies the reusable card index.
+#[test]
+fn card_without_a_live_id_is_skipped() {
+    let mut board = Board::new();
+    let port = "1-3.2";
+    board.usb_mic(2, port, "Departed", MONO_STREAM);
+    let mut listed = parse_cards(&board.cards, &BTreeSet::from([2]));
+    let listed = listed.remove(&2).unwrap();
+    fs::remove_file(board.path(&format!("sys/{XHCI}/{port}/{port}:1.0/sound/card2/id"))).unwrap();
+    fs::remove_file(board.path("proc/asound/card2/id")).unwrap();
+
+    let paths = ["proc/asound", "sys", "dev"].map(|path| board.path(path));
+    let provider = AlsaProvider::with_roots(&paths[0], &paths[1], &paths[2]);
+    let sys = fs::canonicalize(&paths[1]).unwrap();
+    assert!(provider
+        .card_records(&sys, 2, listed, &paths[0].join("card2"))
+        .unwrap()
+        .is_empty());
 }
 
 /// A microphone unplugged before, between, or after its `idVendor` and
