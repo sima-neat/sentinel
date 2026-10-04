@@ -14,7 +14,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::model::{Provider, ProviderError, Record};
-use super::sysutil::{errno_of, io_error, read_text_file, CODE_DISCOVERY_FAILED, CODE_IO_OPEN};
+use super::sysutil::{errno_of, io_error, read_text_file, CODE_IO_OPEN};
 use super::videodev2::MAX_ENUMERATION_ENTRIES;
 
 pub const PROVIDER_NAME: &str = "daemon.audio.alsa";
@@ -91,14 +91,13 @@ fn number(text: &str) -> Option<u32> {
 }
 
 /// `/proc/asound/cards`: `"%2i [%-15s]: %s - %s"` (index, id, driver, short
-/// name), each followed by `" %s"` (the long name). Parse only the first line
-/// of each kernel-emitted pair because a device-provided long name can itself
-/// look exactly like a card header. An empty short name leaves the header
-/// ending in `" - "`.
-fn parse_cards(text: &str) -> BTreeMap<u32, Card> {
+/// name), each followed by `" %s"` (the long name). Device-provided names may
+/// contain newlines, including text that looks like another header, so accept
+/// only registered indices and discard ambiguous metadata. An empty short
+/// name leaves the header ending in `" - "`.
+fn parse_cards(text: &str, registered: &BTreeSet<u32>) -> BTreeMap<u32, Card> {
     let parse = |line: &str| {
-        // The kernel right-aligns a one-digit index in a two-character
-        // field. Every long-name line has already been skipped structurally.
+        // The kernel right-aligns a one-digit index in a two-character field.
         let line = line.strip_prefix(' ').unwrap_or(line);
         let (index, rest) = line.split_once(' ')?;
         let (_, rest) = rest.split_once('[')?;
@@ -112,7 +111,15 @@ fn parse_cards(text: &str) -> BTreeMap<u32, Card> {
         };
         Some((number(index)?, card))
     };
-    text.lines().step_by(2).filter_map(parse).collect()
+    let mut cards = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for (index, card) in text.lines().filter_map(parse) {
+        if registered.contains(&index) && cards.insert(index, card).is_some() {
+            ambiguous.insert(index);
+        }
+    }
+    cards.retain(|index, _| !ambiguous.contains(index));
+    cards
 }
 
 /// `key: value` lines, as in `pcmMc/info`; a repeated key keeps its last value.
@@ -433,31 +440,20 @@ impl AlsaProvider {
             Some(text) => {
                 let directories = card_directories(&self.asound)?;
                 let no_cards = text.trim() == "--- no soundcards ---";
-                let cards = if no_cards {
+                let registered = directories.keys().copied().collect();
+                let mut metadata = if no_cards {
                     BTreeMap::new()
                 } else {
-                    parse_cards(&text)
+                    parse_cards(&text, &registered)
                 };
-                if !no_cards && cards.is_empty() {
-                    let reason = format!(
-                        "could not parse any ALSA card from {}; refresh after the sound \
-                         subsystem finishes initializing.",
-                        cards_path.display()
-                    );
-                    return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
-                }
-                // A card being added or removed can be listed without its
-                // directory, or the reverse; publishing half of it would
-                // churn ids.
-                if !cards.keys().eq(directories.keys()) {
-                    let reason = format!(
-                        "ALSA card list {} and its card directories disagree (a card is being \
-                         added or removed); refresh after the sound subsystem finishes \
-                         updating.",
-                        cards_path.display()
-                    );
-                    return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
-                }
+                // Per-card directories and sysfs are authoritative. The
+                // global procfs list only enriches display metadata because
+                // device-provided names can make its line structure
+                // ambiguous.
+                let cards: BTreeMap<_, _> = directories
+                    .keys()
+                    .map(|&index| (index, metadata.remove(&index).unwrap_or_default()))
+                    .collect();
                 (cards, directories)
             }
             None => {

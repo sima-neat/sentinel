@@ -351,12 +351,14 @@ fn card_names_cannot_imitate_the_no_soundcards_marker() {
 fn card_long_names_cannot_imitate_headers() {
     let text = concat!(
         " 0 [Real           ]: USB-Audio - Real microphone\n",
-        " 7 [Fake]: Driver - Name\n"
+        " 7 [Fake]: Driver - Name\n",
+        " 7 [Actual         ]: USB-Audio - Actual microphone\n",
+        " actual long name\n"
     );
-    let cards = parse_cards(text);
+    let cards = parse_cards(text, &BTreeSet::from([0, 7]));
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[&0].name, "Real microphone");
-    assert!(!cards.contains_key(&7));
+    assert!(!cards.contains_key(&7), "ambiguous metadata is omitted");
 }
 
 /// Stream parsing across the class: mono to multichannel, 16/24/32-bit,
@@ -780,13 +782,12 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
 }
 
 /// A kernel without ALSA, or without sound cards, has no microphones. A
-/// snapshot taken while a card is being added or removed, an unparsable or
-/// unreadable present card list, a card with a parent device but no `device` link
-/// (only seen while the card is being removed), and an incomplete USB
-/// ancestor of a present card fail the scan, so the catalog keeps the last
-/// good records. A card removed after the card list was read is skipped.
+/// stale or unparsable global card list is optional metadata when the per-card
+/// directories are present. An unreadable list, a present card with no
+/// `device` link, and an incomplete USB ancestor fail the scan. A card removed
+/// after the card list was read is skipped.
 #[test]
-fn absent_alsa_is_empty_and_partial_snapshots_fail_the_scan() {
+fn absent_alsa_and_partial_snapshots_are_handled() {
     let board = Board::new();
     assert!(board.scan().unwrap().is_empty(), "no soundcards");
     let empty = TempDir::new();
@@ -811,11 +812,11 @@ fn absent_alsa_is_empty_and_partial_snapshots_fail_the_scan() {
             board.cards, " 3 [New            ]: USB-Audio - New\n"
         ),
     );
-    assert!(fail(&board).contains("disagree"));
+    board.scan().unwrap();
     board.write("proc/asound/cards", "--- no soundcards ---\n");
-    assert!(fail(&board).contains("disagree"));
+    board.scan().unwrap();
     board.write("proc/asound/cards", "garbage\n");
-    assert!(fail(&board).starts_with("peripherals.discovery_failed could not parse"));
+    board.scan().unwrap();
     board.write("proc/asound/cards", &board.cards);
     board.scan().unwrap();
 
