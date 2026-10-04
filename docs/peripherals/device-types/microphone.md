@@ -45,7 +45,7 @@ microphone keeps its id.
 | `capture_target` | object | yes | `card_id` (string, may be empty), `device` (PCM number), and `selector` (`plughw:CARD=<card_id>,DEV=<M>`) when the card id holds only letters, digits, `_` and `-`. Routing for the current boot only | `/proc/asound/cardN/id` |
 | `identity` | object | yes | See below | |
 | `modes` | array | yes | Capture formats; empty when the driver publishes none (see `issues`) | `streamM` |
-| `availability` | object | yes | `state`: `available`, `in_use` (no capture subdevice free) or `unknown`; with `subdevices` and `subdevices_available` when known | `pcmMc/info` |
+| `availability` | object | yes | `state`: `available`, `in_use` (no capture subdevice free) or `unknown`; with `subdevices` and `subdevices_available` when known. A snapshot from the last scan; see [Availability](#availability) | `pcmMc/info` |
 | `issues` | array | no | `{"code", "reason"}` for each part that could not be read; the record is still published | |
 
 ### `identity`
@@ -74,6 +74,17 @@ Modes are sorted and duplicates removed.
 | `rates_hz` | array of integers | discrete rates | Sorted, without duplicates or zeros |
 | `rate_range_hz` | object | continuous rates | `{"min", "max"}`; a mode has `rates_hz` or `rate_range_hz`, never both |
 | `channel_map` | array of strings | when printed | Channel positions, e.g. `["FL", "FR"]`, `["MONO"]`; `--` for an unknown position |
+
+### Availability
+
+`availability` is what ALSA reported at the last scan, not a live state.
+Sentinel rescans on hot-plug events and refresh requests, but nothing tells
+it when an application opens or closes a PCM. Sound servers such as
+PulseAudio briefly open a newly connected microphone (5-8 s for a C920 on a
+DevKit), so a scan right after hot-plug can report `in_use`, and the record
+stays `in_use` until the next refresh or hot-plug. Clients must check live
+before capturing (for example, open the PCM and handle `EBUSY`) or request a
+refresh first, and must not treat `in_use` or `available` as a guarantee.
 
 ### Issue codes
 
@@ -133,6 +144,8 @@ None. Microphone records carry no `supported` or `reason`.
 
 | Behaviour | Real hardware (which device) | Fixtures only |
 | --- | --- | --- |
-| Record schema, identity, modes, availability | Not yet | Synthetic `/proc/asound` text in kernel 6.18.3's layout (`sound/core/init.c`, `sound/core/pcm.c`, `sound/usb/proc.c`) and synthetic sysfs; USB ids and descriptors modelled on a Yeti Nano and a C920, not captured from them |
-| Webcam microphone, headset, identical microphones, renumbering, partial snapshots | Not yet | Synthetic |
-| Discovery does not disturb a recording | Not yet | |
+| Webcam microphone: one record beside the camera, `connection: usb`, `plughw:CARD=C920,DEV=0`, S16_LE 2 ch at 16/24/32 kHz (altsets 1-3), `by_id` link, no issues; cameras unaffected | Logitech C920 built-in microphone, DevKit, 2026-10-04 | Synthetic C920-like fixture |
+| Same `id` after unplug and replug (USB `authorized` 0 then 1): removed, then re-added | Logitech C920, DevKit, 2026-10-04 | Card renumbering: synthetic |
+| `availability` is `in_use` while `arecord` records and `available` afterwards; 20 refreshes during a 6 s recording did not disturb it | Logitech C920, DevKit, 2026-10-04 | |
+| `availability` after hot-plug stays `in_use` while PulseAudio holds the new device, until the next scan (see [Availability](#availability)) | Logitech C920, DevKit, 2026-10-04 | |
+| Stereo 24-bit, mono, 32-bit, continuous rates, several formats per altset, headsets, identical microphones, platform cards, partial snapshots, missing USB strings | Not yet | Synthetic `/proc/asound` text in kernel 6.18.3's layout (`sound/core/init.c`, `sound/core/pcm.c`, `sound/usb/proc.c`) and synthetic sysfs; the Yeti Nano-like, mono and platform fixtures are not captures of real devices |
