@@ -107,6 +107,40 @@ fn opener(dev: &Path, nodes: Nodes) -> Opener {
     })
 }
 
+/// A node that removes its USB sysfs tree when interval enumeration ends,
+/// after valid modes have been returned but before optional metadata is read.
+#[derive(Clone)]
+struct UnplugAfterIntervals {
+    node: FakeVideoNode,
+    usb: PathBuf,
+}
+
+impl VideoNode for UnplugAfterIntervals {
+    fn query_capability(&mut self, value: &mut Capability) -> io::Result<()> {
+        self.node.query_capability(value)
+    }
+
+    fn enum_format(&mut self, value: &mut FmtDesc) -> io::Result<()> {
+        self.node.enum_format(value)
+    }
+
+    fn enum_frame_size(&mut self, value: &mut FrmSizeEnum) -> io::Result<()> {
+        self.node.enum_frame_size(value)
+    }
+
+    fn enum_frame_interval(&mut self, value: &mut FrmIvalEnum) -> io::Result<()> {
+        let result = self.node.enum_frame_interval(value);
+        let ended = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| errno_of(error) == libc::EINVAL);
+        if ended && self.usb.exists() {
+            fs::remove_dir_all(&self.usb).unwrap();
+        }
+        result
+    }
+}
+
 /// A temporary root with one camera at `USB` exposing `videos`.
 fn one_camera(videos: &[(&str, &str)]) -> TempDir {
     let root = TempDir::new();
@@ -519,6 +553,24 @@ fn camera_unplugged_after_open_is_skipped() {
                   composite-node index attributes.";
     let expected = (CODE_DISCOVERY_FAILED.into(), reason.into());
     assert_eq!((error.code, error.reason), expected);
+}
+
+/// A camera unplugged after returning valid modes but before optional USB
+/// metadata is read is omitted instead of published with sparse metadata.
+#[test]
+fn camera_unplugged_during_optional_metadata_is_skipped() {
+    let root = one_camera(&[("video0", "0")]);
+    let (sys, dev) = (root.path().join("sys"), root.path().join("dev"));
+    let usb = sys.join(USB);
+    let node = UnplugAfterIntervals {
+        node: uvc_camera("C920"),
+        usb: usb.clone(),
+    };
+    let unplug: Opener = Box::new(move |_| Ok(Box::new(node.clone())));
+    let mut provider = V4l2Provider::with_opener(&sys, &dev, unplug);
+    let records = on_board(root.path(), provider.discover()).unwrap();
+    assert!(records.is_empty());
+    assert!(!usb.exists(), "the race was not exercised");
 }
 
 /// No list may exceed `MAX_ENUMERATION_ENTRIES`, and one device gets

@@ -608,11 +608,15 @@ impl V4l2Provider {
         if let Some(link) = node.and_then(|node| by_id.get(&node)) {
             details["by_id_path"] = json!(link.to_string_lossy());
         }
-        Ok(Some(Record {
+        let record = Record {
             id: format!("camera:v4l2:{fnv1a:016x}"),
             kind: "camera".to_string(),
             provider: PROVIDER_NAME.to_string(),
             details,
-        }))
+        };
+        // Optional USB metadata reads deliberately tolerate attributes that
+        // are absent. Recheck the class entry so an unplug during those reads
+        // is not mistaken for a present camera with sparse metadata.
+        Ok((!vanished(entry)).then_some(record))
     }
 }
