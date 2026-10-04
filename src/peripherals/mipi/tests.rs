@@ -281,6 +281,7 @@ struct Fakes(
     Nodes<FakeSubdev>,
     Option<PathBuf>,
     Option<(PathBuf, PathBuf)>,
+    Option<(PathBuf, PathBuf)>,
 );
 
 struct OpenFakeVideo {
@@ -328,6 +329,10 @@ impl Backend for Fakes {
             if let Some(graph) = &node.4 {
                 node.1 = graph.clone();
             }
+            if let Some((isp, entry)) = &self.5 {
+                let _ = fs::remove_file(isp);
+                let _ = fs::remove_dir_all(entry);
+            }
         }
         if node.2.is_some_and(|(_, unplugged)| unplugged) {
             fs::remove_file(path).unwrap();
@@ -361,7 +366,15 @@ fn scan(
     video: impl IntoIterator<Item = Video>,
     subdevs: impl IntoIterator<Item = Subdev>,
 ) -> Result<Vec<Record>, ProviderError> {
-    scan_with(OsString::from("dev"), media, video, subdevs, None, None)
+    scan_with(
+        OsString::from("dev"),
+        media,
+        video,
+        subdevs,
+        None,
+        None,
+        None,
+    )
 }
 
 fn scan_in(
@@ -370,7 +383,7 @@ fn scan_in(
     video: impl IntoIterator<Item = Video>,
     subdevs: impl IntoIterator<Item = Subdev>,
 ) -> Result<Vec<Record>, ProviderError> {
-    scan_with(dev_name, media, video, subdevs, None, None)
+    scan_with(dev_name, media, video, subdevs, None, None, None)
 }
 
 fn scan_with(
@@ -380,6 +393,7 @@ fn scan_with(
     subdevs: impl IntoIterator<Item = Subdev>,
     unplug_during_video: Option<usize>,
     unplug_isp: Option<usize>,
+    unplug_isp_during_sensor_recheck: Option<usize>,
 ) -> Result<Vec<Record>, ProviderError> {
     let directory = TempDir::new();
     let (root, mut fakes) = (directory.path(), Fakes::default());
@@ -393,11 +407,17 @@ fn scan_with(
     }
     fakes.3 = unplug_during_video.map(|index| dev.join(format!("media{index}")));
     for (index, (name, node)) in video.into_iter().enumerate() {
+        write_file(&dev.join(format!("video{index}")), "");
         let sysfs = root.join(format!("sys/class/video4linux/video{index}/name"));
         write_file(&sysfs, &format!("{name}\n"));
         fakes.1.insert(dev.join(format!("video{index}")), node);
     }
     fakes.4 = unplug_isp.map(|index| {
+        let node = dev.join(format!("video{index}"));
+        let entry = root.join(format!("sys/class/video4linux/video{index}"));
+        (node, entry)
+    });
+    fakes.5 = unplug_isp_during_sensor_recheck.map(|index| {
         let node = dev.join(format!("video{index}"));
         let entry = root.join(format!("sys/class/video4linux/video{index}"));
         (node, entry)
@@ -614,6 +634,7 @@ fn media_device_unplugged_after_topology_is_skipped() {
         [],
         Some(0),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(records.len(), 1);
@@ -643,6 +664,7 @@ fn isp_node_unplugged_after_mode_enumeration_is_not_published() {
         [],
         None,
         Some(0),
+        None,
     )
     .unwrap();
     assert_eq!(records.len(), 1);
@@ -663,6 +685,7 @@ fn isp_node_unplugged_after_mode_enumeration_is_not_published() {
         [],
         None,
         Some(0),
+        None,
     )
     .unwrap();
     let details = &records[0].details;
@@ -673,6 +696,32 @@ fn isp_node_unplugged_after_mode_enumeration_is_not_published() {
         "device_paths": ["/dev/video1"]
     });
     assert_eq!(details["isp"], available);
+}
+
+/// An ISP can disappear after its mode probe while the sensor topology is
+/// revalidated. The final snapshot must not retain that node or its modes.
+#[test]
+fn isp_node_unplugged_during_sensor_recheck_is_not_published() {
+    let records = scan_with(
+        OsString::from("dev"),
+        [real_media(&[IMX477])],
+        [isp(real_isp())],
+        [],
+        None,
+        None,
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    let details = &records[0].details;
+    assert_eq!(details["modes"], json!([]));
+    assert_eq!(
+        details["isp"],
+        json!({
+            "state": "unavailable",
+            "reason": "no Modalix ISP output node was found"
+        })
+    );
 }
 
 /// Several ISP nodes report the modes they share; a node with another card

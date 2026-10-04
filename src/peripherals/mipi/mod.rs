@@ -104,16 +104,7 @@ impl Provider for MipiProvider {
         if sensors.is_empty() {
             return Ok(Vec::new());
         }
-        let (isp, modes) = match probe_isp(&self.sys_root, &self.dev_root, backend) {
-            Ok((paths, modes)) => (
-                json!({"state": "available", "device_path": paths[0], "device_paths": paths}),
-                modes,
-            ),
-            Err(reason) => (
-                json!({"state": "unavailable", "reason": reason}),
-                BTreeSet::new(),
-            ),
-        };
+        let probed_isp = probe_isp(&self.sys_root, &self.dev_root, backend);
         // ISP enumeration can race with a media-device unplug. Drop stale
         // sensors before they participate in duplicate-name validation.
         sensors.retain(|sensor| !vanished(&sensor.media_path));
@@ -143,6 +134,34 @@ impl Provider for MipiProvider {
             );
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
+        // Sensor timing and topology reads can outlive an ISP node that was
+        // valid when it was probed. Revalidate both its device and class paths
+        // immediately before publishing the snapshot so stale paths and modes
+        // are never advertised indefinitely after an unbind.
+        let (isp, modes) = match probed_isp {
+            Ok((nodes, modes))
+                if nodes
+                    .iter()
+                    .all(|node| !vanished(&node.device_path) && !vanished(&node.class_path)) =>
+            {
+                let paths = nodes
+                    .into_iter()
+                    .map(|node| node.device_path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                (
+                    json!({"state": "available", "device_path": paths[0], "device_paths": paths}),
+                    modes,
+                )
+            }
+            Ok(_) => (
+                json!({"state": "unavailable", "reason": "no Modalix ISP output node was found"}),
+                BTreeSet::new(),
+            ),
+            Err(reason) => (
+                json!({"state": "unavailable", "reason": reason}),
+                BTreeSet::new(),
+            ),
+        };
         let records = sensors.into_iter().map(|(sensor, timing)| {
             let mut details = json!({
                 "camera_name": sensor.name,
@@ -467,7 +486,12 @@ impl IspMode {
     }
 }
 
-type IspModes = (Vec<String>, BTreeSet<IspMode>);
+struct IspNode {
+    device_path: PathBuf,
+    class_path: PathBuf,
+}
+
+type IspModes = (Vec<IspNode>, BTreeSet<IspMode>);
 
 /// Keep the outputs both sets can produce. An explicit interval from any node
 /// constrains a shared rate, so sensor timing must not expand that rate later.
@@ -510,7 +534,10 @@ fn probe_isp(sys_root: &Path, dev_root: &Path, backend: &dyn Backend) -> Result<
             continue;
         }
         let (paths, shared) = common.get_or_insert_with(|| (Vec::new(), modes.clone()));
-        paths.push(path.to_string_lossy().into_owned());
+        paths.push(IspNode {
+            device_path: path,
+            class_path: entry,
+        });
         *shared = common_modes(shared, &modes);
     }
     match common {
