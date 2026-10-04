@@ -507,7 +507,16 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
                 Some(discrete.then(|| (size.discrete_width(), size.discrete_height())))
             })
         })?;
-        for (width, height) in sizes.into_iter().flatten().collect::<BTreeSet<_>>() {
+        let sizes: BTreeSet<_> = sizes.into_iter().flatten().collect();
+        // As in the V4L2 provider, a zero dimension is a malformed size, not
+        // a mode a client could open.
+        if sizes
+            .iter()
+            .any(|&(width, height)| width == 0 || height == 0)
+        {
+            return Err(malformed("frame size", path));
+        }
+        for (width, height) in sizes {
             // Discrete intervals only: the list ends at a stepwise or
             // continuous range, or at ENOTTY from a driver without the ioctl.
             let ioctl = ("VIDIOC_ENUM_FRAMEINTERVALS", "frame interval list");

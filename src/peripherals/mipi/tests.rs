@@ -485,7 +485,8 @@ fn isp_nodes_provide_the_modes() {
     assert_eq!(imx477([isp(node)], vec![])["modes"], nominal_modes);
 }
 
-/// A missing, unreadable or malformed ISP keeps the camera, without modes.
+/// A missing, unreadable or malformed ISP (a zero interval or a zero-sized
+/// mode, as the V4L2 provider rejects) keeps the camera, without modes.
 /// No ISP list may exceed `MAX_ENUMERATION_ENTRIES`, and one ISP node gets
 /// `MAX_DEVICE_ENUMERATIONS` queries in all.
 #[test]
@@ -504,13 +505,15 @@ fn isp_failures_leave_the_camera_without_modes() {
         queries.sizes.extend(sizes);
     }
     let calls = queries.calls.clone();
-    let videos: [Vec<Video>; 8] = [
+    let videos: [Vec<Video>; 10] = [
         vec![],
         vec![("raw-capture.1.0", Ok(real_isp()))],
         vec![(ISP_SYSFS_NAME, Err(libc::EACCES))],
         vec![isp(eio)],
         vec![isp(real_isp()), isp(nv12_isp(&[(640, 480)]))],
         vec![isp(zero)],
+        vec![isp(nv12_isp(&[(1920, 1080), (0, 1080)]))],
+        vec![isp(nv12_isp(&[(640, 0), (1920, 1080)]))],
         vec![isp(formats)],
         vec![isp(queries)],
     ];
@@ -526,6 +529,8 @@ fn isp_failures_leave_the_camera_without_modes() {
         failed("VIDIOC_ENUM_FMT failed for /dev/video0", libc::EIO),
         "Modalix ISP output nodes reported no common discrete sizes".into(),
         format!("{malformed} frame interval"),
+        format!("{malformed} frame size"),
+        format!("{malformed} frame size"),
         format!("{malformed} format list"),
         format!("{malformed} enumeration (more than 4096 queries)"),
     ];
