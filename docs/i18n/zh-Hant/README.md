@@ -22,3 +22,5 @@ Sentinel 會在後台程序中收集 Modalix DevKit 的遙測資料，並寫入�
   守護程式的 Unix 網路插座。
 - [擷取和比較執行結果](run-comparison.md)文件會永久保存。
   檢查點、比較執行結果標籤、保留設定，以及 CSV/JSON 匯出功能。
+- [周邊裝置](peripherals/README.md)記錄已連接裝置的目錄、每種裝置類型的
+  記錄格式，以及如何加入新裝置類型的支援。

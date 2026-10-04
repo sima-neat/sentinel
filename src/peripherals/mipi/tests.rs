@@ -486,18 +486,31 @@ fn media_device_unplugged_after_open_is_skipped() {
 /// ioctl keep it.
 #[test]
 fn isp_nodes_provide_the_modes() {
+    let nv12 = fourcc(b"NV12");
     let mut card = real_isp();
     card.capability.card = [0; 32];
-    let second = nv12_isp(&[(3840, 2160), (2048, 1080), (1920, 1080)]);
-    let isps = [real_isp(), second, card, nv12_isp(&[])].map(isp);
+    let mut first = real_isp();
+    first
+        .intervals
+        .push(((nv12, 1920, 1080), discrete_interval(1, 30)));
+    let mut second = nv12_isp(&[(3840, 2160), (2048, 1080), (1920, 1080)]);
+    second
+        .intervals
+        .push(((nv12, 1920, 1080), discrete_interval(2, 60)));
+    let third = nv12_isp(&[(2048, 1080), (1920, 1080)]);
+    let isps = [first, second, third, card, nv12_isp(&[])].map(isp);
     let details = imx477(isps, vec![]);
-    let modes = json!([nominal((1920, 1080)), nominal((2048, 1080))]);
+    // Equivalent explicit fractions intersect, and an explicit interval on
+    // either node constrains the shared rate.
+    let modes = json!([
+        mode("NV12", (1920, 1080), (30, 1), "isp"),
+        nominal((2048, 1080))
+    ]);
     assert_eq!(details["modes"], modes);
-    let paths = ["/dev/video0", "/dev/video1"];
+    let paths = ["/dev/video0", "/dev/video1", "/dev/video2"];
     let available = json!({"state": "available", "device_path": paths[0], "device_paths": paths});
     assert_eq!(details["isp"], available);
 
-    let nv12 = fourcc(b"NV12");
     let mut continuous = discrete_interval(1, 60);
     continuous.kind = V4L2_FRMIVAL_TYPE_CONTINUOUS;
     let mut node = nv12_isp(&SIZES);
@@ -599,6 +612,20 @@ fn imx477_sensor_timing_sets_max_fps_and_rates() {
     let timed = |rate| mode("NV12", SIZES[1], (rate, 1), "sensor_timing");
     expected.extend(IMX477_RATES.map(timed));
     assert_eq!(details["modes"], json!(expected));
+
+    // A node without frame intervals agrees with an explicit 30 fps mode, but
+    // its fallback must not let sensor timing expand that constrained rate.
+    let mut constrained = nv12_isp(&[SIZES[0]]);
+    constrained
+        .intervals
+        .push(((fourcc(b"NV12"), 1920, 1080), discrete_interval(1, 30)));
+    let fallback = nv12_isp(&[SIZES[0]]);
+    let details = imx477(
+        [isp(constrained), isp(fallback)],
+        imx477_timed(|_| ()),
+    );
+    let expected = json!([mode("NV12", SIZES[0], (30, 1), "isp")]);
+    assert_eq!(details["modes"], expected);
 }
 
 /// Synthetic: a sensor without a readable sub-device, format or control, or

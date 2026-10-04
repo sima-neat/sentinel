@@ -420,7 +420,35 @@ struct IspMode {
     isp_output: bool,
 }
 
+impl IspMode {
+    /// The output a client can request. Provenance explains the evidence for
+    /// the rate, but is not part of whether two ISP nodes share that output.
+    fn same_output(&self, other: &Self) -> bool {
+        self.format == other.format
+            && self.width == other.width
+            && self.height == other.height
+            && self.framerate_num == other.framerate_num
+            && self.framerate_den == other.framerate_den
+            && self.isp_output == other.isp_output
+    }
+}
+
 type IspModes = (Vec<String>, BTreeSet<IspMode>);
+
+/// Keep the outputs both sets can produce. An explicit interval from any node
+/// constrains a shared rate, so sensor timing must not expand that rate later.
+fn common_modes(left: &BTreeSet<IspMode>, right: &BTreeSet<IspMode>) -> BTreeSet<IspMode> {
+    left.iter()
+        .filter_map(|mode| {
+            let other = right.iter().find(|candidate| mode.same_output(candidate))?;
+            let mut shared = mode.clone();
+            if other.framerate_source == "isp" {
+                shared.framerate_source = "isp";
+            }
+            Some(shared)
+        })
+        .collect()
+}
 
 /// Every `/sys/class/video4linux` entry named like the ISP output, in sorted
 /// order. Nodes with another card or no discrete size are skipped, the first
@@ -441,7 +469,7 @@ fn probe_isp(sys_root: &Path, dev_root: &Path, backend: &dyn Backend) -> Result<
         }
         let (paths, shared) = common.get_or_insert_with(|| (Vec::new(), modes.clone()));
         paths.push(path.to_string_lossy().into_owned());
-        shared.retain(|mode| modes.contains(mode));
+        *shared = common_modes(shared, &modes);
     }
     match common {
         None => Err("no Modalix ISP output node was found".to_string()),
@@ -454,6 +482,17 @@ fn probe_isp(sys_root: &Path, dev_root: &Path, backend: &dyn Backend) -> Result<
 
 fn malformed(what: &str, path: &Path) -> String {
     format!("ISP node {} returned a malformed {what}", path.display())
+}
+
+fn normalized_rate(mut numerator: u32, mut denominator: u32) -> (u32, u32) {
+    let (original_numerator, original_denominator) = (numerator, denominator);
+    while denominator != 0 {
+        (numerator, denominator) = (denominator, numerator % denominator);
+    }
+    (
+        original_numerator / numerator,
+        original_denominator / numerator,
+    )
 }
 
 /// Entries 0, 1, … of one V4L2 enumeration, until the driver answers `EINVAL`
@@ -545,7 +584,8 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
             if rates.is_empty() {
                 rates.push((NOMINAL_FRAMERATE, "nominal"));
             }
-            for ((framerate_num, framerate_den), framerate_source) in rates {
+            for (rate, framerate_source) in rates {
+                let (framerate_num, framerate_den) = normalized_rate(rate.0, rate.1);
                 let format = fourcc_string(pixel_format);
                 modes.insert(IspMode {
                     format,

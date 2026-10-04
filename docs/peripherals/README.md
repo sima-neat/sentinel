@@ -57,6 +57,8 @@ From a Neat application, `simaai::neat::peripherals::list()` (C++) and
 carries its details as JSON (`details_json` / `details`), so a new device type
 is usable from Neat applications before Core adds typed fields for it.
 
+<a id="support-rules"></a>
+
 ## Support rules
 
 Each camera mode carries `supported` and `reason`: whether the installed Neat
@@ -101,4 +103,3 @@ that Sentinel needs an update.
 | `--peripherals-file PATH` | `/run/simaai-sentinel/peripherals.json` | Where the catalog is written, and read by `simaai-sentinel peripherals` |
 | `--support-rules PATH` | `/usr/share/simaai-sentinel/support/neat-core.json` | Neat Core's camera support rules |
 | `--no-peripherals` | off | Run the daemon without peripheral discovery |
-
