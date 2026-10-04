@@ -468,6 +468,35 @@ fn incomplete_captures_degrade_and_playback_only_cards_are_skipped() {
     assert_eq!(Value::from(actual), expected);
 }
 
+/// A one- or two-digit card id gets no selector: ALSA would read `CARD=7` as
+/// card index 7, not the card whose id is `7`. Longer numeric ids and ids
+/// with a letter are looked up by id and keep their selector.
+#[test]
+fn index_like_card_ids_get_no_selector() {
+    let mut board = Board::new();
+    for (index, id) in [(0, "7"), (1, "12"), (2, "123"), (3, "D7")] {
+        board.usb_mic(index, &format!("1-1.{index}"), id, MONO_STREAM);
+    }
+    let mut targets = Vec::from_iter(board.details().into_iter().map(|details| {
+        let target = &details["capture_target"];
+        json!([target["card_id"], target["selector"], details["issues"]])
+    }));
+    targets.sort_by_key(|target| target[0].to_string());
+    let ambiguous = json!([{
+        "code": "peripherals.capture_selector_unavailable",
+        "reason": "The ALSA card ID is a one- or two-digit number, which ALSA reads as a card \
+                   index in a CARD= selector, so it could open a different card. Give the \
+                   card an ID that is not a number (the driver's id module option).",
+    }]);
+    let expected = [
+        json!(["12", null, ambiguous]),
+        json!(["123", "plughw:CARD=123,DEV=0", null]),
+        json!(["7", null, ambiguous]),
+        json!(["D7", "plughw:CARD=D7,DEV=0", null]),
+    ];
+    assert_eq!(targets, expected);
+}
+
 /// A microphone unplugged between its `idVendor` and `idProduct` reads is
 /// skipped; a present device with only `idVendor` still fails the scan.
 #[test]

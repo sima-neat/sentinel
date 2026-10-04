@@ -365,6 +365,13 @@ fn valid_card_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+/// Whether a card id is one or two decimal digits: alsa-lib's
+/// `snd_card_get_index`, which resolves `CARD=` in `hw:` and `plughw:`, reads
+/// such a string as a card index before trying it as an id.
+fn index_like_card_id(id: &str) -> bool {
+    matches!(id.len(), 1 | 2) && id.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// 64-bit FNV-1a, the hash behind the record ids.
 fn fnv1a(text: &str) -> u64 {
     text.bytes().fold(14_695_981_039_346_656_037, |hash, byte| {
@@ -502,15 +509,30 @@ impl AlsaProvider {
                 .unwrap_or_else(|| format!("ALSA capture PCM {pcm}"));
 
             let mut capture_target = json!({"card_id": card.id, "device": pcm});
-            if valid_card_id(&card.id) {
-                capture_target["selector"] = json!(format!("plughw:CARD={},DEV={pcm}", card.id));
-            } else {
-                issue(
-                    &mut issues,
-                    "peripherals.capture_selector_unavailable",
+            let unavailable = if !valid_card_id(&card.id) {
+                Some(
                     "ALSA did not report a safe stable card ID. Refresh after the device \
                      finishes initializing.",
-                );
+                )
+            } else if index_like_card_id(&card.id) {
+                Some(
+                    "The ALSA card ID is a one- or two-digit number, which ALSA reads as a \
+                     card index in a CARD= selector, so it could open a different card. Give \
+                     the card an ID that is not a number (the driver's id module option).",
+                )
+            } else {
+                None
+            };
+            match unavailable {
+                None => {
+                    let selector = format!("plughw:CARD={},DEV={pcm}", card.id);
+                    capture_target["selector"] = json!(selector);
+                }
+                Some(reason) => issue(
+                    &mut issues,
+                    "peripherals.capture_selector_unavailable",
+                    reason,
+                ),
             }
 
             let stable_key = format!("sysfs:{topology}:pcm{pcm}c");

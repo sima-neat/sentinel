@@ -42,7 +42,7 @@ microphone keeps its id.
 | `name` | string | yes | Card short name, else the PCM name, else the card id, else `ALSA capture PCM <M>` | `/proc/asound/cards`, `pcmMc/info` |
 | `backend` | string | yes | `alsa` | |
 | `connection` | string | yes | `usb` when the card's device has a USB ancestor, else `platform` | sysfs |
-| `capture_target` | object | yes | `card_id` (string, may be empty), `device` (PCM number), and `selector` (`plughw:CARD=<card_id>,DEV=<M>`) when the card id holds only letters, digits, `_` and `-`. Routing for the current boot only | `/proc/asound/cardN/id` |
+| `capture_target` | object | yes | `card_id` (string, may be empty), `device` (PCM number), and `selector` (`plughw:CARD=<card_id>,DEV=<M>`) when the card id holds only letters, digits, `_` and `-` and is not a one- or two-digit number (ALSA reads `CARD=7` as card index 7). Routing for the current boot only | `/proc/asound/cardN/id` |
 | `identity` | object | yes | See below | |
 | `modes` | array | yes | Capture formats; empty when the driver publishes none (see `issues`) | `streamM` |
 | `availability` | object | yes | `state`: `available`, `in_use` (no capture subdevice free) or `unknown`; with `subdevices` and `subdevices_available` when known. A snapshot from the last scan; see [Availability](#availability) | `pcmMc/info` |
@@ -91,7 +91,7 @@ refresh first, and must not treat `in_use` or `available` as a guarantee.
 | Code | When |
 | --- | --- |
 | `peripherals.pcm_info_unreadable` | `pcmMc/info` could not be read |
-| `peripherals.capture_selector_unavailable` | The card id cannot form a safe `selector` |
+| `peripherals.capture_selector_unavailable` | The card id cannot form a safe `selector`, or is a one- or two-digit number that ALSA would read as a card index |
 | `peripherals.capabilities_unavailable` | No capture formats: a non-USB driver (formats are only published by USB audio without opening the PCM) or a USB stream without them |
 | `peripherals.availability_unknown` | `subdevices_count` / `subdevices_avail` missing or invalid |
 
@@ -127,7 +127,8 @@ refresh first, and must not treat `in_use` or `available` as a guarantee.
 - Several identical microphones on different ports; several capture PCMs on
   one card; card numbers that change between replugs.
 - Missing manufacturer, product or serial (omitted); missing udev links;
-  card ids that are not safe in a selector; unreadable `pcmMc/info`;
+  card ids that are not safe in a selector or that ALSA would read as a card
+  index; unreadable `pcmMc/info`;
   non-USB cards without published formats; a stream that is recording
   (running status lines are skipped, availability `in_use`).
 - A kernel without ALSA, or without sound cards: no records.
