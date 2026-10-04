@@ -476,7 +476,11 @@ fn probe_isp(sys_root: &Path, dev_root: &Path, backend: &dyn Backend) -> Result<
             continue;
         }
         let path = dev_root.join(&name);
-        let modes = isp_modes(backend, &path)?;
+        let modes = match isp_modes(backend, &path) {
+            Ok(modes) => modes,
+            Err(_) if vanished(&entry) => continue,
+            Err(error) => return Err(error),
+        };
         if vanished(&entry) {
             continue;
         }

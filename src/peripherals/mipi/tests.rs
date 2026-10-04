@@ -606,8 +606,9 @@ fn media_device_unplugged_after_topology_is_skipped() {
     assert_eq!(records[0].details["media_device"], "/dev/media1");
 }
 
-/// An ISP class entry removed after its open handle reports modes is skipped
-/// instead of being published as available with stale modes.
+/// An ISP class entry removed while its open handle is queried or after it
+/// reports modes is skipped instead of failing the remaining ISP nodes or
+/// being published as available with stale modes.
 #[test]
 fn isp_node_unplugged_after_mode_enumeration_is_not_published() {
     let records = scan_with(
@@ -627,6 +628,26 @@ fn isp_node_unplugged_after_mode_enumeration_is_not_published() {
         "reason": "no Modalix ISP output node was found"
     });
     assert_eq!(details["isp"], unavailable);
+
+    let mut failing = real_isp();
+    failing.fail = Some((VIDIOC_ENUM_FMT, libc::EIO));
+    let records = scan_with(
+        OsString::from("dev"),
+        [real_media(&[IMX477])],
+        [isp(failing), isp(real_isp())],
+        [],
+        None,
+        Some(0),
+    )
+    .unwrap();
+    let details = &records[0].details;
+    assert_eq!(details["modes"], real_isp_modes(&[30], "nominal"));
+    let available = json!({
+        "state": "available",
+        "device_path": "/dev/video1",
+        "device_paths": ["/dev/video1"]
+    });
+    assert_eq!(details["isp"], available);
 }
 
 /// Several ISP nodes report the modes they share; a node with another card
