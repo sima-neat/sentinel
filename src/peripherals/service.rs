@@ -26,6 +26,9 @@ pub const NICE: libc::c_int = 10;
 pub const MAX_EVENT_WAIT: Duration = Duration::from_secs(1);
 /// How often a failed catalog write is retried.
 pub const PUBLISH_RETRY: Duration = Duration::from_secs(1);
+/// While a previously installed support-rules watch has lost its directory,
+/// how often to try to attach it again.
+pub const RULES_WATCH_RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct Schedule {
@@ -281,9 +284,12 @@ fn run(
     // Refresh requests within the cooldown share the next scan, so a client
     // that spams the world-writable API cannot keep the thread busy.
     let mut last_scan_end: Option<Instant> = None;
+    // Only an invalidated watch is retried. A directory absent at startup is
+    // handled by Core's install-time refresh without adding an idle wake-up.
+    let mut retry_rules_watch: Option<Instant> = None;
     loop {
         // A pending scan re-reads the rules, so it supersedes a reclassify.
-        let next = [due.or(reclassify_due), retry_publish]
+        let next = [due.or(reclassify_due), retry_publish, retry_rules_watch]
             .into_iter()
             .flatten()
             .min();
@@ -379,8 +385,20 @@ fn run(
                     Err(error) => {
                         eprintln!("Sentinel stopped watching support rules: {error}");
                         rules_watch = None;
+                        retry_rules_watch = Some(Instant::now() + RULES_WATCH_RETRY);
+                        reclassify_due = Some(Instant::now() + config.debounce);
                     }
                 }
+            }
+        }
+        if retry_rules_watch.is_some_and(|at| Instant::now() >= at) {
+            match RulesWatch::open(scanner.support_path()) {
+                Ok(watch) => {
+                    rules_watch = Some(watch);
+                    retry_rules_watch = None;
+                    reclassify_due = Some(Instant::now() + config.debounce);
+                }
+                Err(_) => retry_rules_watch = Some(Instant::now() + RULES_WATCH_RETRY),
             }
         }
         if due.is_none() && reclassify_due.is_some_and(|at| Instant::now() >= at) {

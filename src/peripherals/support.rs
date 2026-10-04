@@ -257,7 +257,9 @@ impl RulesWatch {
             | libc::IN_MOVED_TO
             | libc::IN_MOVED_FROM
             | libc::IN_CREATE
-            | libc::IN_DELETE;
+            | libc::IN_DELETE
+            | libc::IN_DELETE_SELF
+            | libc::IN_MOVE_SELF;
         // SAFETY: valid descriptor and NUL-terminated path.
         if unsafe { libc::inotify_add_watch(raw, c_directory.as_ptr(), mask) } < 0 {
             return Err(io::Error::last_os_error());
@@ -291,13 +293,13 @@ impl RulesWatch {
                     _ => Err(error),
                 };
             }
-            changed |= events_concern(&buffer[..count as usize], self.file_name.as_bytes());
+            changed |= events_concern(&buffer[..count as usize], self.file_name.as_bytes())?;
         }
     }
 }
 
 /// Parse a buffer of `struct inotify_event` records.
-fn events_concern(mut buffer: &[u8], file_name: &[u8]) -> bool {
+fn events_concern(mut buffer: &[u8], file_name: &[u8]) -> io::Result<bool> {
     const HEADER: usize = 16;
     let mut concerned = false;
     while buffer.len() >= HEADER {
@@ -306,13 +308,19 @@ fn events_concern(mut buffer: &[u8], file_name: &[u8]) -> bool {
         let Some(name) = buffer.get(HEADER..HEADER + length) else {
             break;
         };
+        if mask & libc::IN_IGNORED != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "support rules directory watch was invalidated",
+            ));
+        }
         let name = name.split(|&byte| byte == 0).next().unwrap_or_default();
         if mask & libc::IN_Q_OVERFLOW != 0 || name == file_name {
             concerned = true;
         }
         buffer = &buffer[HEADER + length..];
     }
-    concerned
+    Ok(concerned)
 }
 
 /// The rules Neat Core ships (`src/peripherals/sentinel-support-rules.json.in`
@@ -457,5 +465,9 @@ mod tests {
         assert!(watch.drain().unwrap(), "a package-manager rename");
         fs::remove_file(&path).unwrap();
         assert!(watch.drain().unwrap(), "removal is seen");
+
+        fs::remove_dir_all(dir.path()).unwrap();
+        let error = watch.drain().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }
