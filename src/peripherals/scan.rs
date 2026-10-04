@@ -378,7 +378,10 @@ mod tests {
         assert_eq!(retained.revision, rejected.revision);
         assert_eq!(retained.support, rejected.support);
         assert_eq!(retained.devices, rejected.devices);
-        assert_eq!(retained.support.unwrap().source.as_deref(), Some("neat-core 0.4.0"));
+        assert_eq!(
+            retained.support.unwrap().source.as_deref(),
+            Some("neat-core 0.4.0")
+        );
         assert_eq!(retained.devices[0]["camera"]["modes"][0]["supported"], true);
     }
 }

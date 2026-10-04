@@ -304,11 +304,7 @@ fn run(
                 return;
             }
             if std::mem::take(&mut schedule.refresh) {
-                let earliest = refresh_due(
-                    Instant::now(),
-                    last_scan_end,
-                    config.refresh_cooldown,
-                );
+                let earliest = refresh_due(Instant::now(), last_scan_end, config.refresh_cooldown);
                 due = Some(due.map_or(earliest, |at| at.min(earliest)));
                 refresh_pending = true;
             }
