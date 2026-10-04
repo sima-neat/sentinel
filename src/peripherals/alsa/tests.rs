@@ -148,6 +148,7 @@ impl Board {
         self.write(&format!("proc/asound/card{index}/id"), &format!("{id}\n"));
         let card = format!("{device}/sound/card{index}");
         fs::create_dir_all(self.path(&format!("sys/{card}"))).unwrap();
+        self.write(&format!("sys/{card}/id"), &format!("{id}\n"));
         symlink("../..", self.path(&format!("sys/{card}/device"))).unwrap();
         let class = self.path(&format!("sys/class/sound/card{index}"));
         symlink(format!("../../{card}"), class).unwrap();
@@ -505,6 +506,45 @@ fn capture_devices_do_not_require_verbose_procfs() {
     );
 }
 
+/// CONFIG_SND_PROC_FS controls all of `/proc/asound`. Card and capture PCM
+/// class devices still exist, so the microphone remains usable through its
+/// sysfs card id while procfs-only metadata and capabilities degrade.
+#[test]
+fn capture_devices_do_not_require_alsa_procfs() {
+    let mut board = Board::new();
+    board.usb_mic(0, "1-1.2", "Nano", YETI_STREAM);
+    fs::remove_dir_all(board.path("proc/asound")).unwrap();
+
+    let records = board.scan().unwrap();
+    assert_eq!(records.len(), 1);
+    let details = &records[0].details;
+    assert_eq!(details["name"], "Nano");
+    assert_eq!(
+        details["capture_target"]["selector"],
+        "plughw:CARD=Nano,DEV=0"
+    );
+    assert_eq!(details["identity"]["card_id"], "Nano");
+    assert!(details["identity"].get("card_name").is_none());
+    assert!(details["identity"].get("card_driver").is_none());
+    assert!(details["modes"].as_array().unwrap().is_empty());
+    assert_eq!(details["availability"]["state"], "unknown");
+    let codes = Vec::from_iter(
+        details["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["code"].as_str().unwrap()),
+    );
+    assert_eq!(
+        codes,
+        [
+            "peripherals.pcm_info_unreadable",
+            "peripherals.capabilities_unavailable",
+            "peripherals.availability_unknown"
+        ]
+    );
+}
+
 /// A one- or two-digit card id gets no selector: ALSA would read `CARD=7` as
 /// card index 7, not the card whose id is `7`. Longer numeric ids and ids
 /// with a letter are looked up by id and keep their selector.
@@ -680,7 +720,7 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
 
 /// A kernel without ALSA, or without sound cards, has no microphones. A
 /// snapshot taken while a card is being added or removed, an unparsable or
-/// unreadable card list, a card with a parent device but no `device` link
+/// unreadable present card list, a card with a parent device but no `device` link
 /// (only seen while the card is being removed), and an incomplete USB
 /// ancestor of a present card fail the scan, so the catalog keeps the last
 /// good records. A card removed after the card list was read is skipped.
@@ -695,12 +735,7 @@ fn absent_alsa_is_empty_and_partial_snapshots_fail_the_scan() {
         "no ALSA in the kernel"
     );
     fs::remove_file(board.path("proc/asound/cards")).unwrap();
-    let error = board.scan().unwrap_err();
-    let missing = "failed to read ALSA card list /proc/asound/cards: No such file or directory";
-    assert_eq!(
-        (error.code.as_str(), error.reason.as_str()),
-        ("io.open", missing)
-    );
+    assert!(board.scan().unwrap().is_empty(), "procfs-disabled kernel");
 
     let fail = |board: &Board| {
         let error = board.scan().unwrap_err();

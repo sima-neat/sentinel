@@ -3,7 +3,7 @@
 //! Every capture PCM (`/sys/class/sound/pcmCNDMc`) becomes one `microphone`
 //! record; playback-only cards and playback PCMs are not reported, and a
 //! composite USB device (a webcam or headset) contributes only its capture
-//! PCMs. Only kernel text is read: `/proc/asound/cards`, each card's `id`,
+//! PCMs. Only kernel text is read: optional `/proc/asound/cards`, each card's `id`,
 //! optional `pcmMc/info` and, for USB audio, `streamM`, plus the card's sysfs
 //! device and USB ancestry for identity and the udev `/dev/snd/by-*` links.
 //! No PCM or control device is opened, so discovery never takes or configures
@@ -394,16 +394,17 @@ fn fnv1a(text: &str) -> u64 {
 
 impl AlsaProvider {
     fn scan(&self) -> Result<Vec<Record>, ProviderError> {
+        let sound_class = self.sys_root.join("class/sound");
         let cards_path = self.asound.join("cards");
         let text = match fs::read(&cards_path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
             // A kernel without ALSA has no sound class and no microphones.
-            Err(error)
-                if errno_of(&error) == libc::ENOENT
-                    && !self.sys_root.join("class/sound").exists() =>
-            {
+            Err(error) if errno_of(&error) == libc::ENOENT && !sound_class.exists() => {
                 return Ok(Vec::new())
             }
+            // CONFIG_SND_PROC_FS=n removes /proc/asound, but cards and PCM
+            // class devices remain discoverable in sysfs.
+            Err(error) if errno_of(&error) == libc::ENOENT => None,
             Err(error) => {
                 return Err(io_error(
                     "failed to read ALSA card list",
@@ -413,31 +414,59 @@ impl AlsaProvider {
                 ))
             }
         };
-        let directories = numbered(&self.asound, "card", "")?;
-        let no_cards = text.contains("no soundcards");
-        let cards = if no_cards {
-            BTreeMap::new()
-        } else {
-            parse_cards(&text)
+        let (cards, directories) = match text {
+            Some(text) => {
+                let directories = numbered(&self.asound, "card", "")?;
+                let no_cards = text.contains("no soundcards");
+                let cards = if no_cards {
+                    BTreeMap::new()
+                } else {
+                    parse_cards(&text)
+                };
+                if !no_cards && cards.is_empty() {
+                    let reason = format!(
+                        "could not parse any ALSA card from {}; refresh after the sound \
+                         subsystem finishes initializing.",
+                        cards_path.display()
+                    );
+                    return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+                }
+                // A card being added or removed can be listed without its
+                // directory, or the reverse; publishing half of it would
+                // churn ids.
+                if !cards.keys().eq(directories.keys()) {
+                    let reason = format!(
+                        "ALSA card list {} and its card directories disagree (a card is being \
+                         added or removed); refresh after the sound subsystem finishes \
+                         updating.",
+                        cards_path.display()
+                    );
+                    return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+                }
+                (cards, directories)
+            }
+            None => {
+                let entries = numbered(&sound_class, "card", "")?;
+                let cards = entries
+                    .iter()
+                    .map(|(&index, entry)| {
+                        let id = read_text_file(&entry.join("id")).unwrap_or_default();
+                        (
+                            index,
+                            Card {
+                                id,
+                                ..Card::default()
+                            },
+                        )
+                    })
+                    .collect();
+                let directories = entries
+                    .keys()
+                    .map(|&index| (index, self.asound.join(format!("card{index}"))))
+                    .collect();
+                (cards, directories)
+            }
         };
-        if !no_cards && cards.is_empty() {
-            let reason = format!(
-                "could not parse any ALSA card from {}; refresh after the sound subsystem \
-                 finishes initializing.",
-                cards_path.display()
-            );
-            return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
-        }
-        // A card being added or removed can be listed without its directory,
-        // or the reverse; publishing half of it would churn ids.
-        if !cards.keys().eq(directories.keys()) {
-            let reason = format!(
-                "ALSA card list {} and its card directories disagree (a card is being added or \
-                 removed); refresh after the sound subsystem finishes updating.",
-                cards_path.display()
-            );
-            return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
-        }
         if cards.is_empty() {
             return Ok(Vec::new());
         }

@@ -11,15 +11,19 @@ and a webcam's camera is reported separately by the camera providers.
 - **Providers:** `daemon.audio.alsa` (built-in)
 - **Rescan triggers:** `sound`
 
-Discovery reads only kernel text and sysfs: `/proc/asound/cards`,
+Discovery reads only kernel text and sysfs: optional `/proc/asound/cards`,
 `/proc/asound/cardN/id`, optional `/proc/asound/cardN/pcmMc/info`,
 `/proc/asound/cardN/streamM` (USB audio), `/sys/class/sound/pcmCNDMc`,
 `/sys/class/sound/cardN/device` and its USB ancestors, and the udev links in
 `/dev/snd/by-path` and `/dev/snd/by-id`. It never opens a PCM or control
 device, so it cannot take a microphone from an application or change its
-mixer. Kernels built without `CONFIG_SND_VERBOSE_PROCFS` omit `pcmMc/info`;
-the sysfs class device still produces a record with unknown availability and
-a `peripherals.pcm_info_unreadable` issue.
+mixer. Kernels built without `CONFIG_SND_PROC_FS` omit all of `/proc/asound`;
+Sentinel enumerates cards and capture PCMs from sysfs, retains the sysfs card
+id and capture selector, and omits the procfs-only name, driver, modes, and
+availability metadata with the corresponding issues. Kernels built without
+`CONFIG_SND_VERBOSE_PROCFS` omit only `pcmMc/info`; the sysfs class device
+still produces a record with unknown availability and a
+`peripherals.pcm_info_unreadable` issue.
 
 ## Identity
 
@@ -67,7 +71,7 @@ number keeps the records apart but changes between boots.
 | `name` | string | yes | Card short name, else the PCM name, else the card id, else `ALSA capture PCM <M>` | `/proc/asound/cards`, `pcmMc/info` |
 | `backend` | string | yes | `alsa` | |
 | `connection` | string | yes | `usb` when the card's device has a USB ancestor, `unknown` when the card has no parent device, else `platform` | sysfs |
-| `capture_target` | object | yes | `card_id` (string, may be empty), `device` (PCM number), and `selector` (`plughw:CARD=<card_id>,DEV=<M>`) when the card id holds only letters, digits, `_` and `-` and is not a one- or two-digit number (ALSA reads `CARD=7` as card index 7). Routing for the current boot only | `/proc/asound/cardN/id` |
+| `capture_target` | object | yes | `card_id` (string, may be empty), `device` (PCM number), and `selector` (`plughw:CARD=<card_id>,DEV=<M>`) when the card id holds only letters, digits, `_` and `-` and is not a one- or two-digit number (ALSA reads `CARD=7` as card index 7). Routing for the current boot only | `/sys/class/sound/cardN/id`, `/proc/asound/cardN/id` |
 | `identity` | object | yes | See below | |
 | `modes` | array | yes | Capture formats; empty when the driver publishes none (see `issues`) | `streamM` |
 | `availability` | object | yes | `state`: `available`, `in_use` (no capture subdevice free) or `unknown`; with `subdevices` and `subdevices_available` when known. A snapshot from the last scan; see [Availability](#availability) | `pcmMc/info` |
@@ -80,7 +84,7 @@ number keeps the records apart but changes between boots.
 | `stable_key` | string | yes | The key `id` hashes (above) |
 | `card_index` | integer | yes | Current ALSA card number (changes between replugs) |
 | `pcm_node` | string | yes | `/dev/snd/pcmC<N>D<M>c` (routing only) |
-| `card_id`, `card_name`, `card_driver` | string | when non-empty | From `/proc/asound/cards` and `cardN/id`, e.g. `Nano`, `Yeti Nano`, `USB-Audio` |
+| `card_id`, `card_name`, `card_driver` | string | when non-empty | The id comes from sysfs (or procfs); name and driver come from `/proc/asound/cards`, e.g. `Nano`, `Yeti Nano`, `USB-Audio` |
 | `pcm_name` | string | when non-empty | The PCM's name, e.g. `USB Audio` |
 | `by_path`, `by_id` | string | with udev | The first `/dev/snd/by-path` / `/dev/snd/by-id` link, in name order, to the card's `controlC<N>` |
 | `usb` | object | USB only | `vendor_id`, `product_id`, `bus_path` (the USB port, e.g. `1-1.2`), and when present `interface` (e.g. `1-1.2:1.0`), `manufacturer`, `product`, `serial` |
