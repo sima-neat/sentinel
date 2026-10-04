@@ -81,7 +81,8 @@ has stopped.
 for the raw document and `--refresh` to rescan first.
 
 Device records are described per type: [USB cameras](peripherals/camera.md),
-[MIPI CSI-2 cameras](peripherals/camera-mipi.md).
+[MIPI CSI-2 cameras](peripherals/camera-mipi.md),
+[microphones](peripherals/microphone.md).
 
 ## Security and concurrency
 

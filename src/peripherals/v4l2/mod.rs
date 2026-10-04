@@ -19,7 +19,7 @@ use std::ops::ControlFlow::{self, Break, Continue};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::camera::{Availability, AvailabilityState, Camera, Fraction, Interval, Mode};
+use super::camera::{Camera, Fraction, Interval, Mode};
 use super::camera::{RangeKind, SizeIntervals, SizeRange, Source, UsbCamera, UsbIdentity};
 use super::sysutil::{
     bounded_string, disappeared, errno_of, io_error, read_text_file, trim_c_space, vanished,
@@ -33,6 +33,7 @@ use super::videodev2::{
     V4L2_FRMIVAL_TYPE_CONTINUOUS, V4L2_FRMIVAL_TYPE_DISCRETE, V4L2_FRMIVAL_TYPE_STEPWISE,
     V4L2_FRMSIZE_TYPE_CONTINUOUS, V4L2_FRMSIZE_TYPE_DISCRETE, V4L2_FRMSIZE_TYPE_STEPWISE,
 };
+use super::{Availability, AvailabilityState};
 use super::{Peripheral, Provider, ProviderError};
 
 pub const PROVIDER_NAME: &str = "camera.v4l2";
@@ -527,6 +528,8 @@ impl V4l2Provider {
             availability: Availability {
                 state: AvailabilityState::Unknown,
                 reason: Some(AVAILABILITY_REASON.to_string()),
+                subdevices: None,
+                subdevices_available: None,
             },
             modes,
             source: Source::V4l2(UsbCamera {
