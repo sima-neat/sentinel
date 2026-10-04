@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::peripherals::Peripherals;
 use crate::{cache, runs};
 
 pub const DEFAULT_API_SOCKET: &str = "/run/simaai-sentinel/api.sock";
@@ -58,6 +59,7 @@ pub fn spawn(
     socket_path: &Path,
     cache_path: &Path,
     runs_dir: &Path,
+    peripherals: Option<Peripherals>,
     stopped: Arc<AtomicBool>,
 ) -> Result<ApiServer> {
     if let Some(parent) = socket_path.parent() {
@@ -81,7 +83,9 @@ pub fn spawn(
             match listener.accept() {
                 Ok(_) if stopped.load(Ordering::Relaxed) => break,
                 Ok((mut stream, _)) => {
-                    if let Err(error) = serve(&mut stream, &cache_path, &runs_dir) {
+                    if let Err(error) =
+                        serve(&mut stream, &cache_path, &runs_dir, peripherals.as_ref())
+                    {
                         eprintln!("Sentinel API request failed: {error:#}");
                     }
                 }
@@ -97,14 +101,22 @@ pub fn spawn(
     })
 }
 
-fn serve(stream: &mut UnixStream, cache_path: &Path, runs_dir: &Path) -> Result<()> {
+fn serve(
+    stream: &mut UnixStream,
+    cache_path: &Path,
+    runs_dir: &Path,
+    peripherals: Option<&Peripherals>,
+) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let response =
-        match read_request(stream).and_then(|request| route(request, cache_path, runs_dir)) {
-            Ok(value) => response(200, value),
-            Err(error) => response(error.status, json!({"error": error.message})),
-        };
+    let reply = read_request(stream).and_then(|request| {
+        peripherals_route(&request, peripherals)
+            .unwrap_or_else(|| route(request, cache_path, runs_dir).map(|value| (200, value)))
+    });
+    let response = match reply {
+        Ok((status, value)) => response(status, value),
+        Err(error) => response(error.status, json!({"error": error.message})),
+    };
     stream.write_all(&response)?;
     Ok(())
 }
@@ -262,6 +274,37 @@ fn route(
     }
 }
 
+/// `GET /v1/peripherals` and `POST /v1/peripherals/refresh`; `None` for any
+/// other request.
+fn peripherals_route(
+    request: &Request,
+    peripherals: Option<&Peripherals>,
+) -> Option<std::result::Result<(u16, Value), ApiError>> {
+    let refresh = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/v1/peripherals") => false,
+        ("POST", "/v1/peripherals/refresh") => true,
+        _ => return None,
+    };
+    let unavailable = || ApiError {
+        status: 503,
+        message: "peripheral discovery is not running: disabled with --no-peripherals, or failed \
+            (see `journalctl -u simaai-sentinel`)"
+            .into(),
+    };
+    Some(match peripherals {
+        Some(peripherals) if refresh => peripherals
+            .refresh()
+            .then(|| (202, json!({"accepted": true})))
+            .ok_or_else(unavailable),
+        Some(peripherals) => peripherals
+            .catalog()
+            .ok_or_else(unavailable)
+            .and_then(|catalog| serde_json::to_value(catalog).map_err(internal))
+            .map(|value| (200, value)),
+        None => Err(unavailable()),
+    })
+}
+
 fn query_values(query: &str, key: &str) -> Vec<String> {
     query
         .split('&')
@@ -305,10 +348,12 @@ fn response(status: u16, body: Value) -> Vec<u8> {
         .unwrap_or_else(|_| b"{\"error\":\"serialization failed\"}".to_vec());
     let reason = match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
     let header = format!(
@@ -392,7 +437,7 @@ mod tests {
         };
         cache::write_cache(cache_path.to_str().unwrap(), &payload).unwrap();
         let stopped = Arc::new(AtomicBool::new(false));
-        let handle = spawn(&socket_path, &cache_path, &runs_dir, stopped.clone()).unwrap();
+        let handle = spawn(&socket_path, &cache_path, &runs_dir, None, stopped.clone()).unwrap();
 
         let latest = request(
             &socket_path,
@@ -427,6 +472,11 @@ mod tests {
             "GET /v1/compare?runs=agent-test,agent-test-2&raw=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
         ));
         assert!(raw["runs"][0]["samples"].is_array());
+        let peripherals = request(
+            &socket_path,
+            "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(peripherals.starts_with("HTTP/1.1 503 "), "{peripherals}");
 
         stopped.store(true, Ordering::Relaxed);
         handle.join().unwrap();

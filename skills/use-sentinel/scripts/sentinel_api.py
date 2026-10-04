@@ -49,7 +49,8 @@ def build_parser():
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--socket", default="/run/simaai-sentinel/api.sock")
     commands = root.add_subparsers(dest="command", required=True)
-    for command in ("health", "latest", "metrics", "active", "stop", "runs"):
+    simple = ("health", "latest", "metrics", "active", "stop", "runs", "peripherals", "refresh")
+    for command in simple:
         commands.add_parser(command)
     run = commands.add_parser("run")
     run.add_argument("selector")
@@ -73,6 +74,8 @@ def main():
         "active": ("GET", "/v1/traces/active", None),
         "stop": ("POST", "/v1/traces/stop", None),
         "runs": ("GET", "/v1/runs", None),
+        "peripherals": ("GET", "/v1/peripherals", None),
+        "refresh": ("POST", "/v1/peripherals/refresh", None),
     }
     if args.command == "run":
         operation = ("GET", f"/v1/runs/{quote(args.selector, safe='')}", None)

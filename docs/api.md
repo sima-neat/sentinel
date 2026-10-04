@@ -23,6 +23,8 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/runs` | List active and completed run summaries. |
 | `GET /v1/runs/{name-or-id}` | Retrieve a saved run and raw samples. |
 | `GET /v1/compare?runs=A,B` | Compare two or more runs; the first is the baseline. |
+| `GET /v1/peripherals` | Connected peripherals, from memory. |
+| `POST /v1/peripherals/refresh` | Request a rescan; returns HTTP 202. |
 
 Start request example:
 
@@ -45,6 +47,38 @@ operations return HTTP 409. Unknown runs and routes return HTTP 404. Invalid
 requests return HTTP 400. Responses use JSON `null` for unavailable metrics.
 Comparison responses contain run metadata, statistics, and baseline deltas by
 default. Add `raw=1` only when timestamped samples are required.
+
+## Peripherals
+
+A discovery thread scans the board's peripherals when the daemon starts, when
+the kernel reports a device change, and on refresh requests. It only reads
+kernel interfaces and never opens a stream. `GET /v1/peripherals` returns the
+latest result:
+
+```json
+{"revision": 1791155282460, "observed_at": "2026-10-04T23:08:02.460Z",
+ "devices": [{"type": "camera", "id": "camera:v4l2:3f2a9c0d41b7e650", ...}],
+ "errors": [{"provider": "camera.v4l2", "code": "io.permission_denied", "reason": "..."}]}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `revision` | Changes whenever `devices` or `errors` change. It is seeded from the daemon start time, so it is never reused after a restart; compare it for equality only. |
+| `observed_at` | When the scan behind this result started; `null` until the first scan completes. |
+| `devices` | One object per device, tagged by `type`. `id` is stable across replugs into the same port and is never a `/dev/videoN` name. |
+| `errors` | Providers that failed in the latest scan. A failed provider's devices from its last successful scan stay in `devices`. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
+
+Sentinel reports hardware facts only. Whether an application supports a
+device or mode is decided by that application; Neat Core does this for
+`CameraInput`.
+
+`POST /v1/peripherals/refresh` returns HTTP 202 `{"accepted": true}`. The
+rescan is complete once `observed_at` is at or after the time of the request.
+Both routes return HTTP 503 when discovery is disabled (`--no-peripherals`) or
+has stopped.
+
+`simaai-sentinel peripherals` prints the same result as a table; add `--json`
+for the raw document and `--refresh` to rescan first.
 
 ## Security and concurrency
 
