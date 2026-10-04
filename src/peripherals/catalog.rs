@@ -176,13 +176,15 @@ impl Catalog {
     /// Record a scan whose combined result was invalid (a provider bug such as
     /// two providers returning one id). Devices keep their previous values;
     /// the scan still counts, so refresh targets are reached.
-    pub fn apply_rejected_scan(&mut self, reason: &str) {
-        self.apply_failed_scan(vec![Issue {
+    pub fn apply_rejected_scan(&mut self, reason: &str) -> Issue {
+        let issue = Issue {
             provider: "catalog".into(),
             code: "peripherals.invalid_provider_result".into(),
             reason: reason.into(),
             retained_last_good: self.initialized,
-        }]);
+        };
+        self.apply_failed_scan(vec![issue.clone()]);
+        issue
     }
 
     /// Count a scan that left the devices as they were; a new set of issues

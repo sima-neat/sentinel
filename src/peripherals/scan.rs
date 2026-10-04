@@ -29,6 +29,7 @@ impl ProviderSlot {
 pub struct Scanner {
     slots: Vec<ProviderSlot>,
     provider_issues: Vec<Issue>,
+    rejected_scan_issue: Option<Issue>,
     support: SupportStage,
 }
 
@@ -37,6 +38,7 @@ impl Scanner {
         Self {
             slots: providers.into_iter().map(ProviderSlot::new).collect(),
             provider_issues: Vec::new(),
+            rejected_scan_issue: None,
             support,
         }
     }
@@ -67,16 +69,18 @@ impl Scanner {
                 Ok(()) => {
                     commit_discovered(&mut self.slots, discovered);
                     self.provider_issues = provider_issues;
+                    self.rejected_scan_issue = None;
                     Ok(())
                 }
                 Err(reason) => {
-                    catalog.apply_rejected_scan(&reason);
+                    self.rejected_scan_issue = Some(catalog.apply_rejected_scan(&reason));
                     Err(reason)
                 }
             }
         } else {
             catalog.apply_provider_failure(issues)?;
             self.provider_issues = provider_issues;
+            self.rejected_scan_issue = None;
             Ok(())
         }
     }
@@ -88,7 +92,9 @@ impl Scanner {
         if !has_provider_result {
             return Ok(());
         }
-        let (devices, issues, support) = self.classify(devices, self.provider_issues.clone());
+        let mut issues = self.provider_issues.clone();
+        issues.extend(self.rejected_scan_issue.iter().cloned());
+        let (devices, issues, support) = self.classify(devices, issues);
         catalog.apply_reclassification_with_support(devices, issues, support)
     }
 
@@ -394,6 +400,13 @@ mod tests {
 
         scanner.scan(&mut catalog).unwrap();
         assert!(scanner.scan(&mut catalog).is_err());
+        scanner.reclassify(&mut catalog).unwrap();
+        let reclassified = catalog.document();
+        assert!(reclassified.stale);
+        assert_eq!(
+            issues(&reclassified),
+            "catalog peripherals.invalid_provider_result retained"
+        );
         scanner.scan(&mut catalog).unwrap();
 
         let document = catalog.document();
