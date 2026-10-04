@@ -331,7 +331,8 @@ fn peripheral_catalog(
                 .map_err(|_| bad_request("since_revision must be a non-negative integer"))
         })
         .transpose()?;
-    let body = read_peripheral_catalog(&peripherals.catalog_path).map_err(|error| {
+    let body = read_peripheral_catalog(&peripherals.catalog_path, peripherals.control.as_deref())
+        .map_err(|error| {
         unavailable(format!(
             "peripheral catalog unavailable: {}: {error}",
             peripherals.catalog_path.display()
@@ -376,7 +377,7 @@ fn peripheral_catalog(
 /// Open the published catalog itself, never the target of a replacement
 /// symlink, and accept only a regular file. The open descriptor keeps naming
 /// races after this check from changing which bytes are read.
-fn read_peripheral_catalog(path: &Path) -> io::Result<Vec<u8>> {
+fn read_peripheral_catalog(path: &Path, control: Option<&Control>) -> io::Result<Vec<u8>> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -392,13 +393,20 @@ fn read_peripheral_catalog(path: &Path) -> io::Result<Vec<u8>> {
             "peripheral catalog is not a daemon-owned, safely writable regular file",
         ));
     }
+    if control.is_some_and(|control| !control.owns_publication(&metadata)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "peripheral catalog is not this daemon's latest publication",
+        ));
+    }
     let mut body = Vec::new();
     file.read_to_end(&mut body)?;
     Ok(body)
 }
 
 fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
-    let body = read_peripheral_catalog(&peripherals.catalog_path).ok()?;
+    let body =
+        read_peripheral_catalog(&peripherals.catalog_path, peripherals.control.as_deref()).ok()?;
     let header: CatalogHeader = serde_json::from_slice(&body).ok()?;
     if peripherals
         .control
@@ -723,9 +731,10 @@ mod tests {
         let camera = record("p", "camera:x", json!({}));
         let provider = Fake("p", move || Ok(vec![camera.clone()]));
         let thread = service::spawn(config, vec![Box::new(provider)]).unwrap();
+        let control = thread.control();
         let peripherals = Some(PeripheralsApi {
             catalog_path: catalog_path.clone(),
-            control: Some(thread.control()),
+            control: Some(control.clone()),
         });
         let (socket, stopped) = (root.join("api.sock"), Arc::new(AtomicBool::new(false)));
         let (cache, runs) = (root.join("cache.json"), root.join("runs"));
@@ -737,14 +746,24 @@ mod tests {
         let summary = &response_json(&request(&socket, health))["peripherals"];
         assert_eq!(summary["instance_id"], "instance-a");
 
-        let mut forged = service::read(&catalog_path).unwrap();
-        forged.instance_id = "instance-b".into();
-        service::publish(&catalog_path, &forged).unwrap();
+        // A file from this same daemon instance still becomes stale after a
+        // later publication. Replaying its daemon-owned inode must not make
+        // the API serve the older snapshot from a shared parent directory.
+        let saved = root.join("saved-peripherals.json");
+        fs::rename(&catalog_path, &saved).unwrap();
+        let target = control.request_refresh().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if service::read(&catalog_path).is_ok_and(|document| document.scan_sequence >= target) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(request(&socket, get).starts_with("HTTP/1.1 200"));
+        fs::rename(&saved, &catalog_path).unwrap();
         assert!(request(&socket, get).starts_with("HTTP/1.1 503"));
         assert!(response_json(&request(&socket, health))["peripherals"].is_null());
-        forged.instance_id = "instance-a".into();
-        service::publish(&catalog_path, &forged).unwrap();
-        assert!(request(&socket, get).starts_with("HTTP/1.1 200"));
 
         thread.stop();
         let stopped_text = "peripheral discovery has stopped; see `journalctl -u simaai-sentinel`";

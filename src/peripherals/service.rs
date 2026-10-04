@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -39,6 +39,25 @@ struct Schedule {
     /// Why the last catalog write failed, until one succeeds. The file is
     /// behind meanwhile, so it must not be served as current.
     publish_error: Option<String>,
+    /// Filesystem identity of the last catalog this daemon published. This
+    /// binds API reads to that publication even in an attacker-writable
+    /// parent directory where an older daemon-owned file could be replayed.
+    publication: Option<Publication>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Publication {
+    device: u64,
+    inode: u64,
+}
+
+impl Publication {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
 }
 
 /// Shared between the peripherals thread and its callers (API, daemon).
@@ -101,6 +120,12 @@ impl Control {
     /// Why the catalog file is behind the catalog, while writes fail.
     pub fn publish_error(&self) -> Option<String> {
         self.schedule().publish_error.clone()
+    }
+
+    /// Whether an open file is the most recent catalog publication made by
+    /// this daemon instance.
+    pub fn owns_publication(&self, metadata: &fs::Metadata) -> bool {
+        self.schedule().publication == Some(Publication::from_metadata(metadata))
     }
 
     fn request_stop(&self) {
@@ -202,8 +227,12 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
             )
         })
         .ok();
-    publish_config(&config, &catalog.document())?;
-    control.schedule().alive = true;
+    let publication = publish_config(&config, &catalog.document())?;
+    {
+        let mut schedule = control.schedule();
+        schedule.publication = Some(publication);
+        schedule.alive = true;
+    }
     let thread_control = control.clone();
     let thread = thread::Builder::new()
         .name("peripherals".into())
@@ -394,10 +423,17 @@ fn refresh_due(now: Instant, last_scan_end: Option<Instant>, cooldown: Duration)
 /// refuses the stale file while writes fail (for example, `/run` is full)
 /// and serves it again once one succeeds. Returns when to retry, if it failed.
 fn write(control: &Control, config: &Config, catalog: &Catalog) -> Option<Instant> {
-    let error = publish_config(config, &catalog.document())
-        .err()
-        .map(|error| format!("{error:#}"));
-    let previous = std::mem::replace(&mut control.schedule().publish_error, error.clone());
+    let (publication, error) = match publish_config(config, &catalog.document()) {
+        Ok(publication) => (Some(publication), None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
+    let previous = {
+        let mut schedule = control.schedule();
+        if let Some(publication) = publication {
+            schedule.publication = Some(publication);
+        }
+        std::mem::replace(&mut schedule.publish_error, error.clone())
+    };
     match &error {
         // Retries repeat the same error every second; log each new one.
         Some(error) if previous.as_ref() != Some(error) => {
@@ -443,7 +479,12 @@ fn lower_priority() {
 }
 
 /// Replace the catalog file atomically so readers never see a partial write.
+#[cfg(test)]
 pub fn publish(path: &Path, document: &CatalogDocument) -> Result<()> {
+    publish_identity(path, document).map(|_| ())
+}
+
+fn publish_identity(path: &Path, document: &CatalogDocument) -> Result<Publication> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let name = path
@@ -454,15 +495,15 @@ pub fn publish(path: &Path, document: &CatalogDocument) -> Result<()> {
     publish_to(path, document, &temporary)
 }
 
-fn publish_config(config: &Config, document: &CatalogDocument) -> Result<()> {
+fn publish_config(config: &Config, document: &CatalogDocument) -> Result<Publication> {
     #[cfg(test)]
     if let Some(temporary) = &config.temporary_path {
         return publish_to(&config.catalog_path, document, temporary);
     }
-    publish(&config.catalog_path, document)
+    publish_identity(&config.catalog_path, document)
 }
 
-fn publish_to(path: &Path, document: &CatalogDocument, temporary: &Path) -> Result<()> {
+fn publish_to(path: &Path, document: &CatalogDocument, temporary: &Path) -> Result<Publication> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let result = (|| {
@@ -476,8 +517,9 @@ fn publish_to(path: &Path, document: &CatalogDocument, temporary: &Path) -> Resu
             .with_context(|| format!("create {}", temporary.display()))?;
         serde_json::to_writer(&mut file, document).context("serialize peripheral catalog")?;
         file.write_all(b"\n")?;
+        let publication = Publication::from_metadata(&file.metadata()?);
         fs::rename(temporary, path).with_context(|| format!("replace {}", path.display()))?;
-        Ok(())
+        Ok(publication)
     })();
     if result.is_err() {
         let _ = fs::remove_file(temporary);
