@@ -28,7 +28,7 @@ use super::videodev2::MAX_ENUMERATION_ENTRIES;
 pub const PROVIDER_NAME: &str = "daemon.audio.alsa";
 
 /// Reads a USB device attribute; tests substitute one that unplugs the
-/// device between the `idVendor` and `idProduct` reads.
+/// device during identity reads.
 type AttributeReader = fn(&Path) -> Option<String>;
 
 /// The `daemon.audio.alsa` provider.
@@ -561,7 +561,7 @@ impl AlsaProvider {
         // optional below.
         let sound_class = self.sys_root.join("class/sound");
         let prefix = format!("pcmC{index}D");
-        for (pcm, _) in numbered(&sound_class, &prefix, "c")? {
+        for (pcm, pcm_entry) in numbered(&sound_class, &prefix, "c")? {
             let mut issues = Vec::new();
             if device.is_none() {
                 issue(
@@ -671,6 +671,13 @@ impl AlsaProvider {
             });
             if !issues.is_empty() {
                 details["issues"] = json!(issues);
+            }
+            // Every read above is optional, so an unplug after USB identity
+            // was collected can otherwise leave a plausible stale record.
+            // Drop all records for this card when either the card device or
+            // this capture PCM vanished during the scan.
+            if device.as_ref().is_some_and(|device| vanished(device)) || vanished(&pcm_entry) {
+                return Ok(Vec::new());
             }
             records.push(Record {
                 id: format!("microphone:alsa:{:016x}", fnv1a(&stable_key)),

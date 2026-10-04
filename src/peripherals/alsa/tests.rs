@@ -690,9 +690,9 @@ fn card_without_a_parent_device_is_listed_beside_usb_microphones() {
     assert_eq!(keys, expected);
 }
 
-/// A microphone unplugged before or between its `idVendor` and `idProduct`
-/// reads is skipped; a present device with only `idVendor` still fails the
-/// scan.
+/// A microphone unplugged before, between, or after its `idVendor` and
+/// `idProduct` reads is skipped; a present device with only `idVendor` still
+/// fails the scan.
 #[test]
 fn microphone_unplugged_between_identity_reads_is_skipped() {
     /// Removes the USB device at port 1-3.2 when its `idProduct` is read
@@ -707,6 +707,14 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
     /// be read, so identity has no partial pair to report as an error.
     fn unplug_before_identity(path: &Path) -> Option<String> {
         if path.ends_with("1-3.2/idVendor") && path.exists() {
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+        read_text_file(path)
+    }
+    /// Removes the USB device after both mandatory identity attributes were
+    /// read, while optional descriptor metadata is being collected.
+    fn unplug_after_identity(path: &Path) -> Option<String> {
+        if path.ends_with("1-3.2/manufacturer") && path.parent().unwrap().exists() {
             fs::remove_dir_all(path.parent().unwrap()).unwrap();
         }
         read_text_file(path)
@@ -727,6 +735,14 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
             .map(|r| &r.details["capture_target"]["card_id"]),
     );
     assert_eq!(ids, ["Other"]);
+    assert!(
+        !board.path(&format!("sys/{XHCI}/1-3.2")).exists(),
+        "no race"
+    );
+
+    let mut board = Board::new();
+    board.usb_mic(2, "1-3.2", "Nano", MONO_STREAM);
+    assert!(scan(&board, unplug_after_identity).unwrap().is_empty());
     assert!(
         !board.path(&format!("sys/{XHCI}/1-3.2")).exists(),
         "no race"
