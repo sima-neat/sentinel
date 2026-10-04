@@ -1,6 +1,6 @@
 use std::fs;
-use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -331,7 +331,7 @@ fn peripheral_catalog(
                 .map_err(|_| bad_request("since_revision must be a non-negative integer"))
         })
         .transpose()?;
-    let body = fs::read(&peripherals.catalog_path).map_err(|error| {
+    let body = read_peripheral_catalog(&peripherals.catalog_path).map_err(|error| {
         unavailable(format!(
             "peripheral catalog unavailable: {}: {error}",
             peripherals.catalog_path.display()
@@ -364,8 +364,27 @@ fn peripheral_catalog(
     Ok(raw_response(200, body))
 }
 
+/// Open the published catalog itself, never the target of a replacement
+/// symlink, and accept only a regular file. The open descriptor keeps naming
+/// races after this check from changing which bytes are read.
+fn read_peripheral_catalog(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "peripheral catalog is not a regular file",
+        ));
+    }
+    let mut body = Vec::new();
+    file.read_to_end(&mut body)?;
+    Ok(body)
+}
+
 fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
-    let body = fs::read(&peripherals.catalog_path).ok()?;
+    let body = read_peripheral_catalog(&peripherals.catalog_path).ok()?;
     let header: CatalogHeader = serde_json::from_slice(&body).ok()?;
     Some(json!({
         "instance_id": header.instance_id,
@@ -518,6 +537,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use std::collections::BTreeMap;
+    use std::os::unix::fs::symlink;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::model::{CachePayload, Sample};
@@ -639,6 +659,14 @@ mod tests {
         let refresh = "POST /v1/peripherals/refresh HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
         let refresh = request(&socket, refresh);
         assert!(refresh.starts_with("HTTP/1.1 503"), "no control");
+
+        let private = root.join("private.txt");
+        fs::write(&private, "must not be served").unwrap();
+        fs::remove_file(&catalog_path).unwrap();
+        symlink(&private, &catalog_path).unwrap();
+        let refused = get("");
+        assert!(refused.starts_with("HTTP/1.1 503"), "{refused}");
+        assert!(!refused.contains("must not be served"), "{refused}");
 
         stopped.store(true, Ordering::Relaxed);
         handle.join().unwrap();
