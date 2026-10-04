@@ -8,7 +8,8 @@
 //! and USB ancestry for identity and the udev `/dev/snd/by-*` links. No PCM
 //! or control device is opened, so discovery never takes or configures a
 //! microphone. Ids hash the card's sysfs device path and the PCM device
-//! number, never the card number, which changes between replugs.
+//! number, never the card number, which changes between replugs; a card with
+//! no parent device (a virtual card) is keyed by its card id instead.
 
 #[cfg(test)]
 mod tests;
@@ -356,6 +357,18 @@ fn vanished(path: &Path) -> bool {
     fs::metadata(path).is_err_and(|error| matches!(errno_of(&error), libc::ENOENT | libc::ENOTDIR))
 }
 
+/// Whether a present card was registered without a parent device: the
+/// kernel then places it under `devices/virtual/sound` and creates no
+/// `device` link (`get_device_parent` and `device_add_class_symlinks` in
+/// `drivers/base/core.c`). A card with a parent that lacks the link is being
+/// removed, which is not this.
+fn parentless(sys: &Path, entry: &Path, link: &Path) -> bool {
+    let no_link = fs::symlink_metadata(link).is_err_and(|error| errno_of(&error) == libc::ENOENT);
+    let virtual_card = fs::canonicalize(entry)
+        .is_ok_and(|card| card.parent() == Some(&sys.join("devices/virtual/sound")));
+    no_link && virtual_card
+}
+
 /// ALSA card ids are safe in a `plughw:CARD=<id>` selector when they hold
 /// only letters, digits, `_` and `-`.
 fn valid_card_id(id: &str) -> bool {
@@ -458,28 +471,40 @@ impl AlsaProvider {
         let entry = self.sys_root.join(format!("class/sound/card{index}"));
         let link = entry.join("device");
         let device = match fs::canonicalize(&link) {
-            Ok(device) => device,
+            Ok(device) => Some(device),
             // A card removed after the card list was read has no class entry.
             Err(_) if vanished(&entry) => return Ok(Vec::new()),
+            Err(_) if parentless(sys, &entry, &link) => None,
             Err(error) => {
                 let action = "failed to resolve ALSA sysfs device";
                 return Err(io_error(action, &link, &error, false));
             }
         };
-        let Ok(topology) = device.strip_prefix(sys) else {
-            let reason = format!(
-                "ALSA sysfs device escaped the configured sysfs root: {}",
-                device.display()
-            );
-            return Err(ProviderError::new(CODE_IO_OPEN, reason));
-        };
-        let topology = topology.to_string_lossy();
-        let usb = match usb_identity(sys, &device, self.read_usb_attribute) {
-            // An unplug removes the attributes one at a time: if the card's
-            // sysfs device (below the USB ancestor) is gone too, the card
-            // vanished mid-scan and is skipped.
-            Err(_) if vanished(&device) => return Ok(Vec::new()),
-            usb => usb?,
+        let (key_base, usb) = match &device {
+            Some(device) => {
+                let Ok(topology) = device.strip_prefix(sys) else {
+                    let reason = format!(
+                        "ALSA sysfs device escaped the configured sysfs root: {}",
+                        device.display()
+                    );
+                    return Err(ProviderError::new(CODE_IO_OPEN, reason));
+                };
+                let usb = match usb_identity(sys, device, self.read_usb_attribute) {
+                    // An unplug removes the attributes one at a time: if the
+                    // card's sysfs device (below the USB ancestor) is gone
+                    // too, the card vanished mid-scan and is skipped.
+                    Err(_) if vanished(device) => return Ok(Vec::new()),
+                    usb => usb?,
+                };
+                (format!("sysfs:{}", topology.to_string_lossy()), usb)
+            }
+            // No device path to key on: the card id is the only attribute
+            // that survives renumbering, and ALSA keeps it unique among the
+            // registered cards. The kernel never registers a card without
+            // one; should the id read back empty, the card number keeps the
+            // records apart.
+            None if card.id.is_empty() => (format!("alsa-card-index:{index}"), None),
+            None => (format!("alsa-card-id:{}", card.id), None),
         };
         let control = format!("controlC{index}");
         let snd = self.dev_root.join("snd");
@@ -491,6 +516,15 @@ impl AlsaProvider {
         let mut records = Vec::new();
         for (pcm, pcm_directory) in numbered(directory, "pcm", "c")? {
             let mut issues = Vec::new();
+            if device.is_none() {
+                issue(
+                    &mut issues,
+                    "peripherals.sysfs_device_missing",
+                    "The ALSA card has no parent device in sysfs (a virtual card, or a driver \
+                     that registers its card without one), so no bus or USB identity is known \
+                     and the record id follows the card ID: it changes if the card ID changes.",
+                );
+            }
             let info = read_text_file(&pcm_directory.join("info"));
             if info.is_none() {
                 issue(
@@ -535,7 +569,7 @@ impl AlsaProvider {
                 ),
             }
 
-            let stable_key = format!("sysfs:{topology}:pcm{pcm}c");
+            let stable_key = format!("{key_base}:pcm{pcm}c");
             let pcm_node = snd.join(format!("pcmC{index}D{pcm}c"));
             let mut identity = json!({
                 "stable_key": stable_key,
@@ -578,7 +612,11 @@ impl AlsaProvider {
             let mut details = json!({
                 "name": name,
                 "backend": "alsa",
-                "connection": if usb.is_some() { "usb" } else { "platform" },
+                "connection": match (&device, &usb) {
+                    (None, _) => "unknown",
+                    (_, Some(_)) => "usb",
+                    _ => "platform",
+                },
                 "capture_target": capture_target,
                 "identity": identity,
                 "modes": modes,

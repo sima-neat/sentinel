@@ -1,8 +1,9 @@
 # Microphones
 
 Audio capture devices that ALSA exposes: USB Audio Class microphones, the
-microphone of a composite USB device such as a webcam or headset, and capture
-PCMs of on-board (platform) sound cards. Each capture PCM is one record.
+microphone of a composite USB device such as a webcam or headset, capture
+PCMs of on-board (platform) sound cards, and capture PCMs of cards with no
+parent device (virtual cards). Each capture PCM is one record.
 Playback-only devices and the playback side of a headset are not reported,
 and a webcam's camera is reported separately by the camera providers.
 
@@ -31,9 +32,30 @@ For a USB device the sysfs device is the audio control interface on its port,
 so the id stays the same across replugs into the same port, reboots and ALSA
 card renumbering, and two identical microphones on different ports get
 different ids. A different port is a different microphone. The card number,
-card id and `/dev/snd` node names are routing details and never enter the id.
+card id and `/dev/snd` node names are routing details and never enter the id
+of a card with a device path.
 The key and hash are the ones Neat Core's earlier ALSA provider used, so a
 microphone keeps its id.
+
+A card registered without a parent device (a virtual card, or a driver that
+passes no parent to `snd_card_new`) lives under `/sys/devices/virtual/sound`
+and has no `device` link, so it has no device path to key on. Its key is the
+card id instead:
+
+```text
+alsa-card-id:<card id>:pcm<M>c
+alsa-card-id:Loopback:pcm0c
+```
+
+The card id is the best attribute available: it survives card renumbering
+and reboots, and ALSA keeps it unique among the cards present, so two such
+cards never share a key. Its limits: changing the card id (the driver's `id`
+module option, or writing `/sys/class/sound/cardN/id`) changes the record id,
+and when two cards of one driver are both present the kernel suffixes the
+second one's id (`Loopback_1`) in registration order, so they can swap ids
+between boots. The kernel never registers a card with an empty id; should the
+id read back empty, the key is `alsa-card-index:<N>:pcm<M>c`, where the card
+number keeps the records apart but changes between boots.
 
 ## Details
 
@@ -41,7 +63,7 @@ microphone keeps its id.
 | --- | --- | --- | --- | --- |
 | `name` | string | yes | Card short name, else the PCM name, else the card id, else `ALSA capture PCM <M>` | `/proc/asound/cards`, `pcmMc/info` |
 | `backend` | string | yes | `alsa` | |
-| `connection` | string | yes | `usb` when the card's device has a USB ancestor, else `platform` | sysfs |
+| `connection` | string | yes | `usb` when the card's device has a USB ancestor, `unknown` when the card has no parent device, else `platform` | sysfs |
 | `capture_target` | object | yes | `card_id` (string, may be empty), `device` (PCM number), and `selector` (`plughw:CARD=<card_id>,DEV=<M>`) when the card id holds only letters, digits, `_` and `-` and is not a one- or two-digit number (ALSA reads `CARD=7` as card index 7). Routing for the current boot only | `/proc/asound/cardN/id` |
 | `identity` | object | yes | See below | |
 | `modes` | array | yes | Capture formats; empty when the driver publishes none (see `issues`) | `streamM` |
@@ -94,6 +116,7 @@ refresh first, and must not treat `in_use` or `available` as a guarantee.
 | `peripherals.capture_selector_unavailable` | The card id cannot form a safe `selector`, or is a one- or two-digit number that ALSA would read as a card index |
 | `peripherals.capabilities_unavailable` | No capture formats: a non-USB driver (formats are only published by USB audio without opening the PCM) or a USB stream without them |
 | `peripherals.availability_unknown` | `subdevices_count` / `subdevices_avail` missing or invalid |
+| `peripherals.sysfs_device_missing` | The card has no parent device in sysfs: no bus or USB identity, and the id follows the card id (see [Identity](#identity)) |
 
 ## Example record
 
@@ -132,12 +155,17 @@ refresh first, and must not treat `in_use` or `available` as a guarantee.
   non-USB cards without published formats; a stream that is recording
   (running status lines are skipped, availability `in_use`).
 - A kernel without ALSA, or without sound cards: no records.
+- A card with no parent device (under `/sys/devices/virtual/sound`, no
+  `device` link): its capture PCMs are listed with `connection: unknown`,
+  no USB identity and a `peripherals.sysfs_device_missing` issue, beside the
+  other microphones.
 - A card being added or removed (the card list and the card directories
-  disagree), a present card without its sysfs device, and a present USB
-  ancestor with only one of `idVendor` and `idProduct` fail the scan, so the
-  catalog keeps the last good records and reports the provider issue until
-  the next scan. A card whose sysfs entry or device disappears during the
-  scan (an unplug racing it) is skipped instead.
+  disagree), a card with a parent device whose `device` link is missing
+  (seen only while the card is being removed) or cannot be resolved, and a
+  present USB ancestor with only one of `idVendor` and `idProduct` fail the
+  scan, so the catalog keeps the last good records and reports the provider
+  issue until the next scan. A card whose sysfs entry or device disappears
+  during the scan (an unplug racing it) is skipped instead.
 
 ## Support rules
 
@@ -151,4 +179,4 @@ None. Microphone records carry no `supported` or `reason`.
 | Same `id` after unplug and replug (USB `authorized` 0 then 1): removed, then re-added | Logitech C920, DevKit, 2026-10-04 | Card renumbering: synthetic |
 | `availability` is `in_use` while `arecord` records and `available` afterwards; 20 refreshes during a 6 s recording did not disturb it | Logitech C920, DevKit, 2026-10-04 | |
 | `availability` after hot-plug stays `in_use` while PulseAudio holds the new device, until the next scan (see [Availability](#availability)) | Logitech C920, DevKit, 2026-10-04 | |
-| Stereo 24-bit, mono, 32-bit, continuous rates, several formats per altset, headsets, identical microphones, platform cards, partial snapshots, missing USB strings | Not yet | Synthetic `/proc/asound` text in kernel 6.18.3's layout (`sound/core/init.c`, `sound/core/pcm.c`, `sound/usb/proc.c`) and synthetic sysfs; the Yeti Nano-like, mono and platform fixtures are not captures of real devices |
+| Stereo 24-bit, mono, 32-bit, continuous rates, several formats per altset, headsets, identical microphones, platform cards, cards with no parent device, partial snapshots, missing USB strings | Not yet | Synthetic `/proc/asound` text in kernel 6.18.3's layout (`sound/core/init.c`, `sound/core/pcm.c`, `sound/usb/proc.c`) and synthetic sysfs; the Yeti Nano-like, mono and platform fixtures are not captures of real devices |

@@ -497,6 +497,91 @@ fn index_like_card_ids_get_no_selector() {
     assert_eq!(targets, expected);
 }
 
+/// A card registered without a parent device (a loopback or other virtual
+/// card) sits under `devices/virtual/sound` with no `device` link. It does not
+/// fail the scan: its capture PCMs are listed beside the USB microphone with
+/// what ALSA reports, `connection: unknown`, no USB identity, an id keyed on
+/// the card id (so it survives renumbering), and an issue saying why.
+#[test]
+fn card_without_a_parent_device_is_listed_beside_usb_microphones() {
+    let scan_as = |index: u32| {
+        let mut board = Board::new();
+        board.usb_mic(0, "1-3.2", "Nano", MONO_STREAM);
+        board.card(
+            index,
+            ("Loopback", "Loopback", "Loopback"),
+            "devices/virtual",
+        );
+        let card = format!("sys/devices/virtual/sound/card{index}");
+        fs::remove_file(board.path(&format!("{card}/device"))).unwrap();
+        board.capture(index, 0, (8, 8), None);
+        board.capture(index, 1, (8, 7), None);
+        board.scan().unwrap()
+    };
+    let records = scan_as(1);
+    let summary = Vec::from_iter(records.iter().map(|record| {
+        let details = &record.details;
+        let codes = details["issues"].as_array().map(|issues| {
+            Vec::from_iter(issues.iter().map(|issue| issue["code"].as_str().unwrap()))
+        });
+        json!([
+            details["connection"],
+            details["identity"]["stable_key"],
+            details["identity"].get("usb").is_some(),
+            details["capture_target"]["selector"],
+            details["availability"]["state"],
+            codes
+        ])
+    }));
+    let missing = [
+        "peripherals.sysfs_device_missing",
+        "peripherals.capabilities_unavailable",
+    ];
+    let virtual_pcm = |pcm| {
+        let key = format!("alsa-card-id:Loopback:pcm{pcm}c");
+        let selector = format!("plughw:CARD=Loopback,DEV={pcm}");
+        json!(["unknown", key, false, selector, "available", missing])
+    };
+    let usb_key = format!("sysfs:{XHCI}/1-3.2/1-3.2:1.0:pcm0c");
+    let usb = json!([
+        "usb",
+        usb_key,
+        true,
+        "plughw:CARD=Nano,DEV=0",
+        "available",
+        null
+    ]);
+    let mut expected = [usb, virtual_pcm(0), virtual_pcm(1)];
+    expected.sort_by_key(|row| fnv1a(row[1].as_str().unwrap()));
+    assert_eq!(summary, expected);
+    let loopback = &records
+        .iter()
+        .find(|r| r.details["connection"] == "unknown")
+        .unwrap();
+    assert_eq!(loopback.details["identity"]["card_driver"], "Loopback");
+    let ids = |records: &[Record]| Vec::from_iter(records.iter().map(|r| r.id.clone()));
+    assert_eq!(ids(&records), ids(&scan_as(5)), "renumbering keeps the ids");
+
+    // The kernel never registers a card without an id; if one reads back
+    // empty, the card number keeps two such cards apart.
+    let mut board = Board::new();
+    for index in [0, 1] {
+        board.card(index, ("", "Dummy", "Dummy"), "devices/virtual");
+        let link = format!("sys/devices/virtual/sound/card{index}/device");
+        fs::remove_file(board.path(&link)).unwrap();
+        board.capture(index, 0, (1, 1), None);
+    }
+    let keys = Vec::from_iter(board.details().into_iter().map(|details| {
+        details["identity"]["stable_key"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }));
+    let mut expected = ["alsa-card-index:0:pcm0c", "alsa-card-index:1:pcm0c"];
+    expected.sort_by_key(|key| fnv1a(key));
+    assert_eq!(keys, expected);
+}
+
 /// A microphone unplugged between its `idVendor` and `idProduct` reads is
 /// skipped; a present device with only `idVendor` still fails the scan.
 #[test]
@@ -541,10 +626,10 @@ fn microphone_unplugged_between_identity_reads_is_skipped() {
 
 /// A kernel without ALSA, or without sound cards, has no microphones. A
 /// snapshot taken while a card is being added or removed, an unparsable or
-/// unreadable card list, a present card without its sysfs device, and an
-/// incomplete USB ancestor of a present card fail the scan, so the catalog
-/// keeps the last good records. A card removed after the card list was read
-/// is skipped.
+/// unreadable card list, a card with a parent device but no `device` link
+/// (only seen while the card is being removed), and an incomplete USB
+/// ancestor of a present card fail the scan, so the catalog keeps the last
+/// good records. A card removed after the card list was read is skipped.
 #[test]
 fn absent_alsa_is_empty_and_partial_snapshots_fail_the_scan() {
     let board = Board::new();
