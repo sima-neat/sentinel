@@ -220,8 +220,8 @@ pub fn spawn(config: Config, providers: Vec<Box<dyn Provider>>) -> Result<Periph
             None
         }
     };
-    // Without the directory (Core not installed yet), rules are still re-read
-    // on every scan; Core's installer also requests a refresh.
+    // The event loop retries a missing directory or another transient watch
+    // failure until Core's rules location becomes available.
     let rules_watch = RulesWatch::open(scanner.support_path())
         .map_err(|error| {
             eprintln!(
@@ -284,9 +284,11 @@ fn run(
     // Refresh requests within the cooldown share the next scan, so a client
     // that spams the world-writable API cannot keep the thread busy.
     let mut last_scan_end: Option<Instant> = None;
-    // Only an invalidated watch is retried. A directory absent at startup is
-    // handled by Core's install-time refresh without adding an idle wake-up.
-    let mut retry_rules_watch: Option<Instant> = None;
+    // Retry both startup failures and later watch invalidations. Once the
+    // configured directory exists, normal operation remains event-driven.
+    let mut retry_rules_watch = rules_watch
+        .is_none()
+        .then(|| Instant::now() + RULES_WATCH_RETRY);
     loop {
         // A pending scan re-reads the rules, so it supersedes a reclassify.
         let next = [due.or(reclassify_due), retry_publish, retry_rules_watch]
@@ -655,10 +657,9 @@ mod tests {
     }
 
     #[test]
-    fn installing_core_rules_reclassifies_without_rescanning() {
+    fn installing_core_rules_after_startup_reclassifies_without_rescanning() {
         let root = TempDir::new();
         let rules_dir = root.path().join("support");
-        fs::create_dir_all(&rules_dir).unwrap();
         let mode = json!({"format": "NV12", "width": 1920, "height": 1080,
                           "framerate_num": 30, "framerate_den": 1, "isp_output": true});
         let details = json!({"backend": "mipi", "modes": [mode]});
@@ -672,6 +673,7 @@ mod tests {
         let before = wait_for(root.path(), |d| d.ready && supported(d, None));
         assert_eq!(before, "ready rev=1 scan=1 devices=1 last=-");
 
+        fs::create_dir_all(&rules_dir).unwrap();
         let staged = rules_dir.join("neat-core.json.dpkg-new");
         fs::write(&staged, core_rules().to_string()).unwrap();
         fs::rename(&staged, rules_dir.join("neat-core.json")).unwrap();
