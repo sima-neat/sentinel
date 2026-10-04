@@ -438,8 +438,12 @@ fn run(
             if let Err(error) = scanner.scan(&mut catalog) {
                 eprintln!("Sentinel peripheral scan rejected: {error}");
                 // The rejected result did not commit the rules it read, so
-                // the retained catalog still needs the pending rules update.
-                reclassify_due = pending_reclassification;
+                // the retained catalog still needs a rules-only update. Keep
+                // an existing debounce deadline or create one when this scan
+                // was the first observer (for example, without a watcher).
+                reclassify_due = Some(
+                    pending_reclassification.unwrap_or_else(|| Instant::now() + config.debounce),
+                );
             }
             {
                 let mut schedule = control.schedule();
@@ -599,7 +603,7 @@ mod tests {
     use crate::peripherals::scan::testing::{record, Fake};
     use crate::peripherals::support::core_rules;
     use crate::peripherals::sysutil::testing::TempDir;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
@@ -641,6 +645,22 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn colliding_providers(details: Value) -> Vec<Box<dyn Provider>> {
+        let first = record("test.one", "camera:one", details);
+        let one = Fake("test.one", move || Ok(vec![first.clone()]));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let two = Fake("test.two", move || {
+            let id = if count.fetch_add(1, SeqCst) == 0 {
+                "camera:two"
+            } else {
+                "camera:one"
+            };
+            Ok(vec![record("test.two", id, json!({}))])
+        });
+        vec![Box::new(one), Box::new(two)]
     }
 
     /// The first scan is published at once; a refresh promises the scan that
@@ -720,19 +740,7 @@ mod tests {
         let mode = json!({"format": "NV12", "width": 1920, "height": 1080,
                           "framerate_num": 30, "framerate_den": 1, "isp_output": true});
         let details = json!({"backend": "mipi", "modes": [mode]});
-        let first = record("test.one", "camera:one", details);
-        let one = Fake("test.one", move || Ok(vec![first.clone()]));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let count = calls.clone();
-        let two = Fake("test.two", move || {
-            let id = if count.fetch_add(1, SeqCst) == 0 {
-                "camera:two"
-            } else {
-                "camera:one"
-            };
-            Ok(vec![record("test.two", id, json!({}))])
-        });
-        let handle = start_with(root.path(), 50, vec![Box::new(one), Box::new(two)]);
+        let handle = start_with(root.path(), 50, colliding_providers(details));
         let ready = wait_for(root.path(), |d| d.ready && d.scan_sequence == 1);
         assert_eq!(ready, "ready rev=1 scan=1 devices=2 last=-");
 
@@ -749,6 +757,42 @@ mod tests {
                 && d.devices[0]["camera"]["modes"][0]["supported"] == true
         });
         assert_eq!(updated, "degraded rev=3 scan=2 devices=2 last=changed");
+        handle.stop();
+    }
+
+    #[test]
+    fn rejected_unwatched_refresh_schedules_rules_reclassification() {
+        let root = TempDir::new();
+        let mode = json!({"format": "NV12", "width": 1920, "height": 1080,
+                          "framerate_num": 30, "framerate_den": 1, "isp_output": true});
+        let details = json!({"backend": "mipi", "modes": [mode]});
+        // The absent support directory makes the initial rules watch fail.
+        let handle = start_with(root.path(), 10, colliding_providers(details));
+        wait_for(root.path(), |d| d.ready && d.scan_sequence == 1);
+
+        let rules = root.path().join("support/neat-core.json");
+        fs::create_dir_all(rules.parent().unwrap()).unwrap();
+        fs::write(&rules, core_rules().to_string()).unwrap();
+        assert_eq!(handle.control().request_refresh(), Some(2));
+        // Finish before the one-second watch retry can observe the new
+        // directory; the rejected refresh itself must schedule this update.
+        let deadline = Instant::now() + Duration::from_millis(800);
+        loop {
+            let document = read(&root.path().join("peripherals.json")).unwrap();
+            let source = document
+                .support
+                .as_ref()
+                .and_then(|support| support.source.as_deref());
+            if document.scan_sequence >= 2 && source == Some("neat-core 0.4.0") {
+                assert_eq!(document.devices[0]["camera"]["modes"][0]["supported"], true);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "reclassification waited for the rules-watch retry"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
         handle.stop();
     }
 
