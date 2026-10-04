@@ -378,6 +378,11 @@ fn peripheral_catalog(
 /// symlink, and accept only a regular file. The open descriptor keeps naming
 /// races after this check from changing which bytes are read.
 fn read_peripheral_catalog(path: &Path, control: Option<&Control>) -> io::Result<Vec<u8>> {
+    // Acquire this before opening the path. Writers hold the same lock across
+    // rename and publication-identity update, so a reader sees one side of
+    // that handoff rather than a new inode with the old identity (or vice
+    // versa).
+    let publication = control.map(Control::lock_publication);
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -393,7 +398,10 @@ fn read_peripheral_catalog(path: &Path, control: Option<&Control>) -> io::Result
             "peripheral catalog is not a daemon-owned, safely writable regular file",
         ));
     }
-    if control.is_some_and(|control| !control.owns_publication(&metadata)) {
+    if publication
+        .as_ref()
+        .is_some_and(|publication| !publication.owns(&metadata))
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "peripheral catalog is not this daemon's latest publication",

@@ -63,6 +63,16 @@ impl Publication {
     }
 }
 
+/// Holds the publication handoff lock from before a reader opens the catalog
+/// until it has checked the opened inode.
+pub struct PublicationGuard<'a>(MutexGuard<'a, Schedule>);
+
+impl PublicationGuard<'_> {
+    pub fn owns(&self, metadata: &fs::Metadata) -> bool {
+        self.0.publication == Some(Publication::from_metadata(metadata))
+    }
+}
+
 /// Shared between the peripherals thread and its callers (API, daemon).
 pub struct Control {
     instance_id: String,
@@ -125,10 +135,10 @@ impl Control {
         self.schedule().publish_error.clone()
     }
 
-    /// Whether an open file is the most recent catalog publication made by
-    /// this daemon instance.
-    pub fn owns_publication(&self, metadata: &fs::Metadata) -> bool {
-        self.schedule().publication == Some(Publication::from_metadata(metadata))
+    /// Serialize opening the catalog with the writer's rename and publication
+    /// identity update. The caller must hold this through its identity check.
+    pub fn lock_publication(&self) -> PublicationGuard<'_> {
+        PublicationGuard(self.schedule())
     }
 
     fn request_stop(&self) {
@@ -442,16 +452,17 @@ fn refresh_due(now: Instant, last_scan_end: Option<Instant>, cooldown: Duration)
 /// refuses the stale file while writes fail (for example, `/run` is full)
 /// and serves it again once one succeeds. Returns when to retry, if it failed.
 fn write(control: &Control, config: &Config, catalog: &Catalog) -> Option<Instant> {
-    let (publication, error) = match publish_config(config, &catalog.document()) {
-        Ok(publication) => (Some(publication), None),
-        Err(error) => (None, Some(format!("{error:#}"))),
-    };
-    let previous = {
+    let (previous, error) = {
         let mut schedule = control.schedule();
-        if let Some(publication) = publication {
-            schedule.publication = Some(publication);
-        }
-        std::mem::replace(&mut schedule.publish_error, error.clone())
+        let error = match publish_config(config, &catalog.document()) {
+            Ok(publication) => {
+                schedule.publication = Some(publication);
+                None
+            }
+            Err(error) => Some(format!("{error:#}")),
+        };
+        let previous = std::mem::replace(&mut schedule.publish_error, error.clone());
+        (previous, error)
     };
     match &error {
         // Retries repeat the same error every second; log each new one.
