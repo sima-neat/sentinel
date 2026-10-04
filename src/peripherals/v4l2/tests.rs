@@ -91,16 +91,20 @@ fn scan_checking(
     exists: AttributeCheck,
 ) -> Result<Vec<Record>, ProviderError> {
     let dev = root.join("dev");
+    let mut provider = V4l2Provider::with_opener(root.join("sys"), &dev, opener(&dev, nodes));
+    provider.identity_attribute_exists = exists;
+    on_board(root, provider.discover())
+}
+
+/// Serves `<dev>/<name>` from `nodes`.
+fn opener(dev: &Path, nodes: Nodes) -> Opener {
     let nodes = nodes.into_iter().map(|(name, node)| (dev.join(name), node));
     let nodes: HashMap<_, _> = nodes.collect();
-    let open: Opener = Box::new(move |path: &Path| match nodes.get(path) {
+    Box::new(move |path: &Path| match nodes.get(path) {
         Some(Ok(node)) => Ok(Box::new(node.clone()) as Box<dyn VideoNode>),
         Some(Err(errno)) => Err(io::Error::from_raw_os_error(*errno)),
         None => Err(io::Error::from_raw_os_error(libc::ENOENT)),
-    });
-    let mut provider = V4l2Provider::with_opener(root.join("sys"), dev, open);
-    provider.identity_attribute_exists = exists;
-    on_board(root, provider.discover())
+    })
 }
 
 /// A temporary root with one camera at `USB` exposing `videos`.
@@ -479,6 +483,42 @@ fn camera_unplugged_between_identity_checks_is_skipped() {
     assert_eq!(error.code, "io.open");
     let incomplete = "incomplete vendor/product attributes";
     assert!(error.reason.contains(incomplete), "{}", error.reason);
+}
+
+/// A camera unplugged once its node is open is skipped, though its `index`
+/// then reads as nothing rather than failing with a disappearance errno;
+/// other cameras are kept. A present node without `index` still fails the
+/// scan as before.
+#[test]
+fn camera_unplugged_after_open_is_skipped() {
+    let root = one_camera(&[("video0", "0")]);
+    let (sys, dev) = (root.path().join("sys"), root.path().join("dev"));
+    let second = "devices/platform/xhci/usb1/1-2";
+    add_camera(&sys, second, &[], &[("video1", "0")]);
+    let camera = || Ok(uvc_camera("C920"));
+    let nodes = vec![("video0", camera()), ("video1", camera())];
+    let (usb, served) = (sys.join(USB), opener(&dev, nodes));
+    let unplug: Opener = Box::new(move |path: &Path| {
+        let node = served(path)?;
+        if path.ends_with("video0") {
+            fs::remove_dir_all(&usb).unwrap();
+        }
+        Ok(node)
+    });
+    let mut provider = V4l2Provider::with_opener(&sys, &dev, unplug);
+    let records = on_board(root.path(), provider.discover()).unwrap();
+    let paths = Vec::from_iter(records.iter().map(|r| &r.details["device_path"]));
+    assert_eq!(paths, ["/dev/video1"]);
+    assert!(!sys.join(USB).exists(), "the race was not exercised");
+
+    let root = one_camera(&[("video0", "0")]);
+    let node = format!("{USB}/1-1:1.0/video4linux/video0/index");
+    fs::remove_file(root.path().join("sys").join(node)).unwrap();
+    let error = scan(root.path(), vec![("video0", camera())]).unwrap_err();
+    let reason = "V4L2 USB camera did not publish stable topology, interface, and \
+                  composite-node index attributes.";
+    let expected = (CODE_DISCOVERY_FAILED.into(), reason.into());
+    assert_eq!((error.code, error.reason), expected);
 }
 
 /// No list may exceed `MAX_ENUMERATION_ENTRIES`, and one device gets

@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use super::model::{Provider, ProviderError, Record};
 use super::sysutil::{
-    bounded_string, disappeared, errno_of, io_error, read_text_file, trim_c_space,
+    bounded_string, disappeared, errno_of, io_error, read_text_file, trim_c_space, vanished,
     CODE_DISCOVERY_FAILED, CODE_IO_OPEN,
 };
 use super::videodev2::{
@@ -466,10 +466,12 @@ impl V4l2Provider {
         let by_id = by_id_links(&self.dev_root);
         let mut records = Vec::new();
         for name in names {
-            let device_path = self.dev_root.join(&name);
-            match self.probe(&sys, &class.join(&name), &device_path, &by_id) {
+            let (entry, device_path) = (class.join(&name), self.dev_root.join(&name));
+            match self.probe(&sys, &entry, &device_path, &by_id) {
                 Ok(record) => records.extend(record),
-                Err(failure) if disappeared(failure.errno) => {}
+                // A node unplugged mid-scan is skipped: its failure says so,
+                // or its class entry, removed before its attributes, is gone.
+                Err(failure) if disappeared(failure.errno) || vanished(&entry) => {}
                 Err(failure) => return Err(failure),
             }
         }
@@ -515,12 +517,10 @@ impl V4l2Provider {
                     "V4L2 USB ancestor has incomplete vendor/product attributes: {}",
                     path.display()
                 );
-                // An unplug removes the attributes one at a time: if the
-                // node's sysfs device (below this ancestor) is gone too, the
-                // camera vanished mid-scan and is skipped.
-                let present = attribute_exists(&device)?;
+                // An unplug removes the attributes one at a time; `scan`
+                // skips the camera once its class entry is gone too.
                 return Err(Failure {
-                    errno: if present { libc::EPROTO } else { libc::ENOENT },
+                    errno: 0,
                     error: ProviderError::new(CODE_IO_OPEN, reason),
                 });
             }

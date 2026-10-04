@@ -30,7 +30,7 @@ use serde_json::json;
 use super::model::{Provider, ProviderError, Record};
 use super::sysutil::{
     bounded_string, disappeared, errno_of, io_error, os_message, read_text_file, trim_c_space,
-    CODE_DISCOVERY_FAILED, CODE_IO_OPEN,
+    vanished, CODE_DISCOVERY_FAILED, CODE_IO_OPEN,
 };
 use super::videodev2::{
     effective_capabilities, fourcc_string, Capability, EnumerationBudget, FmtDesc, FrmIvalEnum,
@@ -91,7 +91,13 @@ impl Provider for MipiProvider {
         let backend = self.backend.as_ref();
         let mut sensors = Vec::new();
         for path in media_device_paths(&self.dev_root)? {
-            sensors.extend(probe_media_device(backend, &path)?);
+            match probe_media_device(backend, &path) {
+                Ok(found) => sensors.extend(found),
+                // Unplugged mid-scan, though the failure did not say so (an
+                // unregistered media device answers EIO): its node is gone.
+                Err(_) if vanished(&path) => {}
+                Err(error) => return Err(error),
+            }
         }
         if sensors.is_empty() {
             return Ok(Vec::new());

@@ -40,8 +40,10 @@ fn einval() -> io::Error {
     io::Error::from_raw_os_error(libc::EINVAL)
 }
 
+/// A media device; `MEDIA_IOC_G_TOPOLOGY` fails with the errno in `.2`, after
+/// the device was unplugged (its `/dev` node removed once open) when set.
 #[derive(Clone, Default)]
-struct FakeMedia(MediaDeviceInfo, Graph);
+struct FakeMedia(MediaDeviceInfo, Graph, Option<(i32, bool)>);
 
 /// Fills `room` with `items` (left alone when not requested); `ENOSPC` when
 /// they do not fit.
@@ -62,6 +64,9 @@ impl MediaNode for FakeMedia {
     }
 
     fn topology(&mut self, graph: &mut Graph) -> io::Result<()> {
+        if let Some((errno, _)) = self.2 {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
         let mut read = graph.clone();
         fill(&mut read.entities, &self.1.entities)?;
         fill(&mut read.interfaces, &self.1.interfaces)?;
@@ -247,7 +252,11 @@ fn open<T: Clone>(nodes: &Nodes<T>, path: &Path) -> io::Result<T> {
 
 impl Backend for Fakes {
     fn open_media(&self, path: &Path) -> io::Result<Box<dyn MediaNode>> {
-        Ok(Box::new(open(&self.0, path)?))
+        let node = open(&self.0, path)?;
+        if node.2.is_some_and(|(_, unplugged)| unplugged) {
+            fs::remove_file(path).unwrap();
+        }
+        Ok(Box::new(node))
     }
 
     fn open_video(&self, path: &Path) -> io::Result<Box<dyn VideoNode>> {
@@ -447,6 +456,28 @@ fn media_device_failures_fail_the_scan() {
     let error = provider.discover().unwrap_err();
     let reason = "failed to query media device information for";
     assert!(error.code == CODE_IO_OPEN && error.reason.starts_with(reason));
+}
+
+/// A media device unplugged once open answers `EIO`, not a disappearance
+/// errno: with its node gone it is skipped and other devices are kept; while
+/// its node is present the scan fails as before.
+#[test]
+fn media_device_unplugged_after_open_is_skipped() {
+    let failing = |unplugged| {
+        let mut node = real_media(&[IMX477])?;
+        node.2 = Some((libc::EIO, unplugged));
+        Ok(node)
+    };
+    let ov5647 = [(9, "ov5647", SENSOR)];
+    let second = media(SIMA_MEDIA_DRIVER, "platform:csi2video@2", &ov5647);
+    let records = scan([failing(true), second], [], []).unwrap();
+    let names = Vec::from_iter(records.iter().map(|r| &r.details["camera_name"]));
+    assert_eq!(names, ["ov5647"]);
+
+    let error = scan([failing(false)], [], []).unwrap_err();
+    let eio = os_message(&io::Error::from_raw_os_error(libc::EIO));
+    let reason = format!("failed to read the media topology of /dev/media0: {eio}");
+    assert_eq!((error.code, error.reason), (CODE_IO_OPEN.into(), reason));
 }
 
 /// Several ISP nodes report the modes they share; a node with another card

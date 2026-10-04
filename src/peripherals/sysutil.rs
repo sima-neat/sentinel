@@ -66,6 +66,15 @@ pub(crate) fn disappeared(errno: i32) -> bool {
     errno == libc::ENOENT || errno == libc::ENODEV || errno == libc::ENXIO
 }
 
+/// Whether the sysfs entry or device node at `path` is gone. A device whose
+/// probe failed and whose entry has gone since was unplugged mid-scan, even
+/// when the failing call did not say so (a removed sysfs attribute reads as
+/// nothing; a driver may answer `EIO`). Any other error cannot tell, so the
+/// device counts as present and its failure stands.
+pub(crate) fn vanished(path: &Path) -> bool {
+    fs::metadata(path).is_err_and(|error| matches!(errno_of(&error), libc::ENOENT | libc::ENOTDIR))
+}
+
 /// Fixtures shared by the peripheral tests.
 #[cfg(test)]
 pub(crate) mod testing {
