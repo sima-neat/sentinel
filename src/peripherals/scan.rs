@@ -55,21 +55,29 @@ impl Scanner {
     /// Run every provider, apply the support rules, then publish to the
     /// catalog, which compares against the previous result.
     pub fn scan(&mut self, catalog: &mut Catalog) -> Result<(), String> {
-        let issues = discover_all(&mut self.slots);
-        self.provider_issues = issues.clone();
-        let (devices, has_provider_result) = compose(&self.slots);
+        let (discovered, issues) = discover_all(&mut self.slots);
+        let provider_issues = issues.clone();
+        let (devices, has_provider_result) = compose_discovered(&self.slots, &discovered);
         // No providers at all is a valid, empty catalog rather than a failure.
         if has_provider_result || issues.is_empty() {
             let (devices, issues, support) = self.classify(devices, issues);
             // Providers own distinct id prefixes; a collision is a provider
             // bug. It still counts as a scan so refresh targets are reached.
-            catalog
-                .apply_success_with_support(devices, issues, support)
-                .inspect_err(|reason| {
-                    catalog.apply_rejected_scan(reason);
-                })
+            match catalog.apply_success_with_support(devices, issues, support) {
+                Ok(()) => {
+                    commit_discovered(&mut self.slots, discovered);
+                    self.provider_issues = provider_issues;
+                    Ok(())
+                }
+                Err(reason) => {
+                    catalog.apply_rejected_scan(&reason);
+                    Err(reason)
+                }
+            }
         } else {
-            catalog.apply_provider_failure(issues)
+            catalog.apply_provider_failure(issues)?;
+            self.provider_issues = provider_issues;
+            Ok(())
         }
     }
 
@@ -104,9 +112,34 @@ fn compose(slots: &[ProviderSlot]) -> (Vec<Record>, bool) {
     (devices, has_provider_result)
 }
 
+/// Compose this scan from newly discovered records, falling back to each
+/// provider's last accepted records when that provider failed.
+fn compose_discovered(
+    slots: &[ProviderSlot],
+    discovered: &[Option<Vec<Record>>],
+) -> (Vec<Record>, bool) {
+    let mut devices = Vec::new();
+    let mut has_provider_result = false;
+    for (slot, records) in slots.iter().zip(discovered) {
+        if let Some(records) = records.as_ref().or(slot.last_good.as_ref()) {
+            has_provider_result = true;
+            devices.extend(records.iter().cloned());
+        }
+    }
+    (devices, has_provider_result)
+}
+
+fn commit_discovered(slots: &mut [ProviderSlot], discovered: Vec<Option<Vec<Record>>>) {
+    for (slot, records) in slots.iter_mut().zip(discovered) {
+        if let Some(records) = records {
+            slot.last_good = Some(records);
+        }
+    }
+}
+
 /// Run every provider once, in parallel. A failed provider contributes an
 /// issue and keeps only its own last-good records.
-fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
+fn discover_all(slots: &mut [ProviderSlot]) -> (Vec<Option<Vec<Record>>>, Vec<Issue>) {
     let outcomes: Vec<Result<Vec<Record>, ProviderError>> = thread::scope(|scope| {
         let handles: Vec<_> = slots
             .iter_mut()
@@ -125,17 +158,19 @@ fn discover_all(slots: &mut [ProviderSlot]) -> Vec<Issue> {
             .collect()
     });
 
+    let mut discovered = Vec::with_capacity(slots.len());
     let mut issues = Vec::new();
-    for (slot, outcome) in slots.iter_mut().zip(outcomes) {
+    for (slot, outcome) in slots.iter().zip(outcomes) {
         match outcome.and_then(|records| validate(slot.name(), records)) {
-            Ok(records) => slot.last_good = Some(records),
+            Ok(records) => discovered.push(Some(records)),
             Err(error) => {
+                discovered.push(None);
                 let retained = slot.last_good.is_some();
                 issues.push(provider_issue(slot.name(), error, retained));
             }
         }
     }
-    issues
+    (discovered, issues)
 }
 
 /// The checks every provider's output must pass, in the daemon and in
@@ -334,6 +369,37 @@ mod tests {
         for bad in ["", "Camera", "1cam", "id", "type", "provider", "cam era"] {
             assert!(!valid_type_token(bad), "{bad}");
         }
+    }
+
+    /// A composed result rejected for a cross-provider collision must not
+    /// replace either provider's last accepted records.
+    #[test]
+    fn rejected_catalog_does_not_commit_provider_snapshots() {
+        let providers = vec![
+            scripted(
+                "a",
+                vec![found("a", &["a:1"]), found("a", &["same"]), denied()],
+            ),
+            scripted(
+                "b",
+                vec![
+                    found("b", &["b:1"]),
+                    found("b", &["same"]),
+                    found("b", &["b:2"]),
+                ],
+            ),
+        ];
+        let support = SupportStage::new("/nonexistent/sentinel/neat-core.json");
+        let (mut scanner, mut catalog) = (Scanner::new(providers, support), Catalog::new("i", 16));
+
+        scanner.scan(&mut catalog).unwrap();
+        assert!(scanner.scan(&mut catalog).is_err());
+        scanner.scan(&mut catalog).unwrap();
+
+        let document = catalog.document();
+        let ids = Vec::from_iter(document.devices.iter().map(|device| &device["id"]));
+        assert_eq!(ids, ["a:1", "b:2"]);
+        assert_eq!(issues(&document), "a io.permission_denied retained");
     }
 
     /// A rejected composed result retains both the previous devices and the
