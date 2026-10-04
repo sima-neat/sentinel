@@ -221,7 +221,12 @@ fn route(
                 .control
                 .as_ref()
                 .ok_or_else(peripherals_disabled)?;
-            let target = control.request_refresh().ok_or_else(peripherals_stopped)?;
+            let target = control.request_refresh().map_err(|error| match error {
+                crate::peripherals::service::RefreshError::Stopped => peripherals_stopped(),
+                crate::peripherals::service::RefreshError::Publish(error) => {
+                    catalog_write_unavailable(&error)
+                }
+            })?;
             // The target counts this catalog instance's scans.
             Ok(json!({
                 "accepted": true,
@@ -472,12 +477,16 @@ fn serving(peripherals: Option<&PeripheralsApi>) -> std::result::Result<&Periphe
         return Err(peripherals_stopped());
     }
     match control.publish_error() {
-        Some(error) => Err(unavailable(format!(
-            "peripheral catalog could not be written: {error}; \
-see `journalctl -u simaai-sentinel`"
-        ))),
+        Some(error) => Err(catalog_write_unavailable(&error)),
         None => Ok(peripherals),
     }
+}
+
+fn catalog_write_unavailable(error: &str) -> ApiError {
+    unavailable(format!(
+        "peripheral catalog could not be written: {error}; \
+see `journalctl -u simaai-sentinel`"
+    ))
 }
 
 fn peripherals_stopped() -> ApiError {

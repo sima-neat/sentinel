@@ -89,6 +89,12 @@ pub struct Control {
     wake_write: OwnedFd,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RefreshError {
+    Stopped,
+    Publish(String),
+}
+
 impl Control {
     fn new(instance_id: String) -> io::Result<Self> {
         let mut fds = [0; 2];
@@ -113,19 +119,23 @@ impl Control {
     }
 
     /// Ask for a scan now. Returns the `scan_sequence` whose completion
-    /// guarantees the result reflects the hardware as of this call, or `None`
-    /// if the peripherals thread is no longer running.
-    pub fn request_refresh(&self) -> Option<u64> {
+    /// guarantees the result reflects the hardware as of this call. Refreshes
+    /// are refused while the thread is stopped or its catalog cannot be
+    /// published.
+    pub fn request_refresh(&self) -> std::result::Result<u64, RefreshError> {
         let target = {
             let mut schedule = self.schedule();
             if !schedule.alive {
-                return None;
+                return Err(RefreshError::Stopped);
+            }
+            if let Some(error) = &schedule.publish_error {
+                return Err(RefreshError::Publish(error.clone()));
             }
             schedule.refresh = true;
             schedule.completed + if schedule.scanning { 2 } else { 1 }
         };
         self.wake();
-        Some(target)
+        Ok(target)
     }
 
     /// False once the peripherals thread has exited, cleanly or by a panic.
@@ -685,7 +695,7 @@ mod tests {
         assert_eq!(ready, "ready rev=1 scan=1 devices=1 last=-");
 
         let control = handle.control();
-        assert_eq!(control.request_refresh(), Some(2));
+        assert_eq!(control.request_refresh(), Ok(2));
         let burst = (0..200).map(|_| control.request_refresh().unwrap());
         let target = burst.max().unwrap();
         assert!(target <= 3, "200 requests promise at most two more scans");
@@ -700,10 +710,26 @@ mod tests {
         let expected = format!("degraded rev={revision} scan={scans} devices={scans} last=error");
         let stopped = wait_for(root.path(), stopped);
         assert_eq!(stopped, expected, "no scan without a trigger");
-        assert_eq!(control.request_refresh(), None);
+        assert_eq!(control.request_refresh(), Err(RefreshError::Stopped));
         // The process may already run niced; discovery adds NICE on top.
         let base = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
         assert_eq!(*nice.lock().unwrap(), Some((base + NICE).min(19)));
+    }
+
+    #[test]
+    fn refresh_is_not_scheduled_while_catalog_publication_has_failed() {
+        let control = Control::new("test-instance".into()).unwrap();
+        {
+            let mut schedule = control.schedule();
+            schedule.alive = true;
+            schedule.publish_error = Some("disk full".into());
+        }
+
+        assert_eq!(
+            control.request_refresh(),
+            Err(RefreshError::Publish("disk full".into()))
+        );
+        assert!(!control.schedule().refresh);
     }
 
     #[test]
@@ -747,7 +773,7 @@ mod tests {
         let staged = rules_dir.join("neat-core.json.dpkg-new");
         fs::write(&staged, core_rules().to_string()).unwrap();
         fs::rename(&staged, rules_dir.join("neat-core.json")).unwrap();
-        assert_eq!(handle.control().request_refresh(), Some(2));
+        assert_eq!(handle.control().request_refresh(), Ok(2));
         let updated = wait_for(root.path(), |d| {
             d.scan_sequence >= 2
                 && d.support
@@ -773,7 +799,7 @@ mod tests {
         let rules = root.path().join("support/neat-core.json");
         fs::create_dir_all(rules.parent().unwrap()).unwrap();
         fs::write(&rules, core_rules().to_string()).unwrap();
-        assert_eq!(handle.control().request_refresh(), Some(2));
+        assert_eq!(handle.control().request_refresh(), Ok(2));
         // Finish before the one-second watch retry can observe the new
         // directory; the rejected refresh itself must schedule this update.
         let deadline = Instant::now() + Duration::from_millis(800);
