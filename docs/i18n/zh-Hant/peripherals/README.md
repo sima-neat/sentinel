@@ -1,13 +1,10 @@
-# 周邊裝置
+# 周邊設備
 
-Sentinel 會維護連接至 Modalix DevKit 的裝置目錄：有哪些裝置、如何識別
-它們，以及它們具備哪些功能。Neat Core、Insight、sima-cli2、指令碼和
-代理程式都讀取相同的目錄，因此在此加入的裝置類型會立即顯示在所有位置。
+Sentinel 保存了連接到 Modalix DevKit 的裝置目錄：哪些裝置存在、如何識別它們以及它們能做什麼。Neat Core、Insight、sima-cli2、腳本和代理程式都會讀取相同的目錄，因此在這裡新增的裝置類型會立即在所有地方可見。
 
-此目錄是為擴充而設計。相機是第一種裝置類型；加入其他類型（麥克風、
-IMU、LiDAR 等）不需要變更目錄、API、CLI 或用戶端。
+這個目錄是為擴展而建立的。相機和麥克風是內建的裝置類型；新增其他類型（例如 IMU、LiDAR 等）不需要對目錄、API、CLI 或客戶端進行更改。
 
-## 運作方式
+## 它的運作方式
 
 ```text
 kernel hot-plug event ─┐
@@ -23,20 +20,17 @@ refresh request ───────┤
             GET /v1/peripherals  ·  simaai-sentinel peripherals
 ```
 
-**提供者**是 Sentinel 內的 Rust 程式碼，從核心介面探索一類裝置並傳回
-記錄。其餘工作全由 Sentinel 處理：在熱插拔時喚醒、去彈跳、隔離故障、
-保留失敗提供者上次正確的記錄、穩定的修訂版、變更記錄、API 和 CLI。
+**提供者** 是位於 Sentinel 內的 Rust 代碼，它會從核心介面中發現一類設備並返回紀錄。Sentinel 則處理其他所有事情：熱插拔喚醒、去抖動、隔離故障、保留故障提供者的最後有效紀錄、穩定的版本、變更日誌、API 以及 CLI。
 
-探索作業刻意設計得很輕量：沒有變更時執行緒不使用 CPU，以低於守護程式
-10 個 nice 等級執行，並將成批事件與重新整理要求合併為一次掃描。
+發現過程的設計本身很輕量：當沒有變化時，該線程不占用 CPU，運行於比守護程序低 10 個 nice 等級，並將事件爆發和刷新請求合併為一次掃描。
 
 ## 頁面
 
-| 頁面 | 適用對象 |
+| 頁面 | 給 |
 | --- | --- |
-| [加入裝置類型](adding-a-device-type.md) | 為新種類裝置加入支援的貢獻者 |
-| [裝置類型](device-types/README.md) | 每種支援類型的記錄格式，從[相機](device-types/camera.md)開始 |
-| [本機代理程式 API](../api.md) | `GET /v1/peripherals`、`POST /v1/peripherals/refresh`，以及使用 `since_revision` 輪詢 |
+| [新增裝置類型](adding-a-device-type.md) | 貢獻者正在為一種新型設備添加支援 |
+| [裝置類型](device-types/README.md) | 每種支持類型的記錄格式： [相機](device-types/camera.md), [麥克風](device-types/microphone.md) |
+| [本地代理 API](../api.md) | `GET /v1/peripherals`, `POST /v1/peripherals/refresh`，進行民調 `since_revision` |
 
 ## 使用目錄
 
@@ -47,22 +41,13 @@ simaai-sentinel peripherals --refresh  # rescan first
 curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/peripherals
 ```
 
-在 Neat 應用程式中，`simaai::neat::peripherals::list()`（C++）和
-`pyneat.peripherals.list()`（Python）會傳回相同目錄。每個裝置都以 JSON
-攜帶其詳細資料（`details_json` / `details`），所以在 Core 加入強型別欄位
-之前，Neat 應用程式已能使用新的裝置類型。
+從 Neat 應用程式中，`simaai::neat::peripherals::list()`（C++）和 `pyneat.peripherals.list()`（Python）返回相同的目錄。每個裝置都攜帶其詳細資訊作為 JSON（`details_json` / `details`），因此在 Core 為其新增類型化欄位之前，Neat 應用程式就可以使用新裝置類型。
 
 <a id="support-rules"></a>
 
 ## 支援規則
 
-每個相機模式都有 `supported` 和 `reason`：表示已安裝 Neat Core 的
-`CameraInput` 是否接受該模式。Sentinel 不會自行判定。Neat Core 將規則
-安裝至 `/usr/share/simaai-sentinel/support/neat-core.json`，周邊裝置執行緒
-在比較與寫入目錄前，會將規則套用至每個模式，因此 Core 升級會像其他變更
-一樣遞增 `revision`。Sentinel 監看該目錄，且不需重新掃描硬體就會重新套用
-規則。若未安裝 Neat Core，每個模式都是 `supported: false`，原因會說明
-Core 未安裝。
+每個相機模式都有 `supported` 和 `reason`：安裝的 Neat Core 的 `CameraInput` 是否接受它。Sentinel 不決定這個。Neat Core 將其規則安裝在 `/usr/share/simaai-sentinel/support/neat-core.json`，而外設線程會在比較和寫入目錄之前將它們應用到每個模式，因此 Core 升級會像任何其他變更一樣提升 `revision`。Sentinel 監視該目錄並在不重新掃描硬件的情況下重新應用規則。沒有 Neat Core，每個模式都是 `supported: false`，原因說明 Core 尚未安裝。
 
 ```json
 {
@@ -77,20 +62,14 @@ Core 未安裝。
 }
 ```
 
-規則依該順序檢查，第一個失敗項目會成為模式的 `reason`。尺寸範圍永遠不會
-標示為支援；若有 `isp_output`，模式必須是 ISP 輸出尺寸。目錄最上層的
-`support` 會回報 `state`（`applied`、`not_installed`、`invalid`，或無效更新
-仍沿用先前規則時的 `stale`）、`source` 和 `path`。
+規則按該順序檢查，首次失敗會成為模式的 `reason`。大小範圍從不標記為支援；當存在 `isp_output` 時，要求該模式為 ISP 輸出大小。目錄的頂層 `support` 報告 `state`（當無效更新導致使用先前規則時為 `applied`、`not_installed`、`invalid` 或 `stale`）、`source` 和 `path`。
 
-Sentinel 會建立 `/usr/share/simaai-sentinel/support/`，但不會在其中安裝檔案，
-所以 Sentinel 與 Neat Core 不會宣告同一路徑，且能獨立安裝、升級或解除安裝。
-目前只有格式 1；加入新格式時，Sentinel 仍會讀取舊格式。若規則檔格式比
-Sentinel 已知的更新，系統會繼續使用先前規則並回報 Sentinel 需要更新。
+Sentinel 創建 `/usr/share/simaai-sentinel/support/`，但從不在其中安裝任何文件，因此 Sentinel 及 Neat Core 從不使用相同路徑，並分別進行安裝、升級或卸載。到目前為止只有格式 1；當新增格式時，Sentinel 會繼續讀取舊的格式。格式新於 Sentinel 的規則文件會保留先前規則的使用，並報告 Sentinel 需要更新。
 
-## 守護程式選項
+## 守護程序選項
 
-| 選項 | 預設值 | 含義 |
+| 選項 | 預設 | 意義 |
 | --- | --- | --- |
-| `--peripherals-file PATH` | `/run/simaai-sentinel/peripherals.json` | 寫入目錄的位置，也是 `simaai-sentinel peripherals` 讀取的位置 |
+| `--peripherals-file PATH` | `/run/simaai-sentinel/peripherals.json` | 目錄的位置，由 `simaai-sentinel peripherals` 進行讀寫 |
 | `--support-rules PATH` | `/usr/share/simaai-sentinel/support/neat-core.json` | Neat Core 的相機支援規則 |
-| `--no-peripherals` | 關閉 | 執行守護程式但不探索周邊裝置 |
+| `--no-peripherals` | 關閉 | 在不進行外圍設備發現的情況下運行守護程序 |

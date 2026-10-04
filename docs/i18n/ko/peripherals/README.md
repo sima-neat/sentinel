@@ -1,13 +1,15 @@
-# 주변 장치
+# 주변기기
 
-Sentinel은 Modalix DevKit에 연결된 장치의 카탈로그를 유지합니다. 어떤 장치가 있는지,
-장치를 식별하는 방법과 장치의 기능을 기록합니다. Neat Core, Insight, sima-cli2,
-스크립트와 에이전트가 모두 같은 카탈로그를 읽으므로 여기에서 추가한 장치 유형은 모든 곳에 동시에 표시됩니다.
+Sentinel은 Modalix DevKit에 연결된 장치의 카탈로그를 유지합니다.
+존재하는 장치, 식별 방법 및 수행할 수 있는 작업에 대해 설명합니다. 깔끔한 코어,
+Insight, sima-cli2, 스크립트 및 에이전트는 모두 동일한 카탈로그를 읽으므로 장치는
+여기에 추가된 유형은 모든 곳에서 동시에 표시됩니다.
 
-카탈로그는 확장을 고려해 설계되었습니다. 카메라가 첫 번째 장치 유형이지만 다른 유형
-(마이크, IMU, LiDAR 등)을 추가해도 카탈로그, API, CLI 또는 클라이언트를 변경할 필요가 없습니다.
+카탈로그는 성장을 위해 만들어졌습니다. 카메라와 마이크가 내장되어 있습니다.
+장치 유형; 다른 유형(IMU, LiDAR 등)을 추가하는 데는 필요하지 않습니다.
+카탈로그, API, CLI 또는 클라이언트가 변경됩니다.
 
-## 작동 방식
+## 작동 원리
 
 ```text
 kernel hot-plug event ─┐
@@ -23,20 +25,23 @@ refresh request ───────┤
             GET /v1/peripherals  ·  simaai-sentinel peripherals
 ```
 
-**공급자**는 커널 인터페이스에서 한 장치 계열을 검색해 레코드를 반환하는 Sentinel 내부의
-Rust 코드입니다. 핫플러그 깨우기, 디바운스, 오류 격리, 실패한 공급자의 마지막 정상 레코드 유지,
-안정적인 리비전, 변경 로그, API와 CLI 등 나머지는 Sentinel이 처리합니다.
+**공급자**는 Sentinel 내의 Rust 코드로, 하나의 계열을 발견합니다.
+커널 인터페이스의 장치를 검색하고 레코드를 반환합니다. Sentinel이 모든 작업을 수행합니다.
+else: 핫플러그에서 깨우기, 디바운싱, 오류 격리,
+실패한 공급자의 마지막 양호한 기록 유지, 안정적인 개정, 변경
+로그, API 및 CLI.
 
-검색은 비용이 낮도록 설계되었습니다. 변경이 없을 때 스레드는 CPU를 사용하지 않고,
-데몬보다 nice 수준을 10만큼 낮춰 실행하며, 연속된 이벤트와 새로 고침 요청을 한 번의 스캔으로 합칩니다.
+발견은 설계상 저렴합니다. 스레드는 CPU를 사용하지 않고 아무것도 변경되지 않습니다.
+데몬 아래에서 10개의 멋진 레벨을 실행하고 일련의 이벤트를 병합하고 새로 고칩니다.
+요청을 한 번에 스캔합니다.
 
 ## 페이지
 
-| 페이지 | 대상 |
+| 페이지 | 용도 |
 | --- | --- |
-| [장치 유형 추가](adding-a-device-type.md) | 새로운 종류의 장치 지원을 추가하는 기여자 |
-| [장치 유형](device-types/README.md) | [카메라](device-types/camera.md)부터 시작하는 지원 유형별 레코드 형식 |
-| [로컬 에이전트 API](../api.md) | `GET /v1/peripherals`, `POST /v1/peripherals/refresh`, `since_revision` 폴링 |
+| [장치 유형 추가](adding-a-device-type.md) | 새로운 종류의 장치에 대한 지원을 추가하는 기여자 |
+| [장치 유형](device-types/README.md) | 지원되는 각 유형의 레코드 형식: [카메라](device-types/camera.md), [마이크](device-types/microphone.md) |
+| [로컬 에이전트 API](../api.md) | `GET /v1/peripherals`, `POST /v1/peripherals/refresh`, `since_revision`을 사용한 폴링 |
 
 ## 카탈로그 사용
 
@@ -47,21 +52,23 @@ simaai-sentinel peripherals --refresh  # rescan first
 curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/peripherals
 ```
 
-Neat 애플리케이션에서는 `simaai::neat::peripherals::list()`(C++)와
-`pyneat.peripherals.list()`(Python)가 같은 카탈로그를 반환합니다. 각 장치는 세부 정보를 JSON
-(`details_json` / `details`)으로 가지므로 Core가 형식화된 필드를 추가하기 전에도 Neat 애플리케이션에서
-새 장치 유형을 사용할 수 있습니다.
+Neat 애플리케이션에서 `simaai::neat::peripherals::list()`(C++) 및
+`pyneat.peripherals.list()` (Python)는 동일한 카탈로그를 반환합니다. 모든 장치
+세부 정보를 JSON (`details_json` / `details`)으로 전달하므로 새로운 장치 유형
+Core가 입력된 필드를 추가하기 전에 Neat 애플리케이션에서 사용할 수 있습니다.
 
 <a id="support-rules"></a>
 
 ## 지원 규칙
 
-각 카메라 모드의 `supported`와 `reason`은 설치된 Neat Core의 `CameraInput`이 해당 모드를
-허용하는지 나타냅니다. 이 결정은 Sentinel이 아니라 Neat Core가 합니다. Neat Core는 규칙을
-`/usr/share/simaai-sentinel/support/neat-core.json`에 설치하고, 주변 장치 스레드는 카탈로그를
-비교하고 쓰기 전에 모든 모드에 적용합니다. 따라서 Core 업그레이드도 다른 변경처럼 `revision`을 증가시킵니다.
-Sentinel은 디렉터리를 감시하고 하드웨어를 다시 스캔하지 않고 규칙을 다시 적용합니다. Neat Core가 없으면
-모든 모드는 `supported: false`이며 이유에 Core가 설치되지 않았다고 표시됩니다.
+각 카메라 모드는 `supported` 및 `reason`을 전달합니다. Neat가 설치되었는지 여부
+Core의 `CameraInput`이 이를 수락합니다. Sentinel은 이를 결정하지 않습니다. 깔끔한 코어
+`/usr/share/simaai-sentinel/support/neat-core.json`에 규칙을 설치합니다.
+주변 장치 스레드는 카탈로그가 작성되기 전에 이를 모든 모드에 적용합니다.
+비교 및 작성되므로 코어 업그레이드는 다른 변경 사항과 마찬가지로 `revision`을 범프합니다.
+Sentinel은 디렉터리를 감시하고 다시 검색하지 않고 규칙을 다시 적용합니다.
+하드웨어. Neat Core가 없으면 모든 모드는 이유와 함께 `supported: false`입니다.
+Core가 설치되지 않았다고 합니다.
 
 ```json
 {
@@ -76,20 +83,23 @@ Sentinel은 디렉터리를 감시하고 하드웨어를 다시 스캔하지 않
 }
 ```
 
-규칙은 이 순서로 검사되며 첫 번째 실패가 모드의 `reason`이 됩니다. 크기 범위는 지원됨으로 표시되지 않습니다.
-`isp_output`이 있으면 모드는 ISP 출력 크기여야 합니다. 카탈로그 최상위의 `support`는 `state`
-(`applied`, `not_installed`, `invalid`, 또는 잘못된 업데이트 후 이전 규칙을 계속 쓰는 `stale`),
-`source`, `path`를 보고합니다.
+규칙은 해당 순서대로 확인되며 첫 번째 실패는 모드의 실패가 됩니다.
+`reason`. 크기 범위는 지원되는 것으로 표시되지 않습니다. `isp_output`이 있는 경우,
+모드는 ISP 출력 크기여야 합니다. 카탈로그의 최상위 수준 `support`
+`state` (`applied`, `not_installed`, `invalid` 또는 `stale` 보고 언제
+잘못된 업데이트로 인해 이전 규칙이 사용 중임), `source` 및 `path`.
 
-Sentinel은 `/usr/share/simaai-sentinel/support/`를 만들지만 파일을 설치하지 않습니다. 따라서
-Sentinel과 Neat Core가 같은 경로를 소유하지 않으며 각각 독립적으로 설치, 업그레이드, 제거할 수 있습니다.
-현재는 형식 1만 있습니다. 형식이 추가되어도 Sentinel은 이전 형식을 계속 읽습니다. Sentinel보다 새로운
-형식의 규칙 파일은 이전 규칙을 계속 사용하게 하고 Sentinel 업데이트가 필요하다고 보고합니다.
+Sentinel은 `/usr/share/simaai-sentinel/support/`를 생성하지만 절대 설치하지 않습니다.
+따라서 Sentinel과 Neat Core는 동일한 경로를 요구하지 않고 설치하지 않습니다.
+독립적으로 업그레이드하거나 제거합니다. 형식 1은 지금까지 유일한 형식입니다. 언제
+형식이 추가되면 Sentinel은 이전 형식을 계속 읽습니다. 규칙 파일은
+Sentinel보다 최신 형식은 이전 규칙을 계속 사용하고 보고한다는 것을 알고 있습니다.
+Sentinel에 업데이트가 필요합니다.
 
 ## 데몬 옵션
 
 | 옵션 | 기본값 | 의미 |
 | --- | --- | --- |
-| `--peripherals-file PATH` | `/run/simaai-sentinel/peripherals.json` | 카탈로그를 쓰고 `simaai-sentinel peripherals`가 읽는 위치 |
-| `--support-rules PATH` | `/usr/share/simaai-sentinel/support/neat-core.json` | Neat Core 카메라 지원 규칙 |
+| `--peripherals-file PATH` | `/run/simaai-sentinel/peripherals.json` | 카탈로그를 쓰고 `simaai-sentinel peripherals`에서 읽는 위치 |
+| `--support-rules PATH` | `/usr/share/simaai-sentinel/support/neat-core.json` | Neat Core의 카메라 지원 규칙 |
 | `--no-peripherals` | off | 주변 장치 검색 없이 데몬 실행 |
