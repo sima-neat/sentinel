@@ -12,11 +12,14 @@ and a webcam's camera is reported separately by the camera providers.
 - **Rescan triggers:** `sound`
 
 Discovery reads only kernel text and sysfs: `/proc/asound/cards`,
-`/proc/asound/cardN/id`, `/proc/asound/cardN/pcmMc/info`,
-`/proc/asound/cardN/streamM` (USB audio), `/sys/class/sound/cardN/device` and
-its USB ancestors, and the udev links in `/dev/snd/by-path` and
-`/dev/snd/by-id`. It never opens a PCM or control device, so it cannot take a
-microphone from an application or change its mixer.
+`/proc/asound/cardN/id`, optional `/proc/asound/cardN/pcmMc/info`,
+`/proc/asound/cardN/streamM` (USB audio), `/sys/class/sound/pcmCNDMc`,
+`/sys/class/sound/cardN/device` and its USB ancestors, and the udev links in
+`/dev/snd/by-path` and `/dev/snd/by-id`. It never opens a PCM or control
+device, so it cannot take a microphone from an application or change its
+mixer. Kernels built without `CONFIG_SND_VERBOSE_PROCFS` omit `pcmMc/info`;
+the sysfs class device still produces a record with unknown availability and
+a `peripherals.pcm_info_unreadable` issue.
 
 ## Identity
 
@@ -112,7 +115,7 @@ refresh first, and must not treat `in_use` or `available` as a guarantee.
 
 | Code | When |
 | --- | --- |
-| `peripherals.pcm_info_unreadable` | `pcmMc/info` could not be read |
+| `peripherals.pcm_info_unreadable` | `pcmMc/info` could not be read, including when the kernel omits it because `CONFIG_SND_VERBOSE_PROCFS` is disabled |
 | `peripherals.capture_selector_unavailable` | The card id cannot form a safe `selector`, or is a one- or two-digit number that ALSA would read as a card index |
 | `peripherals.capabilities_unavailable` | No capture formats: a non-USB driver (formats are only published by USB audio without opening the PCM) or a USB stream without them |
 | `peripherals.availability_unknown` | `subdevices_count` / `subdevices_avail` missing or invalid |
@@ -155,6 +158,8 @@ refresh first, and must not treat `in_use` or `available` as a guarantee.
   non-USB cards without published formats; a stream that is recording
   (running status lines are skipped, availability `in_use`).
 - A kernel without ALSA, or without sound cards: no records.
+- A kernel without `CONFIG_SND_VERBOSE_PROCFS`: capture PCMs are enumerated
+  from sysfs and published with unknown availability.
 - A card with no parent device (under `/sys/devices/virtual/sound`, no
   `device` link): its capture PCMs are listed with `connection: unknown`,
   no USB identity and a `peripherals.sysfs_device_missing` issue, beside the

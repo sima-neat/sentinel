@@ -172,6 +172,7 @@ impl Board {
              subdevices_count: {count}\nsubdevices_avail: {free}\n"
         );
         self.write(&format!("proc/asound/card{index}/pcm{pcm}c/info"), &info);
+        self.write(&format!("sys/class/sound/pcmC{index}D{pcm}c"), "");
         if let Some(stream) = stream {
             self.write(&format!("proc/asound/card{index}/stream{pcm}"), stream);
         }
@@ -431,12 +432,14 @@ fn incomplete_captures_degrade_and_playback_only_cards_are_skipped() {
         "proc/asound/card1/pcm1c/info",
         "name: Line In\nsubdevices_count: 0\n",
     );
+    board.write("sys/class/sound/pcmC1D1c", "");
     board.card(
         2,
         ("Mic", "USB-Audio", ""),
         &format!("{XHCI}/1-1.6/1-1.6:1.0"),
     );
     fs::create_dir_all(board.path("proc/asound/card2/pcm0c")).unwrap();
+    board.write("sys/class/sound/pcmC2D0c", "");
     board.write("proc/asound/card2/id", "bad id\n");
     board.write("proc/asound/card2/stream0", MONO_STREAM);
 
@@ -466,6 +469,40 @@ fn incomplete_captures_degrade_and_playback_only_cards_are_skipped() {
     let mut actual = Vec::from_iter(details.iter().map(summary));
     actual.sort_by_key(|summary| summary.to_string());
     assert_eq!(Value::from(actual), expected);
+}
+
+/// CONFIG_SND_VERBOSE_PROCFS controls the per-card `pcmMc` directories, but
+/// not PCM class devices. Capture enumeration therefore still works without
+/// the optional procfs directories; only their name and availability degrade.
+#[test]
+fn capture_devices_do_not_require_verbose_procfs() {
+    let mut board = Board::new();
+    board.usb_mic(0, "1-1.2", "Nano", YETI_STREAM);
+    fs::remove_dir_all(board.path("proc/asound/card0/pcm0c")).unwrap();
+
+    let records = board.scan().unwrap();
+    assert_eq!(records.len(), 1);
+    let details = &records[0].details;
+    assert_eq!(
+        details["capture_target"]["selector"],
+        "plughw:CARD=Nano,DEV=0"
+    );
+    assert_eq!(details["modes"].as_array().unwrap().len(), 2);
+    assert_eq!(details["availability"]["state"], "unknown");
+    let codes = Vec::from_iter(
+        details["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["code"].as_str().unwrap()),
+    );
+    assert_eq!(
+        codes,
+        [
+            "peripherals.pcm_info_unreadable",
+            "peripherals.availability_unknown"
+        ]
+    );
 }
 
 /// A one- or two-digit card id gets no selector: ALSA would read `CARD=7` as

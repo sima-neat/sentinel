@@ -1,13 +1,13 @@
 //! Read-only discovery of ALSA capture devices (`daemon.audio.alsa`).
 //!
-//! Every capture PCM (`/proc/asound/cardN/pcmMc`) becomes one `microphone`
+//! Every capture PCM (`/sys/class/sound/pcmCNDMc`) becomes one `microphone`
 //! record; playback-only cards and playback PCMs are not reported, and a
 //! composite USB device (a webcam or headset) contributes only its capture
 //! PCMs. Only kernel text is read: `/proc/asound/cards`, each card's `id`,
-//! `pcmMc/info` and, for USB audio, `streamM`, plus the card's sysfs device
-//! and USB ancestry for identity and the udev `/dev/snd/by-*` links. No PCM
-//! or control device is opened, so discovery never takes or configures a
-//! microphone. Ids hash the card's sysfs device path and the PCM device
+//! optional `pcmMc/info` and, for USB audio, `streamM`, plus the card's sysfs
+//! device and USB ancestry for identity and the udev `/dev/snd/by-*` links.
+//! No PCM or control device is opened, so discovery never takes or configures
+//! a microphone. Ids hash the card's sysfs device path and the PCM device
 //! number, never the card number, which changes between replugs; a card with
 //! no parent device (a virtual card) is keyed by its card id instead.
 
@@ -514,7 +514,13 @@ impl AlsaProvider {
         ];
 
         let mut records = Vec::new();
-        for (pcm, pcm_directory) in numbered(directory, "pcm", "c")? {
+        // The per-card `pcmMc` procfs directories exist only with
+        // CONFIG_SND_VERBOSE_PROCFS. PCM class devices exist independently,
+        // so use them to enumerate captures and treat procfs metadata as
+        // optional below.
+        let sound_class = self.sys_root.join("class/sound");
+        let prefix = format!("pcmC{index}D");
+        for (pcm, _) in numbered(&sound_class, &prefix, "c")? {
             let mut issues = Vec::new();
             if device.is_none() {
                 issue(
@@ -525,7 +531,7 @@ impl AlsaProvider {
                      and the record id follows the card ID: it changes if the card ID changes.",
                 );
             }
-            let info = read_text_file(&pcm_directory.join("info"));
+            let info = read_text_file(&directory.join(format!("pcm{pcm}c/info")));
             if info.is_none() {
                 issue(
                     &mut issues,
