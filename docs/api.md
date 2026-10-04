@@ -76,7 +76,9 @@ rejected with HTTP 400, because revisions restart with every daemon.
 `POST /v1/peripherals/refresh` schedules a scan and returns
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}`; the
 refresh is complete when the catalog with that `instance_id` reaches
-`scan_sequence` `N`. Requests that arrive together share one scan.
+`scan_sequence` `N`. The daemon accepts every request but starts explicit
+refresh scans no more than once every five seconds; requests within that
+cooldown share the next scan.
 HTTP 503 means peripheral discovery is not running or has stopped, or the
 catalog file could not be written (for example, `/run` is full) and is out of
 date; the `error` says which, and the journal has details. In these cases

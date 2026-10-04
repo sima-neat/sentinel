@@ -70,7 +70,8 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 `POST /v1/peripherals/refresh` 會排定掃描並傳回
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}`；當具有
 該 `instance_id` 的目錄到達 `scan_sequence` `N` 時，重新整理即告完成。
-同時到達的要求會共用一次掃描。HTTP 503 表示周邊裝置探索未執行或已停止，
+守護程式會接受每個要求，但由明確重新整理觸發的掃描最多每五秒啟動一次；
+冷卻期間的要求會共用下一次掃描。HTTP 503 表示周邊裝置探索未執行或已停止，
 或者目錄檔案無法寫入（例如 `/run` 已滿）而過時；`error` 會說明原因，日誌中
 有詳細資訊。在這些情況下，`/v1/health` 會回報 `"peripherals": null`。
 Sentinel 每秒重試失敗的寫入，成功後恢復提供目錄。`GET /v1/peripherals`

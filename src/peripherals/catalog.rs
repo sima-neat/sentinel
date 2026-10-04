@@ -24,7 +24,6 @@ pub struct Catalog {
     last_attempt_at: Option<String>,
     error: Option<Value>,
     support: Option<SupportStatus>,
-    support_changed: bool,
 }
 
 impl Catalog {
@@ -43,15 +42,7 @@ impl Catalog {
             last_attempt_at: None,
             error: None,
             support: None,
-            support_changed: false,
         }
-    }
-
-    pub fn set_support(&mut self, support: SupportStatus) {
-        if self.support.as_ref() != Some(&support) {
-            self.support_changed = true;
-        }
-        self.support = Some(support);
     }
 
     pub fn scan_sequence(&self) -> u64 {
@@ -59,16 +50,27 @@ impl Catalog {
     }
 
     /// Record a scan in which at least one provider has usable records.
+    #[cfg(test)]
     pub fn apply_success(
         &mut self,
         devices: Vec<Record>,
         issues: Vec<Issue>,
     ) -> Result<(), String> {
-        self.apply(devices, issues, true)
+        self.apply(devices, issues, true, None)
+    }
+
+    pub fn apply_success_with_support(
+        &mut self,
+        devices: Vec<Record>,
+        issues: Vec<Issue>,
+        support: SupportStatus,
+    ) -> Result<(), String> {
+        self.apply(devices, issues, true, Some(support))
     }
 
     /// Republish the last scan's records after the support rules changed.
     /// No hardware was read, so `scan_sequence` and the timestamps stay put.
+    #[cfg(test)]
     pub fn apply_reclassification(
         &mut self,
         devices: Vec<Record>,
@@ -77,7 +79,19 @@ impl Catalog {
         if !self.initialized {
             return Ok(());
         }
-        self.apply(devices, issues, false)
+        self.apply(devices, issues, false, None)
+    }
+
+    pub fn apply_reclassification_with_support(
+        &mut self,
+        devices: Vec<Record>,
+        issues: Vec<Issue>,
+        support: SupportStatus,
+    ) -> Result<(), String> {
+        if !self.initialized {
+            return Ok(());
+        }
+        self.apply(devices, issues, false, Some(support))
     }
 
     fn apply(
@@ -85,11 +99,15 @@ impl Catalog {
         mut devices: Vec<Record>,
         mut issues: Vec<Issue>,
         scanned: bool,
+        support: Option<SupportStatus>,
     ) -> Result<(), String> {
         canonicalize_devices(&mut devices)?;
         canonicalize_issues(&mut issues)?;
         let recovered = !self.issues.is_empty() && issues.is_empty();
         let issues_changed = self.issues != issues;
+        let support_changed = support
+            .as_ref()
+            .is_some_and(|status| self.support.as_ref() != Some(status));
         if scanned {
             let now = utc_now();
             self.scan_sequence += 1;
@@ -104,8 +122,7 @@ impl Catalog {
         if first {
             self.initialized = true;
             self.revision = 1;
-            self.support_changed = false;
-        } else if devices_changed || issues_changed || std::mem::take(&mut self.support_changed) {
+        } else if devices_changed || issues_changed || support_changed {
             // `revision` changes whenever anything a client can see changes,
             // so polling with `since_revision` never hides a new state.
             self.revision += 1;
@@ -140,6 +157,9 @@ impl Catalog {
         }
         self.devices = devices;
         self.issues = issues;
+        if let Some(support) = support {
+            self.support = Some(support);
+        }
         Ok(())
     }
 

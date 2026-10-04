@@ -60,11 +60,11 @@ impl Scanner {
         let (devices, has_provider_result) = compose(&self.slots);
         // No providers at all is a valid, empty catalog rather than a failure.
         if has_provider_result || issues.is_empty() {
-            let (devices, issues) = self.classify(devices, issues, catalog);
+            let (devices, issues, support) = self.classify(devices, issues);
             // Providers own distinct id prefixes; a collision is a provider
             // bug. It still counts as a scan so refresh targets are reached.
             catalog
-                .apply_success(devices, issues)
+                .apply_success_with_support(devices, issues, support)
                 .inspect_err(|reason| {
                     catalog.apply_rejected_scan(reason);
                 })
@@ -80,19 +80,17 @@ impl Scanner {
         if !has_provider_result {
             return Ok(());
         }
-        let (devices, issues) = self.classify(devices, self.provider_issues.clone(), catalog);
-        catalog.apply_reclassification(devices, issues)
+        let (devices, issues, support) = self.classify(devices, self.provider_issues.clone());
+        catalog.apply_reclassification_with_support(devices, issues, support)
     }
 
     fn classify(
         &mut self,
         mut devices: Vec<Record>,
         mut issues: Vec<Issue>,
-        catalog: &mut Catalog,
-    ) -> (Vec<Record>, Vec<Issue>) {
+    ) -> (Vec<Record>, Vec<Issue>, super::support::SupportStatus) {
         let status = self.support.apply(&mut devices, &mut issues);
-        catalog.set_support(status);
-        (devices, issues)
+        (devices, issues, status)
     }
 }
 
@@ -237,7 +235,10 @@ mod tests {
     use super::testing::{record, Fake};
     use super::*;
     use crate::peripherals::model::CatalogDocument;
+    use crate::peripherals::support::core_rules;
+    use crate::peripherals::sysutil::testing::TempDir;
     use serde_json::json;
+    use std::fs;
 
     type Outcome = Result<Vec<Record>, ProviderError>;
     type Scanned = (CatalogDocument, Result<(), String>);
@@ -333,5 +334,51 @@ mod tests {
         for bad in ["", "Camera", "1cam", "id", "type", "provider", "cam era"] {
             assert!(!valid_type_token(bad), "{bad}");
         }
+    }
+
+    /// A rejected composed result retains both the previous devices and the
+    /// support metadata that classified them, even when the rules changed.
+    #[test]
+    fn rejected_catalog_does_not_commit_support_metadata() {
+        let root = TempDir::new();
+        let rules_path = root.path().join("neat-core.json");
+        fs::write(&rules_path, core_rules().to_string()).unwrap();
+        let camera = |provider: &str, id: &str| {
+            let details = json!({
+                "backend": "mipi",
+                "modes": [{
+                    "format": "NV12", "width": 1920, "height": 1080,
+                    "framerate_num": 30, "framerate_den": 1, "isp_output": true
+                }]
+            });
+            Ok(vec![record(provider, id, details)])
+        };
+        let providers = vec![
+            scripted(
+                "a",
+                vec![camera("a", "a:1"), camera("a", "same"), camera("a", "same")],
+            ),
+            scripted(
+                "b",
+                vec![camera("b", "b:1"), camera("b", "same"), camera("b", "same")],
+            ),
+        ];
+        let support = SupportStage::new(&rules_path);
+        let (mut scanner, mut catalog) = (Scanner::new(providers, support), Catalog::new("i", 16));
+        scanner.scan(&mut catalog).unwrap();
+        assert!(scanner.scan(&mut catalog).is_err());
+        let rejected = catalog.document();
+
+        let mut changed = core_rules();
+        changed["source"] = json!("neat-core changed");
+        changed["camera"]["formats"]["accept"] = json!([]);
+        fs::write(&rules_path, changed.to_string()).unwrap();
+        assert!(scanner.scan(&mut catalog).is_err());
+        let retained = catalog.document();
+        assert_eq!(retained.revision, rejected.revision);
+        assert_eq!(retained.support, rejected.support);
+        assert_eq!(retained.devices, rejected.devices);
+        assert_eq!(retained.support.unwrap().source.as_deref(), Some("neat-core 0.4.0"));
+        assert_eq!(retained.devices[0]["camera"]["modes"][0]["supported"], true);
     }
 }

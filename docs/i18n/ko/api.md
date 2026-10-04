@@ -69,7 +69,8 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 `POST /v1/peripherals/refresh`는 검색을 예약하고
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}`을 반환합니다.
 동일한 `instance_id`의 카탈로그가 `scan_sequence` `N`에 도달하면 새로 고침이
-완료됩니다. 동시에 도착한 요청은 검색 한 번을 공유합니다. HTTP 503은 주변 장치
+완료됩니다. 데몬은 모든 요청을 수락하지만 명시적 새로 고침 스캔은 5초에 한 번만
+시작합니다. 이 대기 시간 안에 들어온 요청은 다음 스캔 하나를 공유합니다. HTTP 503은 주변 장치
 검색이 실행되지 않거나 중지되었거나, 카탈로그 파일을 기록할 수 없어(예: `/run`
 공간 부족) 오래되었음을 뜻합니다. `error`에 원인이 있고 저널에 세부 정보가
 있습니다. 이 경우 `/v1/health`는 `"peripherals": null`을 보고합니다. Sentinel은

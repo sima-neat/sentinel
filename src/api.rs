@@ -645,6 +645,7 @@ mod tests {
             support_rules_path: root.join("neat-core.json"),
             instance_id: "instance-a".into(),
             debounce: Duration::from_millis(10),
+            refresh_cooldown: Duration::from_millis(10),
             listen_for_uevents: false,
         };
         let camera = record("p", "camera:x", json!({}));
@@ -701,6 +702,7 @@ mod tests {
             support_rules_path: root.join("neat-core.json"),
             instance_id: "instance-a".into(),
             debounce: Duration::from_millis(10),
+            refresh_cooldown: Duration::from_millis(10),
             listen_for_uevents: false,
         };
         let camera = record("p", "camera:x", json!({}));

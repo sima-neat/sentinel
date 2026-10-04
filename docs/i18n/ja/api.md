@@ -69,7 +69,9 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 `POST /v1/peripherals/refresh` はスキャンを予約し、
 `{"accepted": true, "target_scan_sequence": N, "instance_id": ...}` を返します。
 同じ `instance_id` のカタログが `scan_sequence` `N` に達すると更新完了です。
-同時に届いた要求は1回のスキャンを共有します。HTTP 503 は周辺機器の検出が
+デーモンはすべての要求を受け付けますが、明示的な更新によるスキャンの開始は
+5秒に1回までです。このクールダウン中の要求は次の1回のスキャンを共有します。
+HTTP 503 は周辺機器の検出が
 実行されていないか停止した、またはカタログファイルを書き込めず（例：`/run`
 が満杯）古くなっていることを意味します。`error` に理由が入り、詳細は
 ジャーナルにあります。この場合 `/v1/health` は `"peripherals": null` を

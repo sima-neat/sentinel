@@ -15,6 +15,9 @@ use super::support::{RulesWatch, SupportStage};
 use super::uevent::UeventSocket;
 
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
+/// Explicit refreshes are available on the local world-writable API socket;
+/// limit how often they can make the daemon enumerate hardware.
+pub const REFRESH_COOLDOWN: Duration = Duration::from_secs(5);
 /// Discovery yields to camera pipelines on a busy board. Scan threads inherit
 /// this from the peripherals thread.
 pub const NICE: libc::c_int = 10;
@@ -136,6 +139,7 @@ pub struct Config {
     pub support_rules_path: PathBuf,
     pub instance_id: String,
     pub debounce: Duration,
+    pub refresh_cooldown: Duration,
     /// Tests turn this off so host hot-plug events cannot trigger scans.
     pub listen_for_uevents: bool,
 }
@@ -240,8 +244,8 @@ fn run(
     let mut refresh_pending = false;
     // When the current burst of events began, to cap how long it can delay.
     let mut burst_start: Option<Instant> = None;
-    // Refresh requests within one debounce window of the last scan share the
-    // next scan, so a client that spams refresh cannot keep the thread busy.
+    // Refresh requests within the cooldown share the next scan, so a client
+    // that spams the world-writable API cannot keep the thread busy.
     let mut last_scan_end: Option<Instant> = None;
     // While the catalog cannot be written, when to try again.
     let mut retry_publish: Option<Instant> = None;
@@ -300,9 +304,11 @@ fn run(
                 return;
             }
             if std::mem::take(&mut schedule.refresh) {
-                let earliest = last_scan_end.map_or_else(Instant::now, |end| {
-                    (end + config.debounce).max(Instant::now())
-                });
+                let earliest = refresh_due(
+                    Instant::now(),
+                    last_scan_end,
+                    config.refresh_cooldown,
+                );
                 due = Some(due.map_or(earliest, |at| at.min(earliest)));
                 refresh_pending = true;
             }
@@ -378,6 +384,10 @@ fn run(
             retry_publish = write(&control, &config.catalog_path, &catalog);
         }
     }
+}
+
+fn refresh_due(now: Instant, last_scan_end: Option<Instant>, cooldown: Duration) -> Instant {
+    last_scan_end.map_or(now, |end| (end + cooldown).max(now))
 }
 
 /// Publish the catalog and record the outcome in `control`, so the API
@@ -486,6 +496,7 @@ mod tests {
             support_rules_path: root.join("support/neat-core.json"),
             instance_id: "test-instance".into(),
             debounce: Duration::from_millis(debounce),
+            refresh_cooldown: Duration::from_millis(debounce),
             listen_for_uevents: false,
         };
         spawn(config, vec![Box::new(provider)]).unwrap()
@@ -589,5 +600,17 @@ mod tests {
         assert_eq!(capped, start + MAX_EVENT_WAIT);
         let refresh = due(start, Some(start), true);
         assert_eq!(refresh, start, "a waiting refresh is not delayed");
+    }
+
+    #[test]
+    fn explicit_refreshes_respect_the_production_cooldown() {
+        let end = Instant::now();
+        let within = end + Duration::from_secs(1);
+        assert_eq!(
+            refresh_due(within, Some(end), REFRESH_COOLDOWN),
+            end + REFRESH_COOLDOWN
+        );
+        let after = end + REFRESH_COOLDOWN + Duration::from_secs(1);
+        assert_eq!(refresh_due(after, Some(end), REFRESH_COOLDOWN), after);
     }
 }

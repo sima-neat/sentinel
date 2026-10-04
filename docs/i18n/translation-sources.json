@@ -1,6 +1,6 @@
 {
   "ja": {
-    "docs/api.md": "510f28a6fa2378f14c765754fb22170e6bd3c1a9b01dbad8e0fd3158185f101f",
+    "docs/api.md": "7aa95a21e7f7cc480568356effd8a9e17dacdf6d982c17abd4943e8bcf747613",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -17,7 +17,7 @@
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "ko": {
-    "docs/api.md": "510f28a6fa2378f14c765754fb22170e6bd3c1a9b01dbad8e0fd3158185f101f",
+    "docs/api.md": "7aa95a21e7f7cc480568356effd8a9e17dacdf6d982c17abd4943e8bcf747613",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -34,7 +34,7 @@
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "uk": {
-    "docs/api.md": "510f28a6fa2378f14c765754fb22170e6bd3c1a9b01dbad8e0fd3158185f101f",
+    "docs/api.md": "7aa95a21e7f7cc480568356effd8a9e17dacdf6d982c17abd4943e8bcf747613",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -51,7 +51,7 @@
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "zh-Hant": {
-    "docs/api.md": "510f28a6fa2378f14c765754fb22170e6bd3c1a9b01dbad8e0fd3158185f101f",
+    "docs/api.md": "7aa95a21e7f7cc480568356effd8a9e17dacdf6d982c17abd4943e8bcf747613",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
