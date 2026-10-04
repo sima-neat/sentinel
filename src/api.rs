@@ -357,6 +357,7 @@ fn peripheral_summary(peripherals: &PeripheralsApi) -> Option<Value> {
     let body = fs::read(&peripherals.catalog_path).ok()?;
     let header: CatalogHeader = serde_json::from_slice(&body).ok()?;
     Some(json!({
+        "instance_id": header.instance_id,
         "state": header.state,
         "ready": header.ready,
         "stale": header.stale,
@@ -654,7 +655,8 @@ mod tests {
         let get = "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n";
         let health = "GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n";
         assert!(request(&socket, get).starts_with("HTTP/1.1 200"));
-        assert!(response_json(&request(&socket, health))["peripherals"].is_object());
+        let summary = &response_json(&request(&socket, health))["peripherals"];
+        assert_eq!(summary["instance_id"], "instance-a");
 
         thread.stop();
         let stopped_text = "peripheral discovery has stopped; see `journalctl -u simaai-sentinel`";

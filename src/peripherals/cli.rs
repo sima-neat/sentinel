@@ -47,7 +47,7 @@ pub fn run(settings: &Settings, api_socket: &Path, args: &[String]) -> Result<()
         wait_for_scan(catalog_path, &instance, target)?;
     }
     let document = read(catalog_path).context(CATALOG_UNAVAILABLE)?;
-    if !daemon_serves_catalog(api_socket) {
+    if !daemon_serves_catalog(api_socket, &document.instance_id) {
         eprintln!(
             "Warning: the Sentinel daemon is not running, so this catalog may be out of date; \
 check `systemctl status simaai-sentinel`."
@@ -103,11 +103,12 @@ fn test_provider(target: &str, settings: &Settings) -> Result<()> {
 }
 
 /// The catalog file outlives the daemon (a stop by SIGTERM leaves it as it
-/// was), and a daemon running without peripheral discovery leaves an old one
-/// in place, so the CLI trusts it only when the daemon's health reports a
-/// peripheral summary. A complete request keeps the daemon from logging a
-/// dropped connection.
-fn daemon_serves_catalog(api_socket: &Path) -> bool {
+/// was), a daemon running without peripheral discovery leaves an old one in
+/// place, and a daemon started with another `--peripherals-file` writes
+/// elsewhere, so the CLI trusts the file only when the daemon's health
+/// reports a peripheral summary for the same `instance_id`. A complete
+/// request keeps the daemon from logging a dropped connection.
+fn daemon_serves_catalog(api_socket: &Path, instance: &str) -> bool {
     let Ok(response) = exchange(
         api_socket,
         b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -116,7 +117,7 @@ fn daemon_serves_catalog(api_socket: &Path) -> bool {
     };
     let body = response.split_once("\r\n\r\n").map(|(_, body)| body);
     let health: Option<Value> = body.and_then(|body| serde_json::from_str(body).ok());
-    health.is_some_and(|health| health["peripherals"].is_object())
+    health.is_some_and(|health| health["peripherals"]["instance_id"].as_str() == Some(instance))
 }
 
 /// Send one request to the daemon and read its whole response.
@@ -301,15 +302,19 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
     }
 
     /// The catalog file outlives the daemon, so only a running daemon whose
-    /// health reports a peripheral summary vouches for it. The probe is one
-    /// complete health request, so the daemon logs nothing.
+    /// health reports a peripheral summary for the same instance vouches for
+    /// it; a daemon writing another `--peripherals-file` does not. The probe
+    /// is one complete health request, so the daemon logs nothing.
     #[test]
-    fn only_a_daemon_with_peripheral_discovery_vouches_for_the_catalog() {
-        assert!(!daemon_serves_catalog(Path::new("/nonexistent/api.sock")));
+    fn only_the_daemon_that_wrote_the_catalog_vouches_for_it() {
+        let nonexistent = Path::new("/nonexistent/api.sock");
+        assert!(!daemon_serves_catalog(nonexistent, "i"));
         let dir = TempDir::new();
         let path = dir.path().join("api.sock");
         for (body, live) in [
-            (r#"{"status":"ok","peripherals":{"ready":true}}"#, true),
+            (r#"{"status":"ok","peripherals":{"instance_id":"i"}}"#, true),
+            (r#"{"peripherals":{"instance_id":"j"}}"#, false), // other file
+            (r#"{"status":"ok","peripherals":{"ready":true}}"#, false),
             (r#"{"status":"ok","peripherals":null}"#, false), // --no-peripherals
             (r#"{"status":"ok"}"#, false),
             ("", false),
@@ -325,11 +330,12 @@ Peripherals  degraded  revision 3  scan 2  updated <time>
                 stream.write_all(response.as_bytes()).unwrap();
                 String::from_utf8_lossy(&request[..length]).into_owned()
             });
-            assert_eq!(daemon_serves_catalog(&path), live, "health body {body:?}");
+            let served = daemon_serves_catalog(&path, "i");
+            assert_eq!(served, live, "health body {body:?}");
             let request = server.join().unwrap();
             assert!(request.starts_with("GET /v1/health HTTP/1.1\r\n"));
         }
-        let stale = daemon_serves_catalog(&path);
+        let stale = daemon_serves_catalog(&path, "i");
         assert!(!stale, "a stale socket file is not a running daemon");
     }
 }
