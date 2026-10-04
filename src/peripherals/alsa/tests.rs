@@ -399,6 +399,17 @@ fn stream_formats_cover_the_class() {
     let playback_only =
         "Card : USB Audio\n\nPlayback:\n  Interface 1\n    Altset 1\n    Format: S16_LE\n";
     assert!(capture_modes(playback_only).is_empty());
+    let injected_capture = concat!(
+        "Device title\nCapture:\n  Interface 9\n    Altset 9\n",
+        "    Format: FAKE\n    Channels: 99\n    Rates: 99999\n\n",
+        "Capture:\n  Interface 1\n    Altset 1\n    Format: S16_LE\n",
+        "    Channels: 1\n    Rates: 48000\n"
+    );
+    assert_eq!(
+        Value::from(capture_modes(injected_capture)),
+        json!([{"format": "S16_LE", "interface": 1, "altset": 1,
+                "channels": 1, "rates_hz": [48000]}])
+    );
     assert_eq!(keyword_number("Interface = 1", "Interface"), None);
     assert_eq!(
         keyword_number("Interface 99999999999", "Interface"),

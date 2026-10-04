@@ -172,6 +172,13 @@ fn capture_modes(text: &str) -> Vec<Value> {
             parsed.extend(current.take());
             capture = stripped == "Capture:";
             interface = None;
+            // The device-controlled stream title can contain newlines and
+            // imitate an earlier capture section. The kernel's real section
+            // is the final top-level `Capture:` block, so discard anything
+            // accumulated before it.
+            if capture {
+                parsed.clear();
+            }
             continue;
         }
         if !capture {
