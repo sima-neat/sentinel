@@ -55,13 +55,13 @@ MIPI CSI-2 センサーと USB Video Class（UVC）カメラを対象にしま�
 | `framerate_num`, `framerate_den` | integer | always | フレームレート。USB は広告された最速の間隔を使用 |
 | `frame_intervals` | array | USB | デバイスが広告するすべての間隔 |
 | `isp_output` | bool | MIPI | `true`: ISP 出力サイズ |
-| `framerate_source` | string | MIPI | `isp`（ISP フレーム間隔）、`sensor_timing`（`max_fps` までのレート）、または `nominal`（30/1: どちらも不明） |
+| `framerate_source` | string | MIPI | `isp`（ISP の離散フレーム間隔、または間隔範囲の最速の有効レート）、`sensor_timing`（`max_fps` までのレート）、または `nominal`（30/1: どちらも不明） |
 | `supported`, `reason` | bool, string | always | Neat Core のルールに基づきサポート段階が追加 |
 
 MIPI モードは ISP 出力ノードの形式と離散サイズであり、`CameraInput` が実際にキャプチャできる内容です。
 libcamera は ISP が生成できないサイズを含む、より長い一覧を広告します（sima-neat/core#883 参照）。
 
-サイズごとの MIPI フレームレートは、ISP が離散フレーム間隔を示す場合はその値です。それ以外で
+サイズごとの MIPI フレームレートは、ISP が離散フレーム間隔を示す場合はその値、またはステップワイズ／連続の間隔範囲で最速の有効レートです。それ以外で
 `max_fps` が分かる場合は、`max_fps` を最も近い整数（最低 1）に丸めたレートと、それ以下の
 標準レート 60、30、25、20、15、10、5 を速い順に生成します（66.18 なら 66、60、30、25、
 20、15、10、5）。どちらも不明なら公称 30/1 モードを 1 つ生成します。`max_fps` はセンサーの

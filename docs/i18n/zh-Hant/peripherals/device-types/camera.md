@@ -55,14 +55,14 @@ Neat 應用程式可擷取影像的感測器：位於 Modalix ISP 後方的 MIPI
 | `framerate_num`, `framerate_den` | 整數 | 永遠 | 影格率；USB 使用公告的最快間隔 |
 | `frame_intervals` | 陣列 | USB | 裝置公告的每個間隔 |
 | `isp_output` | 布林值 | MIPI | `true`：ISP 輸出尺寸 |
-| `framerate_source` | 字串 | MIPI | `isp`（ISP 影格間隔）、`sensor_timing`（不超過 `max_fps` 的影格率），或 `nominal`（兩者皆未知時為 30/1） |
+| `framerate_source` | 字串 | MIPI | `isp`（離散 ISP 影格間隔，或間隔範圍中最快的有效影格率）、`sensor_timing`（不超過 `max_fps` 的影格率），或 `nominal`（兩者皆未知時為 30/1） |
 | `supported`, `reason` | 布林值、字串 | 永遠 | 由 Neat Core 規則的支援階段加入 |
 
 MIPI 模式是 ISP 輸出節點的格式與離散尺寸，也就是 `CameraInput` 實際可
 擷取的內容。libcamera 會公告更長的清單，其中包含 ISP 無法產生的尺寸
 （見 sima-neat/core#883）。
 
-各尺寸的 MIPI 影格率：若 ISP 列出離散影格間隔，就使用該清單。否則，
+各尺寸的 MIPI 影格率：若 ISP 列出離散影格間隔，就使用該清單；若列出步進／連續間隔範圍，則使用其中最快的有效影格率。否則，
 若已知 `max_fps`，就為四捨五入至最接近整數的 `max_fps`（至少為 1），以及
 所有低於它的標準影格率 60、30、25、20、15、10 和 5 各建立一個模式，
 由快至慢排列（66.18 會產生 66、60、30、25、20、15、10、5）。若仍未知，

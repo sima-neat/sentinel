@@ -55,13 +55,13 @@ USB Video Class(UVC) 카메라를 다룹니다.
 | `framerate_num`, `framerate_den` | integer | always | 프레임 속도. USB는 알린 간격 중 가장 빠른 값을 사용 |
 | `frame_intervals` | array | USB | 장치가 알리는 모든 간격 |
 | `isp_output` | bool | MIPI | `true`: ISP 출력 크기 |
-| `framerate_source` | string | MIPI | `isp`(ISP 프레임 간격), `sensor_timing`(`max_fps`까지 제공하는 속도), 또는 `nominal`(30/1: 둘 다 알 수 없음) |
+| `framerate_source` | string | MIPI | `isp`(ISP의 이산 프레임 간격 또는 간격 범위에서 가장 빠른 유효 속도), `sensor_timing`(`max_fps`까지 제공하는 속도), 또는 `nominal`(30/1: 둘 다 알 수 없음) |
 | `supported`, `reason` | bool, string | always | Neat Core 규칙에 따라 지원 단계에서 추가 |
 
 MIPI 모드는 ISP 출력 노드의 형식과 이산 크기이며 `CameraInput`이 실제로 캡처할 수 있는 값입니다.
 libcamera는 ISP가 생성할 수 없는 크기를 포함한 더 긴 목록을 알립니다(sima-neat/core#883 참조).
 
-크기별 MIPI 프레임 속도는 ISP가 이산 프레임 간격을 제공하면 그 값을 사용합니다. 그렇지 않고 `max_fps`를
+크기별 MIPI 프레임 속도는 ISP가 이산 프레임 간격을 제공하면 그 값을 사용하거나, 단계형/연속형 간격 범위에서는 가장 빠른 유효 속도를 사용합니다. 그렇지 않고 `max_fps`를
 알 수 있으면 `max_fps`를 가장 가까운 정수(최소 1)로 반올림한 속도와 그 이하의 표준 속도 60, 30, 25,
 20, 15, 10, 5를 빠른 순서로 제공합니다(66.18이면 66, 60, 30, 25, 20, 15, 10, 5).
 그 외에는 공칭 30/1 모드 하나를 사용합니다. `max_fps`는 센서의 활성 형식에서의 한계이며 모든 ISP 크기에
