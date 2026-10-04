@@ -99,6 +99,7 @@ impl Provider for MipiProvider {
                 Err(error) => return Err(error),
             }
         }
+        sensors.retain(|sensor| !vanished(&sensor.media_path));
         if sensors.is_empty() {
             return Ok(Vec::new());
         }
@@ -112,6 +113,9 @@ impl Provider for MipiProvider {
                 BTreeSet::new(),
             ),
         };
+        // ISP enumeration can race with a media-device unplug. Drop stale
+        // sensors before they participate in duplicate-name validation.
+        sensors.retain(|sensor| !vanished(&sensor.media_path));
         // Name order is id order; the stable sort keeps the earlier device first.
         sensors.sort_by(|a, b| a.name.cmp(&b.name));
         if let Some([a, b]) = sensors.windows(2).find(|pair| pair[0].name == pair[1].name) {
@@ -122,10 +126,13 @@ impl Provider for MipiProvider {
             );
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
-        let records = sensors.into_iter().map(|sensor| {
+        let records = sensors.into_iter().filter_map(|sensor| {
             let timing = sensor
                 .subdev
                 .and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
+            if vanished(&sensor.media_path) {
+                return None;
+            }
             let mut details = json!({
                 "camera_name": sensor.name,
                 "backend": "mipi",
@@ -149,12 +156,12 @@ impl Provider for MipiProvider {
             if !sensor.bus_info.is_empty() {
                 details["bus_info"] = json!(sensor.bus_info);
             }
-            Record {
+            Some(Record {
                 id: format!("camera:{}", sensor.name),
                 kind: "camera".to_string(),
                 provider: PROVIDER_NAME.to_string(),
                 details,
-            }
+            })
         });
         Ok(records.collect())
     }
@@ -162,6 +169,8 @@ impl Provider for MipiProvider {
 
 struct Sensor {
     name: String,
+    /// Original path for filesystem checks; `media_device` is display-only.
+    media_path: PathBuf,
     media_device: String,
     bus_info: String,
     /// The entity the sensor's source pad links to.
@@ -389,6 +398,7 @@ fn probe_media_device(backend: &dyn Backend, path: &Path) -> Result<Vec<Sensor>,
             let reason = format!("media device {path} has an unnamed sensor entity {id}");
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
+        let media_path = path.to_path_buf();
         let (media_device, bus_info) = (path.to_string_lossy().into_owned(), bus_info.clone());
         let link = source_link(&graph, entity.id);
         let csi_receiver = link
@@ -398,6 +408,7 @@ fn probe_media_device(backend: &dyn Backend, path: &Path) -> Result<Vec<Sensor>,
         let subdev = subdev_devnode(&graph, entity.id).zip(pad);
         sensors.push(Sensor {
             name,
+            media_path,
             media_device,
             bus_info,
             csi_receiver,

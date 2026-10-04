@@ -15,6 +15,8 @@ use crate::peripherals::videodev2::*;
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::sync::atomic::Ordering::SeqCst;
 
 const SENSOR: u32 = MEDIA_ENT_F_CAM_SENSOR;
@@ -41,9 +43,31 @@ fn einval() -> io::Error {
 }
 
 /// A media device; `MEDIA_IOC_G_TOPOLOGY` fails with the errno in `.2`, after
-/// the device was unplugged (its `/dev` node removed once open) when set.
+/// the device was unplugged (its `/dev` node removed once open) when set. `.3`
+/// removes the node after a successful topology read.
 #[derive(Clone, Default)]
-struct FakeMedia(MediaDeviceInfo, Graph, Option<(i32, bool)>);
+struct FakeMedia(MediaDeviceInfo, Graph, Option<(i32, bool)>, bool);
+
+struct OpenFakeMedia {
+    node: FakeMedia,
+    path: Option<PathBuf>,
+}
+
+impl MediaNode for OpenFakeMedia {
+    fn device_info(&mut self, value: &mut MediaDeviceInfo) -> io::Result<()> {
+        self.node.device_info(value)
+    }
+
+    fn topology(&mut self, graph: &mut Graph) -> io::Result<()> {
+        let result = self.node.topology(graph);
+        if result.is_ok() {
+            if let Some(path) = self.path.take() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        result
+    }
+}
 
 /// Fills `room` with `items` (left alone when not requested); `ENOSPC` when
 /// they do not fit.
@@ -242,7 +266,12 @@ fn isp(node: FakeVideoNode) -> Video {
 type Nodes<T> = HashMap<PathBuf, Node<T>>;
 
 #[derive(Clone, Default)]
-struct Fakes(Nodes<FakeMedia>, Nodes<FakeVideoNode>, Nodes<FakeSubdev>);
+struct Fakes(
+    Nodes<FakeMedia>,
+    Nodes<FakeVideoNode>,
+    Nodes<FakeSubdev>,
+    Option<PathBuf>,
+);
 
 /// Opening a node the test did not declare is a test failure.
 fn open<T: Clone>(nodes: &Nodes<T>, path: &Path) -> io::Result<T> {
@@ -256,10 +285,14 @@ impl Backend for Fakes {
         if node.2.is_some_and(|(_, unplugged)| unplugged) {
             fs::remove_file(path).unwrap();
         }
-        Ok(Box::new(node))
+        let unplug = node.3.then(|| path.to_path_buf());
+        Ok(Box::new(OpenFakeMedia { node, path: unplug }))
     }
 
     fn open_video(&self, path: &Path) -> io::Result<Box<dyn VideoNode>> {
+        if let Some(media) = self.3.as_ref().filter(|media| media.exists()) {
+            fs::remove_file(media).unwrap();
+        }
         Ok(Box::new(open(&self.1, path)?))
     }
 
@@ -277,28 +310,49 @@ fn scan(
     video: impl IntoIterator<Item = Video>,
     subdevs: impl IntoIterator<Item = Subdev>,
 ) -> Result<Vec<Record>, ProviderError> {
+    scan_with(OsString::from("dev"), media, video, subdevs, None)
+}
+
+fn scan_in(
+    dev_name: OsString,
+    media: impl IntoIterator<Item = Node<FakeMedia>>,
+    video: impl IntoIterator<Item = Video>,
+    subdevs: impl IntoIterator<Item = Subdev>,
+) -> Result<Vec<Record>, ProviderError> {
+    scan_with(dev_name, media, video, subdevs, None)
+}
+
+fn scan_with(
+    dev_name: OsString,
+    media: impl IntoIterator<Item = Node<FakeMedia>>,
+    video: impl IntoIterator<Item = Video>,
+    subdevs: impl IntoIterator<Item = Subdev>,
+    unplug_during_video: Option<usize>,
+) -> Result<Vec<Record>, ProviderError> {
     let directory = TempDir::new();
     let (root, mut fakes) = (directory.path(), Fakes::default());
-    for name in ["dev/media", "dev/media0x"] {
-        write_file(&root.join(name), "");
+    let dev = root.join(dev_name);
+    for name in ["media", "media0x"] {
+        write_file(&dev.join(name), "");
     }
     for (index, node) in media.into_iter().enumerate() {
-        write_file(&root.join(format!("dev/media{index}")), "");
-        fakes.0.insert(root.join(format!("dev/media{index}")), node);
+        write_file(&dev.join(format!("media{index}")), "");
+        fakes.0.insert(dev.join(format!("media{index}")), node);
     }
+    fakes.3 = unplug_during_video.map(|index| dev.join(format!("media{index}")));
     for (index, (name, node)) in video.into_iter().enumerate() {
         let sysfs = root.join(format!("sys/class/video4linux/video{index}/name"));
         write_file(&sysfs, &format!("{name}\n"));
-        fakes.1.insert(root.join(format!("dev/video{index}")), node);
+        fakes.1.insert(dev.join(format!("video{index}")), node);
     }
     for (name, (major, minor), node) in subdevs {
         let link = root.join(format!("sys/dev/char/{major}:{minor}"));
         fs::create_dir_all(link.parent().unwrap()).unwrap();
         let target = format!("../../devices/platform/csi/video4linux/{name}");
         std::os::unix::fs::symlink(target, link).unwrap();
-        fakes.2.insert(root.join("dev").join(name), node);
+        fakes.2.insert(dev.join(name), node);
     }
-    let mut provider = MipiProvider::with_roots(root.join("sys"), root.join("dev"));
+    let mut provider = MipiProvider::with_roots(root.join("sys"), dev);
     provider.backend = Box::new(fakes);
     on_board(root, provider.discover())
 }
@@ -478,6 +532,34 @@ fn media_device_unplugged_after_open_is_skipped() {
     let eio = os_message(&io::Error::from_raw_os_error(libc::EIO));
     let reason = format!("failed to read the media topology of /dev/media0: {eio}");
     assert_eq!((error.code, error.reason), (CODE_IO_OPEN.into(), reason));
+}
+
+/// A media node removed after a successful topology read is rechecked and
+/// skipped instead of publishing the sensors read from the stale graph.
+#[test]
+fn media_device_unplugged_after_topology_is_skipped() {
+    let mut first = real_media(&[IMX477]).unwrap();
+    first.3 = true;
+    let ov5647 = [(9, "ov5647", SENSOR)];
+    let second = media(SIMA_MEDIA_DRIVER, "platform:csi2video@2", &ov5647);
+    let records = scan([Ok(first), second], [], []).unwrap();
+    let names = Vec::from_iter(records.iter().map(|record| &record.details["camera_name"]));
+    assert_eq!(names, ["ov5647"]);
+
+    let dev_name = OsString::from_vec(b"dev-\xff".to_vec());
+    let records = scan_in(dev_name, [real_media(&[IMX477])], [], []).unwrap();
+    assert_eq!(records.len(), 1, "non-UTF-8 roots retain their media path");
+
+    let records = scan_with(
+        OsString::from("dev"),
+        [real_media(&[IMX477]), real_media(&[IMX477])],
+        [isp(real_isp())],
+        [],
+        Some(0),
+    )
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].details["media_device"], "/dev/media1");
 }
 
 /// Several ISP nodes report the modes they share; a node with another card
