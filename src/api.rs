@@ -333,10 +333,17 @@ fn peripheral_catalog(
         .transpose()?;
     let body = read_peripheral_catalog(&peripherals.catalog_path, peripherals.control.as_deref())
         .map_err(|error| {
-        unavailable(format!(
-            "peripheral catalog unavailable: {}: {error}",
-            peripherals.catalog_path.display()
-        ))
+        let message = error.to_string();
+        if message == "peripheral discovery has stopped" {
+            peripherals_stopped()
+        } else if message.starts_with("peripheral catalog could not be written:") {
+            unavailable(format!("{message}; see `journalctl -u simaai-sentinel`"))
+        } else {
+            unavailable(format!(
+                "peripheral catalog unavailable: {}: {error}",
+                peripherals.catalog_path.display()
+            ))
+        }
     })?;
     let header: CatalogHeader = serde_json::from_slice(&body)
         .map_err(|error| unavailable(format!("peripheral catalog unreadable: {error}")))?;
