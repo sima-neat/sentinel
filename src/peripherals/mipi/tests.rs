@@ -17,7 +17,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::Arc;
 
 const SENSOR: u32 = MEDIA_ENT_F_CAM_SENSOR;
 const SUBDEV: u32 = 0x0002_0000; // MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN
@@ -44,9 +45,17 @@ fn einval() -> io::Error {
 
 /// A media device; `MEDIA_IOC_G_TOPOLOGY` fails with the errno in `.2`, after
 /// the device was unplugged (its `/dev` node removed once open) when set. `.3`
-/// removes the node after a successful topology read.
+/// removes the node after a successful topology read. `.4` replaces the graph
+/// after the first open, counted by `.5`.
 #[derive(Clone, Default)]
-struct FakeMedia(MediaDeviceInfo, Graph, Option<(i32, bool)>, bool);
+struct FakeMedia(
+    MediaDeviceInfo,
+    Graph,
+    Option<(i32, bool)>,
+    bool,
+    Option<Graph>,
+    Arc<AtomicUsize>,
+);
 
 struct OpenFakeMedia {
     node: FakeMedia,
@@ -314,7 +323,12 @@ fn open<T: Clone>(nodes: &Nodes<T>, path: &Path) -> io::Result<T> {
 
 impl Backend for Fakes {
     fn open_media(&self, path: &Path) -> io::Result<Box<dyn MediaNode>> {
-        let node = open(&self.0, path)?;
+        let mut node = open(&self.0, path)?;
+        if node.5.fetch_add(1, SeqCst) > 0 {
+            if let Some(graph) = &node.4 {
+                node.1 = graph.clone();
+            }
+        }
         if node.2.is_some_and(|(_, unplugged)| unplugged) {
             fs::remove_file(path).unwrap();
         }
@@ -604,6 +618,17 @@ fn media_device_unplugged_after_topology_is_skipped() {
     .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].details["media_device"], "/dev/media1");
+}
+
+/// A sensor driver can unbind while its media controller node remains. The
+/// final topology check drops the stale sensor entity before publication.
+#[test]
+fn sensor_unbound_after_topology_is_skipped() {
+    let mut changing = real_media(&[IMX477]).unwrap();
+    changing.4 = Some(real_media(&[]).unwrap().1);
+
+    let records = scan([Ok(changing)], [], []).unwrap();
+    assert!(records.is_empty());
 }
 
 /// An ISP class entry removed while its open handle is queried or after it

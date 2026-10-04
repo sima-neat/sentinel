@@ -117,9 +117,25 @@ impl Provider for MipiProvider {
         // ISP enumeration can race with a media-device unplug. Drop stale
         // sensors before they participate in duplicate-name validation.
         sensors.retain(|sensor| !vanished(&sensor.media_path));
+        let mut sensors = sensors
+            .into_iter()
+            .filter_map(|sensor| {
+                let timing = sensor
+                    .subdev
+                    .and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
+                match sensor_is_present(backend, &sensor) {
+                    Ok(true) => Some(Ok((sensor, timing))),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         // Name order is id order; the stable sort keeps the earlier device first.
-        sensors.sort_by(|a, b| a.name.cmp(&b.name));
-        if let Some([a, b]) = sensors.windows(2).find(|pair| pair[0].name == pair[1].name) {
+        sensors.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
+        if let Some([(a, _), (b, _)]) = sensors
+            .windows(2)
+            .find(|pair| pair[0].0.name == pair[1].0.name)
+        {
             let reason = format!(
                 "MIPI sensor name {:?} is reported by both {} and {}; \
                  the camera name would be ambiguous.",
@@ -127,13 +143,7 @@ impl Provider for MipiProvider {
             );
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
-        let records = sensors.into_iter().filter_map(|sensor| {
-            let timing = sensor
-                .subdev
-                .and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
-            if vanished(&sensor.media_path) {
-                return None;
-            }
+        let records = sensors.into_iter().map(|(sensor, timing)| {
             let mut details = json!({
                 "camera_name": sensor.name,
                 "backend": "mipi",
@@ -157,18 +167,19 @@ impl Provider for MipiProvider {
             if !sensor.bus_info.is_empty() {
                 details["bus_info"] = json!(sensor.bus_info);
             }
-            Some(Record {
+            Record {
                 id: format!("camera:{}", sensor.name),
                 kind: "camera".to_string(),
                 provider: PROVIDER_NAME.to_string(),
                 details,
-            })
+            }
         });
         Ok(records.collect())
     }
 }
 
 struct Sensor {
+    entity_id: u32,
     name: String,
     /// Original path for filesystem checks; `media_device` is display-only.
     media_path: PathBuf,
@@ -178,6 +189,16 @@ struct Sensor {
     csi_receiver: Option<String>,
     /// The sensor's sub-device interface `(major, minor)` and source pad index.
     subdev: Option<((u32, u32), u32)>,
+}
+
+/// Re-read the media graph after optional sensor timing and ISP discovery.
+/// The controller node can survive a driver unbind, so its existence alone
+/// does not prove that this sensor entity is still present.
+fn sensor_is_present(backend: &dyn Backend, sensor: &Sensor) -> Result<bool, ProviderError> {
+    let current = probe_media_device(backend, &sensor.media_path)?;
+    Ok(current
+        .iter()
+        .any(|candidate| candidate.entity_id == sensor.entity_id && candidate.name == sensor.name))
 }
 
 /// The sensor's active source-pad format and the controls that bound its
@@ -408,6 +429,7 @@ fn probe_media_device(backend: &dyn Backend, path: &Path) -> Result<Vec<Sensor>,
         let pad = link.map(|(pad, _)| pad.index).filter(|_| pad_index_known);
         let subdev = subdev_devnode(&graph, entity.id).zip(pad);
         sensors.push(Sensor {
+            entity_id: entity.id,
             name,
             media_path,
             media_device,
