@@ -696,8 +696,8 @@ fn unreadable_usb_attributes_fail_the_scan() {
 
 /// A kernel without ALSA, or without sound cards, has no microphones. A
 /// stale or unparsable global card list only loses name and driver. An
-/// unreadable list, a present card with no `device` link, and an incomplete
-/// USB ancestor fail the scan. A card already removed is skipped.
+/// unreadable list, a sound class that cannot be checked, a present card with
+/// no `device` link, and an incomplete USB ancestor fail the scan. A card already removed is skipped.
 #[test]
 fn absent_alsa_and_partial_snapshots_are_handled() {
     let board = Board::new();
@@ -707,6 +707,20 @@ fn absent_alsa_and_partial_snapshots_are_handled() {
     assert!(
         provider.discover().unwrap().is_empty(),
         "no ALSA in the kernel"
+    );
+    // A sound class that cannot be checked is an error, not "no ALSA".
+    let broken = TempDir::new();
+    fs::write(broken.path().join("class"), "").unwrap();
+    let mut provider =
+        AlsaProvider::with_roots(broken.path().join("asound"), broken.path(), "/dev");
+    let error = provider.discover().unwrap_err();
+    assert_eq!(error.code, "io.open");
+    assert!(
+        error
+            .reason
+            .starts_with("failed to inspect ALSA sysfs class"),
+        "{}",
+        error.reason
     );
 
     let fail = |board: &Board| {

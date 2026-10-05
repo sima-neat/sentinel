@@ -384,8 +384,13 @@ fn fnv1a(text: &str) -> u64 {
 impl AlsaProvider {
     fn scan(&self) -> Result<Vec<Microphone>, ProviderError> {
         let sound_class = self.sys_root.join("class/sound");
-        // A kernel without ALSA has no sound class and no microphones.
-        if !sound_class.exists() {
+        // A kernel without ALSA has no sound class and no microphones; a
+        // class that cannot be checked fails the scan.
+        let inspect = "failed to inspect ALSA sysfs class";
+        let present = sound_class
+            .try_exists()
+            .map_err(|error| io_error(inspect, &sound_class, &error, false))?;
+        if !present {
             return Ok(Vec::new());
         }
         let cards = numbered(&sound_class, "card", "")?;
