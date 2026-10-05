@@ -11,7 +11,7 @@ installed on the DevKit:
 ```bash
 ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py health'
 ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py start --name test-run --tag manual'
-ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py stop'
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py stop --id TRACE_ID'
 ```
 
 For a read-only request without the remote skill, execute `curl` through SSH:
@@ -30,6 +30,7 @@ Keep the API on the Unix socket; do not create an unauthenticated TCP bridge.
 | `active` | `GET /v1/traces/active` |
 | `start` | `POST /v1/traces` with `name`, optional `note`, and `tags` |
 | `stop` | `POST /v1/traces/stop` |
+| `stop --id ID` | `POST /v1/traces/{id}/stop` |
 | `runs` | `GET /v1/runs` |
 | `run NAME` | `GET /v1/runs/NAME` |
 | `compare A B...` | `GET /v1/compare?runs=A,B,...` |
@@ -43,4 +44,6 @@ run. Add `raw=1` to the compare query only when timestamped samples are needed.
 
 Only one trace can be active. Starting while another trace is active or
 stopping when none is active returns a conflict response. Always inspect
-`GET /v1/traces/active` before changing trace state.
+`GET /v1/traces/active` before changing trace state. Clients that retain an
+observed trace ID should use the conditional stop route; it returns a conflict
+without stopping a replacement trace if the active ID changed.

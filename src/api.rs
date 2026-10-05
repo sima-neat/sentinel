@@ -314,6 +314,15 @@ fn route(
             let summary = runs::summary(&run);
             Ok(json!({"schema": 1, "trace": run.metadata, "summary": summary}))
         }
+        ("POST", path) if path.starts_with("/v1/traces/") && path.ends_with("/stop") => {
+            let trace_id = percent_decode(&path[11..path.len() - 5])?;
+            if trace_id.is_empty() {
+                return Err(bad_request("trace ID must not be empty"));
+            }
+            let run = runs::stop_if_active(runs_dir, &trace_id).map_err(conflict)?;
+            let summary = runs::summary(&run);
+            Ok(json!({"schema": 1, "trace": run.metadata, "summary": summary}))
+        }
         ("GET", "/v1/runs") => Ok(json!({
             "schema": 1,
             "runs": runs::list(runs_dir).map_err(internal)?,
@@ -518,19 +527,42 @@ mod tests {
             "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Length: 31\r\n\r\n{\"name\":\"agent-test\",\"tags\":[]}",
         );
         assert!(started.contains("agent-test"), "{started}");
+        let trace_id = response_json(&started)["trace"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let stopped_response = request(
+            &socket_path,
+            &format!(
+                "POST /v1/traces/{trace_id}/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert!(stopped_response.contains("agent-test"));
+        let replacement = request(
+            &socket_path,
+            "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Length: 33\r\n\r\n{\"name\":\"agent-test-2\",\"tags\":[]}",
+        );
+        let replacement_id = response_json(&replacement)["trace"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let conflict = request(
+            &socket_path,
+            &format!(
+                "POST /v1/traces/{trace_id}/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert!(conflict.starts_with("HTTP/1.1 409 Conflict"), "{conflict}");
+        let active = response_json(&request(
+            &socket_path,
+            "GET /v1/traces/active HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ));
+        assert_eq!(active["trace"]["id"], replacement_id);
         let stopped_response = request(
             &socket_path,
             "POST /v1/traces/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
         );
-        assert!(stopped_response.contains("agent-test"));
-        request(
-            &socket_path,
-            "POST /v1/traces HTTP/1.1\r\nHost: localhost\r\nContent-Length: 33\r\n\r\n{\"name\":\"agent-test-2\",\"tags\":[]}",
-        );
-        request(
-            &socket_path,
-            "POST /v1/traces/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-        );
+        assert!(stopped_response.contains("agent-test-2"));
         let compact = response_json(&request(
             &socket_path,
             "GET /v1/compare?runs=agent-test,agent-test-2 HTTP/1.1\r\nHost: localhost\r\n\r\n",

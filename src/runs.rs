@@ -163,12 +163,29 @@ pub fn start(
 }
 
 pub fn stop(directory: &Path) -> Result<SavedRun> {
+    stop_expected(directory, None)
+}
+
+pub fn stop_if_active(directory: &Path, expected_id: &str) -> Result<SavedRun> {
+    stop_expected(directory, Some(expected_id))
+}
+
+fn stop_expected(directory: &Path, expected_id: Option<&str>) -> Result<SavedRun> {
     let _lock = StoreLock::acquire(directory)?;
     let path = active_path(directory);
     if !path.exists() {
         bail!("no checkpoint is currently recording");
     }
     let mut run = read_active_unlocked(directory)?;
+    if let Some(expected_id) = expected_id {
+        if expected_id != run.metadata.id {
+            bail!(
+                "active checkpoint changed: expected '{}', found '{}'",
+                expected_id,
+                run.metadata.id
+            );
+        }
+    }
     run.metadata.ended_at = Some(Utc::now());
     let destination = completed_path(directory, &run.metadata.id);
     write_json_atomic(&destination, &run)?;
@@ -1043,6 +1060,25 @@ mod tests {
         assert!(delete(&directory, "same").is_err());
         stop(&directory).unwrap();
         assert!(start(&directory, &cache, "same", None, vec![]).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn conditional_stop_preserves_a_replacement_trace() {
+        let directory = temp_dir();
+        let cache = cache();
+        let first = start(&directory, &cache, "first", None, vec![]).unwrap();
+        stop_if_active(&directory, &first.metadata.id).unwrap();
+        let replacement = start(&directory, &cache, "replacement", None, vec![]).unwrap();
+
+        let error = stop_if_active(&directory, &first.metadata.id).unwrap_err();
+
+        assert!(error.to_string().contains("active checkpoint changed"));
+        assert_eq!(
+            active_metadata(&directory).unwrap().unwrap().metadata.id,
+            replacement.metadata.id
+        );
+        stop(&directory).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 

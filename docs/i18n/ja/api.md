@@ -20,6 +20,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/traces/active` | アクティブなトレース、または`null`。 |
 | `POST /v1/traces` | 名前付きトレースを開始します。 |
 | `POST /v1/traces/stop` | アクティブなトレースを停止して保存します。 |
+| `POST /v1/traces/{id}/stop` | アクティブなトレースのIDがまだ一致する場合にのみ、そのトレースを停止します。 |
 | `GET /v1/runs` | アクティブな実行と完了した実行の概要を一覧表示します。 |
 | `GET /v1/runs/{name-or-id}` | 保存された実行とその生サンプルを取得します。 |
 | `GET /v1/compare?runs=A,B` | 2つ以上の実行を比較します。最初の実行がベースラインになります。 |
@@ -41,6 +42,17 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 curl --unix-socket /run/simaai-sentinel/api.sock \
   -X POST http://localhost/v1/traces/stop
 ```
+
+先にアクティブなトレースを読み取ったクライアントは、停止するときにそのIDを含めてください：
+
+```bash
+curl --unix-socket /run/simaai-sentinel/api.sock \
+  -X POST http://localhost/v1/traces/20261004T120000.000Z-baseline/stop
+```
+
+別のクライアントがトレースを置き換えた場合、条件付きの形式は
+何も停止せずにHTTP 409を返します。IDの比較と停止は、同じ
+実行ストアのロックの下で行われます。
 
 名前は一意である必要があり、アクティブにできるトレースは1つだけです。
 競合するライフサイクル操作はHTTP 409を返します。不明な実行とルートはHTTP 404を返します。
@@ -102,7 +114,7 @@ APIは実行の削除、ワークロードの実行、ハードウェアの変�
 
 キャッシュの書き込みにはアトミックなリネームを使用します。
 実行操作には、CLI、TUI、デーモンレコーダーと同じ排他的ファイルロックを使用します。
-そのため、APIを通じて開始したトレースは、サポートされているどのインターフェースからでも安全に検査または停止できます。
+IDを含む停止ルートは、クライアントが観測したトレースを置き換えたトレースを停止してはならない場合に使用してください。
 
 ## エージェントスキル
 

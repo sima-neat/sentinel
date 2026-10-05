@@ -50,9 +50,11 @@ def build_parser():
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--socket", default="/run/simaai-sentinel/api.sock")
     commands = root.add_subparsers(dest="command", required=True)
-    simple = ("health", "latest", "metrics", "active", "stop", "runs", "peripherals", "refresh")
+    simple = ("health", "latest", "metrics", "active", "runs", "peripherals", "refresh")
     for command in simple:
         commands.add_parser(command)
+    stop = commands.add_parser("stop")
+    stop.add_argument("--id", help="stop only if this trace ID is still active")
     run = commands.add_parser("run")
     run.add_argument("selector")
     compare = commands.add_parser("compare")
@@ -92,6 +94,10 @@ def main():
             "/v1/traces",
             {"name": args.name, "note": args.note, "tags": args.tag},
         )
+    elif args.command == "stop" and args.id is not None:
+        if not args.id:
+            argument_parser.error("--id must not be empty")
+        operation = ("POST", f"/v1/traces/{quote(args.id, safe='')}/stop", None)
     else:
         operation = routes[args.command]
     try:

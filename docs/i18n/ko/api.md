@@ -20,6 +20,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/traces/active` | 활성 추적 또는 `null`. |
 | `POST /v1/traces` | 이름이 지정된 추적을 시작합니다. |
 | `POST /v1/traces/stop` | 활성 추적을 중지하고 저장합니다. |
+| `POST /v1/traces/{id}/stop` | ID가 여전히 일치하는 경우에만 활성 추적을 중지합니다. |
 | `GET /v1/runs` | 활성 및 완료된 실행의 요약 목록을 표시합니다. |
 | `GET /v1/runs/{name-or-id}` | 저장된 실행과 원시 샘플을 조회합니다. |
 | `GET /v1/compare?runs=A,B` | 두 개 이상의 실행을 비교합니다. 첫 번째 실행이 기준선입니다. |
@@ -41,6 +42,17 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 curl --unix-socket /run/simaai-sentinel/api.sock \
   -X POST http://localhost/v1/traces/stop
 ```
+
+먼저 활성 추적을 읽은 클라이언트는 중지할 때 해당 ID를 포함해야 합니다:
+
+```bash
+curl --unix-socket /run/simaai-sentinel/api.sock \
+  -X POST http://localhost/v1/traces/20261004T120000.000Z-baseline/stop
+```
+
+다른 클라이언트가 추적을 대체한 경우 조건부 형식은 아무것도 중지하지 않고
+HTTP 409를 반환합니다. ID 비교와 중지는 동일한 실행 저장소
+잠금 아래에서 수행됩니다.
 
 이름은 고유해야 하며, 한 번에 하나의 추적만 활성화될 수 있습니다. 충돌하는 수명 주기
 작업은 HTTP 409를 반환합니다. 알 수 없는 실행 및 경로는 HTTP 404를 반환합니다. 유효하지 않은
@@ -101,8 +113,8 @@ DevKit에서 얻은 전체 응답이며, USB 카메라는 형식당 하나의 �
 프록시를 통해 제공해야 합니다.
 
 캐시 쓰기는 원자적 이름 변경을 사용합니다. 실행 작업은 CLI, TUI 및 데몬 레코더와 동일한
-배타적 파일 잠금을 사용합니다. 따라서 API를 통해 시작된 추적은
-지원되는 모든 인터페이스를 통해 안전하게 검사하거나 중지할 수 있습니다.
+배타적 파일 잠금을 사용합니다. 클라이언트가 관찰한 추적을 대체한 추적을 중지하면 안 되는 경우
+ID를 포함하는 중지 경로를 사용하십시오.
 
 ## 에이전트 스킬
 

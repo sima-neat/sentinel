@@ -20,6 +20,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/traces/active` | 作用中的追蹤，或 `null`。 |
 | `POST /v1/traces` | 啟動一個具名的追蹤。 |
 | `POST /v1/traces/stop` | 停止並保存作用中的追蹤。 |
+| `POST /v1/traces/{id}/stop` | 僅在 ID 仍相符時停止作用中的追蹤。 |
 | `GET /v1/runs` | 列出進行中與已完成的執行摘要。 |
 | `GET /v1/runs/{name-or-id}` | 擷取已儲存的執行及其原始樣本。 |
 | `GET /v1/compare?runs=A,B` | 比較兩個以上的執行；第一個為基準。 |
@@ -41,6 +42,17 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 curl --unix-socket /run/simaai-sentinel/api.sock \
   -X POST http://localhost/v1/traces/stop
 ```
+
+先讀取作用中追蹤的客戶端，在停止時應附上其 ID：
+
+```bash
+curl --unix-socket /run/simaai-sentinel/api.sock \
+  -X POST http://localhost/v1/traces/20261004T120000.000Z-baseline/stop
+```
+
+若另一個客戶端已取代該追蹤，條件式形式會傳回 HTTP 409，
+且不會停止任何追蹤。ID 比對與停止動作在同一個
+執行儲存區鎖定下進行。
 
 名稱必須唯一，且同一時間只能有一個作用中的追蹤。互相衝突的生命週期
 作業會傳回 HTTP 409。未知的執行與路由會傳回 HTTP 404。無效的請求
@@ -102,7 +114,7 @@ Kerrigan/Fleet Manager 代理伺服器提供，而不是轉送此通訊端或
 
 快取寫入採用原子性重新命名。執行作業使用與 CLI、TUI 及守護程式記錄器
 相同的獨占檔案鎖定。
-因此，透過 API 啟動的追蹤可以安全地透過任何支援的介面檢查或停止。
+當客戶端不得停止取代其所觀察之追蹤的另一個追蹤時，請使用帶有 ID 的停止路由。
 
 ## AI 代理人技能
 

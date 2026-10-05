@@ -69,9 +69,12 @@ python3 scripts/sentinel_api.py metrics
 python3 scripts/sentinel_api.py active
 python3 scripts/sentinel_api.py start --name baseline --note "before optimization" --tag compiler-v1
 # Run workload.
-python3 scripts/sentinel_api.py stop
+python3 scripts/sentinel_api.py stop --id TRACE_ID
 python3 scripts/sentinel_api.py runs
 ```
+
+Use the `trace.id` returned by `start` as `TRACE_ID`. This prevents the client
+from stopping a replacement trace if another client changes the active trace.
 
 Run the same lifecycle remotely with the installed client:
 
@@ -79,7 +82,7 @@ Run the same lifecycle remotely with the installed client:
 ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py active'
 ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py start --name baseline --note "before optimization" --tag compiler-v1'
 # Run workload on the DevKit.
-ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py stop'
+ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py stop --id TRACE_ID'
 ssh TARGET 'python3 ~/.codex/skills/use-sentinel/scripts/sentinel_api.py runs'
 ```
 
