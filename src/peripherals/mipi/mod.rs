@@ -102,6 +102,15 @@ impl Provider for MipiProvider {
         }
         // Name order is id order.
         sensors.sort_by(|a, b| a.name.cmp(&b.name));
+        // The id is the sensor name, which is also how CameraInput selects a
+        // camera, so two sensors with one name could not be told apart.
+        if let Some(pair) = sensors.windows(2).find(|pair| pair[0].name == pair[1].name) {
+            let reason = format!(
+                "sensor '{}' is reported by both {} and {}, so its camera id would not be unique",
+                pair[0].name, pair[0].media_device, pair[1].media_device
+            );
+            return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+        }
         let (isp, modes) = match probe_isp(&self.sys_root, &self.dev_root, backend) {
             Ok((paths, modes)) => {
                 let isp = Isp::Available {
