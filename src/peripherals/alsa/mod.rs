@@ -285,7 +285,7 @@ fn link_to(directory: &Path, target: &str) -> Option<String> {
 /// error is an ancestor with one of `idVendor` and `idProduct`.
 fn usb_identity(sys: &Path, device: &Path) -> Result<Option<UsbIdentity>, ProviderError> {
     for path in device.ancestors().take_while(|path| *path != sys) {
-        let attribute = |name: &str| read_text_file(&path.join(name));
+        let attribute = |name: &str| read_text_file(&path.join(name)).ok().flatten();
         let (vendor, product) = match (attribute("idVendor"), attribute("idProduct")) {
             (Some(vendor), Some(product)) => (vendor, product),
             (None, None) => continue,
@@ -419,7 +419,11 @@ impl AlsaProvider {
     ) -> Result<Vec<Microphone>, ProviderError> {
         // The kernel never registers a card without an id; an empty or
         // unreadable one is skipped until a later scan.
-        let Some(card_id) = read_text_file(&entry.join("id")).filter(|id| !id.is_empty()) else {
+        let Some(card_id) = read_text_file(&entry.join("id"))
+            .ok()
+            .flatten()
+            .filter(|id| !id.is_empty())
+        else {
             return Ok(Vec::new());
         };
         // The global list's name and driver describe this card only when its
@@ -490,7 +494,9 @@ impl AlsaProvider {
                      and the record id follows the card ID: it changes if the card ID changes.",
                 );
             }
-            let info = read_text_file(&directory.join(format!("pcm{pcm}c/info")));
+            let info = read_text_file(&directory.join(format!("pcm{pcm}c/info")))
+                .ok()
+                .flatten();
             if info.is_none() {
                 issue(
                     &mut issues,
@@ -541,7 +547,9 @@ impl AlsaProvider {
                 usb: usb.clone(),
             };
 
-            let stream = read_text_file(&directory.join(format!("stream{pcm}")));
+            let stream = read_text_file(&directory.join(format!("stream{pcm}")))
+                .ok()
+                .flatten();
             let modes = stream.as_deref().map(capture_modes).unwrap_or_default();
             if modes.is_empty() {
                 let reason = if usb.is_some() {
