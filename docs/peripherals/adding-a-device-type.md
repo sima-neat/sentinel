@@ -16,7 +16,10 @@ for the new variant.
 - `id` must be stable across replugs and reboots: derive it from a bus path,
   serial number, or another attribute that survives them, never from an
   enumeration index such as a card number or `/dev/videoN`.
-- Optional facts are `Option` fields and are omitted when unknown.
+- Optional facts are `Option` fields marked
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`, as in the
+  existing records, so an unknown fact is left out of the JSON. A plain
+  `Option` would serialize as `null`.
 - Report facts the kernel or device exposes. Do not add fields that encode a
   policy, such as whether a mode is supported.
 
