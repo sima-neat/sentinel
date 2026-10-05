@@ -21,7 +21,8 @@ def request(socket_path, method, path, payload=None):
         headers.append("Content-Type: application/json")
     wire = ("\r\n".join(headers) + "\r\n\r\n").encode("ascii") + body
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(10)
+        # A refresh waits up to 10 s for its scan.
+        client.settimeout(15 if path == "/v1/peripherals/refresh" else 10)
         client.connect(socket_path)
         client.sendall(wire)
         chunks = []

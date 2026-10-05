@@ -410,6 +410,20 @@ fn sensors_of_sima_media_devices_are_cameras() {
     assert!(no_dev.discover().unwrap().is_empty());
 }
 
+/// Two media graphs that expose a sensor of the same name would give two
+/// cameras one id; the scan fails and names both media devices instead.
+#[test]
+fn sensors_with_one_name_on_two_media_devices_fail_the_scan() {
+    let ov5647 = [(9, "ov5647", SENSOR)];
+    let first = media(SIMA_MEDIA_DRIVER, "platform:csi2video@1", &ov5647);
+    let second = media(SIMA_MEDIA_DRIVER, "platform:csi2video@2", &ov5647);
+    let error = scan([first, second], [isp(real_isp())], []).unwrap_err();
+    assert_eq!(error.code, CODE_DISCOVERY_FAILED);
+    let reason = "sensor 'ov5647' is reported by both /dev/media0 and /dev/media1, so its camera \
+        id would not be unique";
+    assert_eq!(error.reason, reason);
+}
+
 /// A media device that cannot be read, has an unnamed sensor, or has more
 /// graph objects than the room offered fails the scan. Opening a device,
 /// EACCES and EPERM are permission failures.
