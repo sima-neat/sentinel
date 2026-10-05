@@ -1,16 +1,15 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
 use serde_json::Value;
 
 use super::Catalog;
 
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longer than the daemon's 10 s wait for a refresh scan.
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `simaai-sentinel peripherals [--json] [--refresh]`
 pub fn run(api_socket: &Path, args: &[String]) -> Result<()> {
@@ -22,39 +21,19 @@ pub fn run(api_socket: &Path, args: &[String]) -> Result<()> {
             other => bail!("unknown peripherals option '{other}'"),
         }
     }
-    let catalog = if refresh {
-        refreshed(api_socket)?
+    let (method, path) = if refresh {
+        ("POST", "/v1/peripherals/refresh")
     } else {
-        fetch(api_socket)?
+        ("GET", "/v1/peripherals")
     };
+    let catalog: Catalog = serde_json::from_value(request(api_socket, method, path)?)
+        .context("parse peripheral catalog")?;
     if json {
         println!("{}", serde_json::to_string_pretty(&catalog)?);
     } else {
         print!("{}", render(&catalog));
     }
     Ok(())
-}
-
-/// Request a rescan and wait for a catalog observed after the request.
-fn refreshed(api_socket: &Path) -> Result<Catalog> {
-    let requested = Utc::now();
-    request(api_socket, "POST", "/v1/peripherals/refresh")?;
-    let deadline = Instant::now() + REFRESH_TIMEOUT;
-    loop {
-        let catalog = fetch(api_socket)?;
-        if catalog.observed_at.is_some_and(|at| at >= requested) {
-            return Ok(catalog);
-        }
-        if Instant::now() >= deadline {
-            bail!("refresh did not complete within 15 seconds");
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-fn fetch(api_socket: &Path) -> Result<Catalog> {
-    serde_json::from_value(request(api_socket, "GET", "/v1/peripherals")?)
-        .context("parse peripheral catalog")
 }
 
 /// Send one request to the daemon; a non-2xx status becomes the error.
@@ -65,7 +44,7 @@ fn request(api_socket: &Path, method: &str, path: &str) -> Result<Value> {
             api_socket.display()
         )
     })?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(READ_TIMEOUT))?;
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
@@ -134,6 +113,8 @@ fn render(catalog: &Catalog) -> String {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::super::tests::device;
     use super::super::CatalogError;
     use super::*;
@@ -162,5 +143,7 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains('\x1b'));
+        // Bidirectional overrides and isolates cannot reorder the line.
+        assert_eq!(printable("cam\u{202E}era\u{2066}x"), "cam?era?x");
     }
 }

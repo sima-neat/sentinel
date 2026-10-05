@@ -1,9 +1,9 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -24,6 +24,26 @@ struct Shared {
     wake: OwnedFd,
     stopping: AtomicBool,
     running: AtomicBool,
+    refreshes: Mutex<Refreshes>,
+    /// Signalled when a scan finishes or the worker stops.
+    scanned: Condvar,
+}
+
+/// Refresh requests are numbered; a scan covers every request made before
+/// it started.
+#[derive(Default)]
+struct Refreshes {
+    requested: u64,
+    covered: u64,
+}
+
+/// Why [`Peripherals::refresh`] returned no catalog.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RefreshError {
+    /// The worker has stopped or was never started.
+    Stopped,
+    /// No scan covering the request finished in time.
+    TimedOut,
 }
 
 /// Read access and refresh requests, for the API.
@@ -44,9 +64,36 @@ impl Peripherals {
             .then(|| catalog.clone())
     }
 
-    /// Ask for a rescan; `false` when the worker has stopped.
-    pub fn refresh(&self) -> bool {
-        self.0.running.load(Ordering::Acquire) && wake(self.0.wake.as_raw_fd())
+    /// Rescan and return the catalog of a scan that started after this
+    /// call, waiting at most `timeout`. Concurrent callers share scans.
+    pub fn refresh(&self, timeout: Duration) -> Result<Catalog, RefreshError> {
+        let shared = &*self.0;
+        let deadline = Instant::now() + timeout;
+        let mut refreshes = shared
+            .refreshes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        refreshes.requested += 1;
+        let request = refreshes.requested;
+        if !shared.running.load(Ordering::Acquire) || !wake(shared.wake.as_raw_fd()) {
+            return Err(RefreshError::Stopped);
+        }
+        while refreshes.covered < request {
+            if !shared.running.load(Ordering::Acquire) {
+                return Err(RefreshError::Stopped);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(RefreshError::TimedOut);
+            }
+            refreshes = shared
+                .scanned
+                .wait_timeout(refreshes, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        drop(refreshes);
+        self.catalog().ok_or(RefreshError::Stopped)
     }
 }
 
@@ -82,7 +129,7 @@ fn spawn(providers: Vec<Box<dyn Provider>>, listen_for_uevents: bool) -> Result<
     }
     let shared = Arc::new(Shared {
         catalog: RwLock::new(Catalog {
-            revision: Utc::now().timestamp_millis().max(0) as u64,
+            revision: initial_revision(),
             observed_at: None,
             devices: Vec::new(),
             errors: Vec::new(),
@@ -91,6 +138,8 @@ fn spawn(providers: Vec<Box<dyn Provider>>, listen_for_uevents: bool) -> Result<
         wake: unsafe { OwnedFd::from_raw_fd(raw) },
         stopping: AtomicBool::new(false),
         running: AtomicBool::new(true),
+        refreshes: Mutex::default(),
+        scanned: Condvar::new(),
     });
     let worker_shared = shared.clone();
     let thread = thread::Builder::new()
@@ -100,12 +149,34 @@ fn spawn(providers: Vec<Box<dyn Provider>>, listen_for_uevents: bool) -> Result<
     Ok(Worker { shared, thread })
 }
 
-/// Marks the worker stopped when it returns or panics.
+/// A random first revision, so neither a restart nor a clock change
+/// repeats a revision. It stays below 2^52, where JSON readers that store
+/// numbers as doubles keep it exact.
+fn initial_revision() -> u64 {
+    let mut bytes = [0u8; 8];
+    // SAFETY: getrandom writes at most bytes.len() bytes into bytes.
+    let filled = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+    let random = if filled == bytes.len() as isize {
+        u64::from_ne_bytes(bytes)
+    } else {
+        Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64
+    };
+    random >> 12
+}
+
+/// Marks the worker stopped when it returns or panics, and releases
+/// waiting refreshes.
 struct RunningGuard<'a>(&'a Shared);
 
 impl Drop for RunningGuard<'_> {
     fn drop(&mut self) {
         self.0.running.store(false, Ordering::Release);
+        let _refreshes = self
+            .0
+            .refreshes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.0.scanned.notify_all();
     }
 }
 
@@ -123,6 +194,11 @@ fn run(shared: &Shared, mut providers: Vec<Box<dyn Provider>>, listen_for_uevent
     }
     let mut last_good: Vec<Option<Vec<Peripheral>>> = vec![None; providers.len()];
     loop {
+        let covers = shared
+            .refreshes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .requested;
         let observed_at = Utc::now();
         let mut devices = Vec::new();
         let mut errors: Vec<CatalogError> = hotplug_error.iter().cloned().collect();
@@ -149,6 +225,12 @@ fn run(shared: &Shared, mut providers: Vec<Box<dyn Provider>>, listen_for_uevent
         }
         catalog.observed_at = Some(observed_at);
         drop(catalog);
+        shared
+            .refreshes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .covered = covers;
+        shared.scanned.notify_all();
         if !wait(shared, &mut uevents, &mut hotplug_error) {
             return;
         }
@@ -262,14 +344,16 @@ fn lower_priority() {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::Mutex;
-    use std::time::Instant;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
 
     use super::super::tests::device;
     use super::super::ProviderError;
     use super::*;
 
     type ScanResult = std::result::Result<Vec<Peripheral>, ProviderError>;
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Replays scripted scan results; the last one repeats.
     struct Scripted {
@@ -337,29 +421,101 @@ mod tests {
         assert_eq!(ids, ["test:a", "test:b"]);
 
         // An unchanged rescan advances observed_at but keeps the revision.
-        assert!(peripherals.refresh());
-        let unchanged = wait_for(&peripherals, |catalog| {
-            catalog.observed_at > first.observed_at
-        });
+        let unchanged = peripherals.refresh(TIMEOUT).unwrap();
+        assert!(unchanged.observed_at > first.observed_at);
         assert_eq!(unchanged.revision, first.revision);
 
         // A failed provider reports an error and keeps its last good devices.
-        assert!(peripherals.refresh());
-        let failed = wait_for(&peripherals, |catalog| !catalog.errors.is_empty());
+        let failed = peripherals.refresh(TIMEOUT).unwrap();
         assert_eq!(failed.devices, first.devices);
         assert_eq!(failed.errors[0].provider, "test.scripted");
         assert_eq!(failed.errors[0].code, "io.permission_denied");
         assert_ne!(failed.revision, first.revision);
 
         // Recovery clears the error and publishes the new device list.
-        assert!(peripherals.refresh());
-        let recovered = wait_for(&peripherals, |catalog| catalog.devices.len() == 1);
+        let recovered = peripherals.refresh(TIMEOUT).unwrap();
+        assert_eq!(recovered.devices.len(), 1);
         assert!(recovered.errors.is_empty());
         assert_ne!(recovered.revision, failed.revision);
 
         worker.stop();
         assert_eq!(peripherals.catalog(), None);
-        assert!(!peripherals.refresh());
+        assert_eq!(peripherals.refresh(TIMEOUT), Err(RefreshError::Stopped));
+    }
+
+    /// Holds each scan until the test releases it; device `test:N` is scan N.
+    struct Gated {
+        gate: Mutex<mpsc::Receiver<()>>,
+        scans: Arc<AtomicUsize>,
+    }
+
+    impl Provider for Gated {
+        fn name(&self) -> &'static str {
+            "test.gated"
+        }
+        fn subsystems(&self) -> &'static [&'static str] {
+            &["test"]
+        }
+        fn discover(&mut self) -> ScanResult {
+            let scan = self.scans.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = self.gate.lock().unwrap().recv();
+            Ok(vec![device(&format!("test:{scan}"))])
+        }
+    }
+
+    fn gated() -> (Worker, mpsc::Sender<()>, Arc<AtomicUsize>) {
+        let (release, gate) = mpsc::channel();
+        let scans = Arc::new(AtomicUsize::new(0));
+        let provider = Gated {
+            gate: Mutex::new(gate),
+            scans: scans.clone(),
+        };
+        (
+            spawn(vec![Box::new(provider)], false).unwrap(),
+            release,
+            scans,
+        )
+    }
+
+    /// A refresh is answered by a scan that started after it, never by the
+    /// scan already running, whatever the wall clock says.
+    #[test]
+    fn a_refresh_waits_for_a_scan_that_started_after_it() {
+        let (worker, release, scans) = gated();
+        let deadline = Instant::now() + TIMEOUT;
+        while scans.load(Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Scan 1 is running; this refresh arrives during it.
+        let peripherals = worker.handle();
+        let refresh = thread::spawn(move || peripherals.refresh(TIMEOUT));
+        thread::sleep(Duration::from_millis(50));
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        let catalog = refresh.join().unwrap().unwrap();
+        assert_eq!(catalog.devices, vec![device("test:2")]);
+        drop(release);
+        worker.stop();
+    }
+
+    #[test]
+    fn a_refresh_gives_up_when_the_scan_does_not_finish() {
+        let (worker, release, _) = gated();
+        let peripherals = worker.handle();
+        let timeout = Duration::from_millis(100);
+        assert_eq!(peripherals.refresh(timeout), Err(RefreshError::TimedOut));
+        drop(release);
+        worker.stop();
+    }
+
+    /// Restarts and clock changes cannot repeat a revision, and it stays
+    /// exact in JSON readers that store numbers as doubles.
+    #[test]
+    fn revisions_start_from_a_random_value() {
+        let (first, second) = (initial_revision(), initial_revision());
+        assert_ne!(first, second);
+        assert!(first < 1 << 52 && second < 1 << 52);
     }
 
     #[test]
@@ -377,7 +533,7 @@ mod tests {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(!peripherals.refresh());
+        assert_eq!(peripherals.refresh(TIMEOUT), Err(RefreshError::Stopped));
         worker.stop();
     }
 }

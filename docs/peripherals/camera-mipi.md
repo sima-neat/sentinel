@@ -13,7 +13,9 @@ one camera. Other drivers' media devices (for example `uvcvideo`) are ignored.
 
 `id` is `camera:<sensor entity name>`, for example `camera:imx477 5-001a`: the
 sensor driver, I2C bus and address. libcamera uses the same name, so it is
-also the name `CameraInput` accepts.
+also the name `CameraInput` accepts. Two sensors with the same name, for
+example on two media devices, would share an id, so the scan fails with an
+error that names both media devices instead.
 
 ## Fields
 
@@ -56,7 +58,7 @@ DevKit's ISP reports none, so its modes have no frame rate; `max_fps` and
 | --- | --- |
 | `io.permission_denied` | A media device cannot be opened (`EACCES`, `EPERM`), or `/dev` cannot be listed (`EACCES`) |
 | `io.open` | Any other open or query failure of a media device |
-| `peripherals.discovery_failed` | An unnamed sensor entity |
+| `peripherals.discovery_failed` | An unnamed sensor entity, or two sensors with the same name (their ids would collide) |
 
 A device that disappears mid-scan is skipped. ISP failures never fail the scan;
 they make `isp` unavailable with the reason.

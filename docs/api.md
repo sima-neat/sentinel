@@ -24,7 +24,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock http://localhost/v1/health
 | `GET /v1/runs/{name-or-id}` | Retrieve a saved run and raw samples. |
 | `GET /v1/compare?runs=A,B` | Compare two or more runs; the first is the baseline. |
 | `GET /v1/peripherals` | Connected peripherals, from memory. |
-| `POST /v1/peripherals/refresh` | Request a rescan; returns HTTP 202. |
+| `POST /v1/peripherals/refresh` | Rescan, then return the new catalog. |
 
 Start request example:
 
@@ -63,7 +63,7 @@ latest result:
 
 | Field | Meaning |
 | --- | --- |
-| `revision` | Changes whenever `devices` or `errors` change. It is seeded from the daemon start time, so it is never reused after a restart; compare it for equality only. |
+| `revision` | Changes whenever `devices` or `errors` change. It starts from a random value when the daemon starts, so a restart or a clock change is very unlikely to repeat one; compare it for equality only. It stays below 2^52, so it is exact in JSON readers that use doubles. |
 | `observed_at` | When the scan behind this result started; `null` until the first scan completes. |
 | `devices` | One object per device, tagged by `type`. `id` is stable across replugs into the same port and is never a `/dev/videoN` name. |
 | `errors` | Providers that failed in the latest scan. A failed provider's devices from its last successful scan stay in `devices`. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
@@ -72,10 +72,12 @@ Sentinel reports hardware facts only. Whether an application supports a
 device or mode is decided by that application; Neat Core does this for
 `CameraInput`.
 
-`POST /v1/peripherals/refresh` returns HTTP 202 `{"accepted": true}`. The
-rescan is complete once `observed_at` is at or after the time of the request.
-Both routes return HTTP 503 when discovery is disabled (`--no-peripherals`) or
-has stopped.
+`POST /v1/peripherals/refresh` waits for a scan that starts after the request
+and returns HTTP 200 with that catalog, the same document as `GET`. Concurrent
+refreshes share scans. It returns HTTP 504 if the scan does not finish within
+10 seconds, and HTTP 429 when 8 refresh requests are already waiting. Both
+routes return HTTP 503 when discovery is disabled (`--no-peripherals`) or has
+stopped.
 
 `simaai-sentinel peripherals` prints the same result as a table; add `--json`
 for the raw document and `--refresh` to rescan first.
