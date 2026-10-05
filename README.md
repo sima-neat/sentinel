@@ -37,6 +37,7 @@ simaai-sentinel table --once    # print one table snapshot
 simaai-sentinel export          # print the daemon cache as JSON
 simaai-sentinel sensors         # explain each collected metric
 simaai-sentinel status          # daemon/cache status
+simaai-sentinel peripherals     # connected peripherals
 simaai-sentinel checkpoint --name baseline
 simaai-sentinel checkpoint --stop
 simaai-sentinel runs list

@@ -34,6 +34,8 @@ Keep the API on the Unix socket; do not create an unauthenticated TCP bridge.
 | `runs` | `GET /v1/runs` |
 | `run NAME` | `GET /v1/runs/NAME` |
 | `compare A B...` | `GET /v1/compare?runs=A,B,...` |
+| `peripherals` | `GET /v1/peripherals` |
+| `refresh` | `POST /v1/peripherals/refresh` |
 
 Trace samples follow the daemon cache cadence, normally two seconds. The API
 uses the same locked run store as the CLI and TUI. Compare output contains raw

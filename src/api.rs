@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -12,10 +12,15 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::peripherals::{Peripherals, RefreshError};
 use crate::{cache, runs};
 
 pub const DEFAULT_API_SOCKET: &str = "/run/simaai-sentinel/api.sock";
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
+/// How long `POST /v1/peripherals/refresh` waits for its scan.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Refresh requests that may wait at once, each on its own thread.
+const MAX_WAITING_REFRESHES: usize = 8;
 
 #[derive(Debug)]
 struct Request {
@@ -58,6 +63,7 @@ pub fn spawn(
     socket_path: &Path,
     cache_path: &Path,
     runs_dir: &Path,
+    peripherals: Option<Peripherals>,
     stopped: Arc<AtomicBool>,
 ) -> Result<ApiServer> {
     if let Some(parent) = socket_path.parent() {
@@ -81,7 +87,9 @@ pub fn spawn(
             match listener.accept() {
                 Ok(_) if stopped.load(Ordering::Relaxed) => break,
                 Ok((mut stream, _)) => {
-                    if let Err(error) = serve(&mut stream, &cache_path, &runs_dir) {
+                    if let Err(error) =
+                        serve(&mut stream, &cache_path, &runs_dir, peripherals.as_ref())
+                    {
                         eprintln!("Sentinel API request failed: {error:#}");
                     }
                 }
@@ -97,16 +105,93 @@ pub fn spawn(
     })
 }
 
-fn serve(stream: &mut UnixStream, cache_path: &Path, runs_dir: &Path) -> Result<()> {
+fn serve(
+    stream: &mut UnixStream,
+    cache_path: &Path,
+    runs_dir: &Path,
+    peripherals: Option<&Peripherals>,
+) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let response =
-        match read_request(stream).and_then(|request| route(request, cache_path, runs_dir)) {
-            Ok(value) => response(200, value),
-            Err(error) => response(error.status, json!({"error": error.message})),
-        };
+    let reply = read_request(stream).and_then(|request| {
+        if (request.method.as_str(), request.path.as_str()) == ("POST", REFRESH_PATH) {
+            let peripherals = peripherals.ok_or_else(unavailable)?;
+            return refresh_in_background(stream.try_clone().map_err(internal)?, peripherals);
+        }
+        peripherals_route(&request, peripherals).unwrap_or_else(|| {
+            route(request, cache_path, runs_dir).map(|value| Reply::Now(200, value))
+        })
+    });
+    match reply {
+        Ok(Reply::Later) => Ok(()),
+        Ok(Reply::Now(status, value)) => write_reply(stream, Ok((status, value))),
+        Err(error) => write_reply(stream, Err(error)),
+    }
+}
+
+/// A reply written now, or by a thread that answers the request later.
+enum Reply {
+    Now(u16, Value),
+    Later,
+}
+
+fn write_reply(
+    stream: &mut UnixStream,
+    reply: std::result::Result<(u16, Value), ApiError>,
+) -> Result<()> {
+    let response = match reply {
+        Ok((status, value)) => response(status, value),
+        Err(error) => response(error.status, json!({"error": error.message})),
+    };
     stream.write_all(&response)?;
     Ok(())
+}
+
+const REFRESH_PATH: &str = "/v1/peripherals/refresh";
+
+/// Answer `POST /v1/peripherals/refresh` from its own thread: it waits for
+/// a scan, and other clients must not wait behind it.
+fn refresh_in_background(
+    mut stream: UnixStream,
+    peripherals: &Peripherals,
+) -> std::result::Result<Reply, ApiError> {
+    static WAITING: AtomicUsize = AtomicUsize::new(0);
+    if WAITING.fetch_add(1, Ordering::AcqRel) >= MAX_WAITING_REFRESHES {
+        WAITING.fetch_sub(1, Ordering::AcqRel);
+        return Err(ApiError {
+            status: 429,
+            message: format!(
+                "{MAX_WAITING_REFRESHES} refresh requests are already waiting; retry later"
+            ),
+        });
+    }
+    let peripherals = peripherals.clone();
+    let answer = move || {
+        let reply = match peripherals.refresh(REFRESH_TIMEOUT) {
+            Ok(catalog) => serde_json::to_value(catalog)
+                .map(|value| (200, value))
+                .map_err(internal),
+            Err(RefreshError::Stopped) => Err(unavailable()),
+            Err(RefreshError::TimedOut) => Err(ApiError {
+                status: 504,
+                message: format!(
+                    "the peripheral scan did not finish within {} seconds",
+                    REFRESH_TIMEOUT.as_secs()
+                ),
+            }),
+        };
+        WAITING.fetch_sub(1, Ordering::AcqRel);
+        if let Err(error) = write_reply(&mut stream, reply) {
+            eprintln!("Sentinel API request failed: {error:#}");
+        }
+    };
+    match thread::Builder::new().name("refresh".into()).spawn(answer) {
+        Ok(_) => Ok(Reply::Later),
+        Err(error) => {
+            WAITING.fetch_sub(1, Ordering::AcqRel);
+            Err(internal(error))
+        }
+    }
 }
 
 fn read_request(stream: &mut UnixStream) -> std::result::Result<Request, ApiError> {
@@ -271,6 +356,32 @@ fn route(
     }
 }
 
+/// `GET /v1/peripherals`; `None` for any other request.
+fn peripherals_route(
+    request: &Request,
+    peripherals: Option<&Peripherals>,
+) -> Option<std::result::Result<Reply, ApiError>> {
+    if (request.method.as_str(), request.path.as_str()) != ("GET", "/v1/peripherals") {
+        return None;
+    }
+    Some(
+        peripherals
+            .and_then(Peripherals::catalog)
+            .ok_or_else(unavailable)
+            .and_then(|catalog| serde_json::to_value(catalog).map_err(internal))
+            .map(|value| Reply::Now(200, value)),
+    )
+}
+
+fn unavailable() -> ApiError {
+    ApiError {
+        status: 503,
+        message: "peripheral discovery is not running: disabled with --no-peripherals, or failed \
+            (see `journalctl -u simaai-sentinel`)"
+            .into(),
+    }
+}
+
 fn query_values(query: &str, key: &str) -> Vec<String> {
     query
         .split('&')
@@ -318,6 +429,9 @@ fn response(status: u16, body: Value) -> Vec<u8> {
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Internal Server Error",
     };
     let header = format!(
@@ -401,7 +515,7 @@ mod tests {
         };
         cache::write_cache(cache_path.to_str().unwrap(), &payload).unwrap();
         let stopped = Arc::new(AtomicBool::new(false));
-        let handle = spawn(&socket_path, &cache_path, &runs_dir, stopped.clone()).unwrap();
+        let handle = spawn(&socket_path, &cache_path, &runs_dir, None, stopped.clone()).unwrap();
 
         let latest = request(
             &socket_path,
@@ -459,7 +573,85 @@ mod tests {
             "GET /v1/compare?runs=agent-test,agent-test-2&raw=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
         ));
         assert!(raw["runs"][0]["samples"].is_array());
+        let peripherals = request(
+            &socket_path,
+            "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(peripherals.starts_with("HTTP/1.1 503 "), "{peripherals}");
 
+        stopped.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A provider whose every scan takes `delay`.
+    struct Slow(Duration);
+
+    impl crate::peripherals::Provider for Slow {
+        fn name(&self) -> &'static str {
+            "test.slow"
+        }
+        fn subsystems(&self) -> &'static [&'static str] {
+            &["test"]
+        }
+        fn discover(
+            &mut self,
+        ) -> std::result::Result<
+            Vec<crate::peripherals::Peripheral>,
+            crate::peripherals::ProviderError,
+        > {
+            thread::sleep(self.0);
+            Ok(Vec::new())
+        }
+    }
+
+    /// GET serves the catalog; POST refresh answers 200 with a fresh catalog
+    /// from its own thread, so other requests are served while it waits.
+    #[test]
+    fn refresh_returns_a_new_catalog_without_blocking_other_requests() {
+        let root =
+            std::env::temp_dir().join(format!("sentinel-api-refresh-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let socket_path = root.join("api.sock");
+        let worker =
+            crate::peripherals::start(vec![Box::new(Slow(Duration::from_millis(500)))]).unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let handle = spawn(
+            &socket_path,
+            &root.join("cache.json"),
+            &root.join("runs"),
+            Some(worker.handle()),
+            stopped.clone(),
+        )
+        .unwrap();
+        let get = "GET /v1/peripherals HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let refresh =
+            "POST /v1/peripherals/refresh HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+        let first = request(&socket_path, get);
+        assert!(first.starts_with("HTTP/1.1 200 "), "{first}");
+
+        let socket = socket_path.clone();
+        let started = std::time::Instant::now();
+        let waiting = thread::spawn(move || request(&socket, refresh));
+        thread::sleep(Duration::from_millis(50));
+        let during = request(&socket_path, get);
+        assert!(during.starts_with("HTTP/1.1 200 "), "{during}");
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "GET waited for the refresh"
+        );
+        let refreshed = waiting.join().unwrap();
+        assert!(refreshed.starts_with("HTTP/1.1 200 "), "{refreshed}");
+        let catalog = response_json(&refreshed);
+        assert!(
+            catalog["devices"].is_array() && catalog["revision"].is_u64(),
+            "{catalog}"
+        );
+        assert!(catalog["observed_at"].is_string(), "{catalog}");
+
+        worker.stop();
+        let after = request(&socket_path, refresh);
+        assert!(after.starts_with("HTTP/1.1 503 "), "{after}");
         stopped.store(true, Ordering::Relaxed);
         handle.join().unwrap();
         fs::remove_dir_all(root).unwrap();

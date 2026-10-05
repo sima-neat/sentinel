@@ -74,6 +74,9 @@ jobs:
           cargo fmt --check
           cargo check --locked
 
+      - name: Run Rust tests
+        run: cargo test --locked
+
       - name: Build binary and Vulcan metadata
         run: |
           set -euo pipefail
