@@ -49,8 +49,12 @@ it at startup, after a uevent from one of `subsystems`, and on refresh.
   A device that disappears during the scan is skipped, not an error; the uevent
   that its removal sends triggers a rescan.
 - **Degrade, don't fail.** A missing optional attribute leaves its field out.
-  An attribute that exists but cannot be read is an error, so the last good
-  record is kept.
+  Treat an attribute that exists but cannot be read by what it is for:
+  - one the scan needs to find or identify a device (its id, its USB
+    identity) is an error, so the provider's last good devices are kept;
+  - one that only adds a fact still publishes the device without that fact,
+    with a reason in the record (the microphone record's `issues` does this
+    for unreadable capture metadata).
 
 Register the provider in `builtin_providers()` in `src/peripherals/mod.rs`.
 
