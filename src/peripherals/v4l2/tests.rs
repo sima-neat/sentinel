@@ -10,6 +10,7 @@ use crate::peripherals::videodev2::testing::*;
 use crate::peripherals::videodev2::*;
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::os::unix::fs::symlink;
 use std::sync::atomic::Ordering::SeqCst;
 
@@ -400,6 +401,18 @@ fn driver_and_sysfs_errors_fail_the_scan() {
     fs::remove_file(sys.join(USB).join("idProduct")).unwrap();
     let records = scan(root.path(), vec![("video0", c920())]).unwrap();
     assert_eq!(usb(&records[0]).1.identity.product_id, None);
+    // An attribute that exists but cannot be read fails the scan rather than
+    // reading as absent.
+    let serial = sys.join(USB).join("serial");
+    let _ = fs::remove_file(&serial);
+    fs::create_dir(&serial).unwrap();
+    let (code, reason) = fail(c920());
+    assert_eq!(code, "io.open");
+    assert!(
+        reason.starts_with("failed to read V4L2 sysfs attribute"),
+        "{reason}"
+    );
+    fs::remove_dir(&serial).unwrap();
 
     // A class entry whose device link loops.
     let entry = sys.join("class/video4linux/video5");
@@ -497,6 +510,23 @@ fn enumeration_is_bounded_per_list_and_per_device() {
     endless.formats = vec![(CAPTURE, fourcc(b"MJPG"), ""); entries];
     let malformed = "V4L2 camera /dev/video0 returned a malformed";
     assert_eq!(reason(endless), format!("{malformed} format list"));
+    // A list may hold exactly MAX_ENUMERATION_ENTRIES entries.
+    let list = |length: u32| {
+        let mut budget = MAX_DEVICE_ENUMERATIONS;
+        let query = |index| match index < length {
+            true => Ok(index),
+            false => Err(io::Error::from_raw_os_error(libc::EINVAL)),
+        };
+        enumerate(&mut budget, "test", query, |entry| {
+            Some(ControlFlow::<u32, u32>::Continue(entry))
+        })
+    };
+    assert_eq!(
+        list(MAX_ENUMERATION_ENTRIES).ok().map(|e| e.len()),
+        Some(1024)
+    );
+    let overflow = list(MAX_ENUMERATION_ENTRIES + 1);
+    assert!(matches!(overflow, Err(EnumerationError::Malformed(_))));
 
     // Every list stays under the per-list cap, but 5 x 900 sizes exceed the budget.
     let mut busy = node("busy", V4L2_CAP_VIDEO_CAPTURE);
