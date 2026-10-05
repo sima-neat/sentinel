@@ -470,10 +470,35 @@ fn media_device_unplugged_after_open_is_skipped() {
     assert_eq!((error.code, error.reason), (CODE_IO_OPEN.into(), reason));
 }
 
+/// An ISP node with both capture APIs lists the formats of both, once each.
+#[test]
+fn isp_nodes_list_the_formats_of_both_capture_apis() {
+    let capture = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE;
+    let mut node = FakeVideoNode::new(ISP_CARD_NAME, capture, 0);
+    let mplane = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    let [grey, nv12, yuyv] = [b"GREY", b"NV12", b"YUYV"].map(fourcc);
+    node.formats.push((CAPTURE, grey, ""));
+    node.formats.push((CAPTURE, nv12, ""));
+    node.formats.push((mplane, nv12, ""));
+    node.formats.push((mplane, yuyv, ""));
+    for format in [grey, nv12, yuyv] {
+        node.sizes.push((format, discrete_size(1920, 1080)));
+    }
+    let details = imx477([isp(node)], vec![]);
+    let formats = Vec::from_iter(
+        details["modes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| &m["format"]),
+    );
+    assert_eq!(formats, [&json!("GREY"), &json!("NV12"), &json!("YUYV")]);
+}
+
 /// Several ISP nodes report the modes they share; a node with another card
 /// or no discrete size is skipped. A size the ISP reports frame intervals for
-/// carries those every node reports, sorted and deduplicated; other sizes, and a driver without the
-/// ioctl, carry none.
+/// carries those every node reports, sorted and deduplicated; other sizes,
+/// and a driver without the ioctl, carry none.
 #[test]
 fn isp_nodes_provide_the_modes() {
     let nv12_fourcc = fourcc(b"NV12");
