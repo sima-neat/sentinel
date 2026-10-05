@@ -291,10 +291,11 @@ impl Enumerator<'_> {
                 *description = trim_c_space(&bounded_string(&format.description)).to_string();
             }
         }
+        // Frame sizes and intervals are keyed by pixel format alone, so each
+        // format is enumerated once however many lists it appears in.
         let mut modes = Vec::new();
-        for format in &formats {
-            let description = &descriptions[&format.pixelformat];
-            modes.extend(self.format_modes(format.pixelformat, description)?);
+        for (&pixel_format, description) in &descriptions {
+            modes.extend(self.format_modes(pixel_format, description)?);
         }
         modes.sort_by(|left, right| mode_key(left).cmp(&mode_key(right)));
         modes.dedup_by(|left, right| mode_key(left) == mode_key(right));
