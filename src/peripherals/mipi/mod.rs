@@ -344,7 +344,8 @@ impl IspMode {
 /// Every `/sys/class/video4linux` entry named like the ISP output, in sorted
 /// order. Nodes with another card or no discrete size are skipped, the first
 /// failing node makes the ISP unavailable, and several nodes contribute only
-/// the modes they all share. Returns the nodes' device paths and the modes.
+/// the formats and sizes they all share, with the frame intervals they all
+/// report. Returns the nodes' device paths and the modes.
 fn probe_isp(
     sys_root: &Path,
     dev_root: &Path,
@@ -372,7 +373,18 @@ fn probe_isp(
         }
         paths.push(path.to_string_lossy().into_owned());
         common = Some(match common {
-            Some(shared) => shared.intersection(&modes).cloned().collect(),
+            Some(shared) => shared
+                .into_iter()
+                .filter_map(|mut mode| {
+                    let other = modes.iter().find(|other| {
+                        (&other.format, other.width, other.height)
+                            == (&mode.format, mode.width, mode.height)
+                    })?;
+                    mode.intervals
+                        .retain(|interval| other.intervals.contains(interval));
+                    Some(mode)
+                })
+                .collect(),
             None => modes,
         });
     }

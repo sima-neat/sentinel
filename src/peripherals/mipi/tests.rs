@@ -472,7 +472,7 @@ fn media_device_unplugged_after_open_is_skipped() {
 
 /// Several ISP nodes report the modes they share; a node with another card
 /// or no discrete size is skipped. A size the ISP reports frame intervals for
-/// carries them, sorted and deduplicated; other sizes, and a driver without the
+/// carries those every node reports, sorted and deduplicated; other sizes, and a driver without the
 /// ioctl, carry none.
 #[test]
 fn isp_nodes_provide_the_modes() {
@@ -484,6 +484,10 @@ fn isp_nodes_provide_the_modes() {
     first.intervals.push(at_30);
     let mut second = nv12_isp(&[(3840, 2160), (2048, 1080), (1920, 1080)]);
     second.intervals.push(at_30);
+    // A rate only one node reports is dropped; the size is kept.
+    second
+        .intervals
+        .push(((nv12_fourcc, 1920, 1080), discrete_interval(1, 60)));
     let mut third = nv12_isp(&[(2048, 1080), (1920, 1080)]);
     third.intervals.push(at_30);
     let isps = [first, second, third, card, nv12_isp(&[])].map(isp);
