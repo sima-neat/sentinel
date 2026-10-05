@@ -16,10 +16,16 @@ pub(crate) fn trim_c_space(value: &str) -> &str {
     value.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r'))
 }
 
-/// A sysfs attribute as trimmed text; `None` when it cannot be read.
-pub(crate) fn read_text_file(path: &Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    Some(trim_c_space(&String::from_utf8_lossy(&bytes)).to_string())
+/// A sysfs attribute as trimmed text; `None` when it is absent or its device
+/// is gone ([`disappeared`]). Any other read error is returned.
+pub(crate) fn read_text_file(path: &Path) -> io::Result<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(
+            trim_c_space(&String::from_utf8_lossy(&bytes)).to_string(),
+        )),
+        Err(error) if disappeared(errno_of(&error)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// A NUL-terminated kernel string, untrimmed.

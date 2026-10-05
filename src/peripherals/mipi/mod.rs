@@ -355,7 +355,10 @@ fn probe_isp(
     let (mut paths, mut common) = (Vec::new(), None::<BTreeSet<IspMode>>);
     for name in names {
         let entry = class.join(&name);
-        if read_text_file(&entry.join("name")).as_deref() != Some(ISP_SYSFS_NAME) {
+        let sysfs_name = entry.join("name");
+        let card = read_text_file(&sysfs_name)
+            .map_err(|error| describe("could not read", &sysfs_name, &error))?;
+        if card.as_deref() != Some(ISP_SYSFS_NAME) {
             continue;
         }
         let path = dev_root.join(&name);

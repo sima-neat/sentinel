@@ -436,6 +436,10 @@ impl V4l2Provider {
         };
         // The USB device is the nearest ancestor with `idVendor`; the
         // interface number is on the USB interface between it and the node.
+        let read = |path: &Path| {
+            read_text_file(path)
+                .map_err(|error| failed("failed to read V4L2 sysfs attribute", path, &error, false))
+        };
         let mut interface = None;
         let mut usb = None;
         for topology in device
@@ -444,7 +448,7 @@ impl V4l2Provider {
         {
             let path = sys.join(topology);
             if interface.is_none() {
-                interface = read_text_file(&path.join("bInterfaceNumber"));
+                interface = read(&path.join("bInterfaceNumber"))?;
             }
             let vendor = path.join("idVendor");
             let inspect = "failed to inspect V4L2 sysfs attribute";
@@ -478,7 +482,7 @@ impl V4l2Provider {
             return Ok(None);
         }
         let interface = interface.unwrap_or_default();
-        let index = read_text_file(&entry.join("index")).unwrap_or_default();
+        let index = read(&entry.join("index"))?.unwrap_or_default();
         if interface.is_empty() || index.is_empty() {
             return Err(Failure {
                 errno: 0,
@@ -505,19 +509,19 @@ impl V4l2Provider {
                 (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
             });
         let attribute =
-            |name: &str| read_text_file(&usb.join(name)).filter(|text| !text.is_empty());
+            |name: &str| read(&usb.join(name)).map(|text| text.filter(|text| !text.is_empty()));
         let identity = UsbIdentity {
             stable_key,
             topology: topology.into_owned(),
             interface,
             node_index: index,
-            vendor_id: attribute("idVendor"),
-            product_id: attribute("idProduct"),
-            serial: attribute("serial"),
-            manufacturer: attribute("manufacturer"),
-            speed: attribute("speed"),
+            vendor_id: attribute("idVendor")?,
+            product_id: attribute("idProduct")?,
+            serial: attribute("serial")?,
+            manufacturer: attribute("manufacturer")?,
+            speed: attribute("speed")?,
         };
-        let model = attribute("product")
+        let model = attribute("product")?
             .unwrap_or_else(|| trim_c_space(&bounded_string(&capability.card)).to_string());
         let node = fs::canonicalize(device_path).ok();
         let by_id_path = node.and_then(|node| by_id.get(&node));

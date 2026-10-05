@@ -72,9 +72,6 @@ pub(crate) fn enumerate<T, D>(
 ) -> Result<Vec<D>, EnumerationError> {
     let mut entries = Vec::new();
     for index in 0.. {
-        if index >= MAX_ENUMERATION_ENTRIES {
-            return Err(EnumerationError::Malformed(format!("{list} list")));
-        }
         *budget = budget.checked_sub(1).ok_or_else(|| {
             let what = format!("enumeration (more than {MAX_DEVICE_ENUMERATIONS} queries)");
             EnumerationError::Malformed(what)
@@ -84,6 +81,10 @@ pub(crate) fn enumerate<T, D>(
             Err(error) if error.raw_os_error() == Some(libc::EINVAL) => break,
             Err(error) => return Err(EnumerationError::Failed(error)),
         };
+        // Index MAX_ENUMERATION_ENTRIES is queried so a full list can end.
+        if index >= MAX_ENUMERATION_ENTRIES {
+            return Err(EnumerationError::Malformed(format!("{list} list")));
+        }
         match decode(value) {
             Some(ControlFlow::Continue(entry)) => entries.push(entry),
             Some(ControlFlow::Break(entry)) => {
