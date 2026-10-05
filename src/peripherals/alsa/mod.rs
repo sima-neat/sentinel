@@ -428,13 +428,12 @@ impl AlsaProvider {
         entry: &Path,
         listed: Option<Card>,
     ) -> Result<Vec<Microphone>, ProviderError> {
-        // The kernel never registers a card without an id; an empty or
-        // unreadable one is skipped until a later scan.
-        let Some(card_id) = read_text_file(&entry.join("id"))
-            .ok()
-            .flatten()
-            .filter(|id| !id.is_empty())
-        else {
+        // The kernel never registers a card without an id; a missing or empty
+        // one is skipped until a later scan, and a read error fails the scan.
+        let id = entry.join("id");
+        let card_id = read_text_file(&id)
+            .map_err(|error| io_error("failed to read ALSA card id", &id, &error, false))?;
+        let Some(card_id) = card_id.filter(|id| !id.is_empty()) else {
             return Ok(Vec::new());
         };
         // The global list's name and driver describe this card only when its

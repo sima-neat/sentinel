@@ -40,7 +40,8 @@ link) has no device path, so its key is the live card id:
 the card id changes (the driver's `id` option), and two cards of one driver
 can swap their suffixed ids (`Loopback`, `Loopback_1`) between boots. Such a
 record carries the `peripherals.sysfs_device_missing` issue. A card whose
-live sysfs id is empty or unreadable is skipped until a later scan.
+live sysfs id is missing or empty is skipped until a later scan; one that
+cannot be read fails the scan.
 
 ## Fields
 

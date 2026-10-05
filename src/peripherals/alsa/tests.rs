@@ -669,15 +669,25 @@ fn card_without_a_parent_device_is_listed_beside_usb_microphones() {
     assert!(board.details().is_empty());
 }
 
-/// A card whose live sysfs id is unreadable is skipped rather than published
-/// with an id from the global list.
+/// A card whose live sysfs id is missing is skipped rather than published
+/// with an id from the global list; one whose id cannot be read fails the scan.
 #[test]
 fn card_without_a_live_id_is_skipped() {
     let mut board = Board::new();
     let port = "1-3.2";
     board.usb_mic(2, port, "Departed", MONO_STREAM);
-    fs::remove_file(board.path(&format!("sys/{XHCI}/{port}/{port}:1.0/sound/card2/id"))).unwrap();
+    let id = board.path(&format!("sys/{XHCI}/{port}/{port}:1.0/sound/card2/id"));
+    fs::remove_file(&id).unwrap();
     assert!(board.details().is_empty());
+    // An id that exists but cannot be read fails the scan instead.
+    fs::create_dir(&id).unwrap();
+    let error = board.scan().unwrap_err();
+    assert_eq!(error.code, "io.open");
+    assert!(
+        error.reason.starts_with("failed to read ALSA card id"),
+        "{}",
+        error.reason
+    );
 }
 
 /// A USB attribute that exists but cannot be read fails the scan rather than
