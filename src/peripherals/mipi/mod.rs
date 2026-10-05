@@ -38,7 +38,8 @@ use super::v4l2::{decode_interval, decode_size, interval_order, value_cmp};
 use super::videodev2::{
     effective_capabilities, enumerate, fourcc_string, Capability, EnumerationError, FmtDesc,
     FrmIvalEnum, FrmSizeEnum, MAX_DEVICE_ENUMERATIONS, MAX_ENUMERATION_ENTRIES,
-    V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+    V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE,
+    V4L2_CAP_VIDEO_CAPTURE_MPLANE,
 };
 use super::{Peripheral, Provider, ProviderError};
 use ioctl::*;
@@ -466,24 +467,35 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
     if bounded_string(&capability.card) != ISP_CARD_NAME {
         return Ok(BTreeSet::new());
     }
-    let buf_type = if effective_capabilities(&capability) & V4L2_CAP_VIDEO_CAPTURE_MPLANE != 0 {
-        V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
-    } else {
-        V4L2_BUF_TYPE_VIDEO_CAPTURE
-    };
+    // The formats of every advertised capture API, each enumerated once:
+    // sizes and intervals are keyed by pixel format alone.
+    let capabilities = effective_capabilities(&capability);
     let mut budget = MAX_DEVICE_ENUMERATIONS;
-    let ioctl = ("VIDIOC_ENUM_FMT", "format");
-    let query = |index| {
-        let mut value = FmtDesc {
-            index,
-            buf_type,
-            ..FmtDesc::default()
+    let mut formats = BTreeSet::new();
+    for (capture, buf_type) in [
+        (V4L2_CAP_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE),
+        (
+            V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+        ),
+    ] {
+        if capabilities & capture == 0 {
+            continue;
+        }
+        let ioctl = ("VIDIOC_ENUM_FMT", "format");
+        let query = |index| {
+            let mut value = FmtDesc {
+                index,
+                buf_type,
+                ..FmtDesc::default()
+            };
+            node.enum_format(&mut value).map(|()| value.pixelformat)
         };
-        node.enum_format(&mut value).map(|()| value.pixelformat)
-    };
-    let formats = isp_list(&mut budget, path, ioctl, query, |format| {
-        Some(Continue(format))
-    })?;
+        let listed = isp_list(&mut budget, path, ioctl, query, |format| {
+            Some(Continue(format))
+        })?;
+        formats.extend(listed);
+    }
     let mut modes = BTreeSet::new();
     for pixel_format in formats {
         let ioctl = ("VIDIOC_ENUM_FRAMESIZES", "frame size");
