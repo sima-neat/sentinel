@@ -16,6 +16,11 @@ for the new variant.
 - `id` must be stable across replugs and reboots: derive it from a bus path,
   serial number, or another attribute that survives them, never from an
   enumeration index such as a card number or `/dev/videoN`.
+- `id` must also be unique across the whole catalog; the worker does not
+  check. Prefix it with the type and provider, as the existing ids do
+  (`camera:v4l2:…`, `microphone:alsa:…`), and build the rest from something
+  two identical devices cannot share, such as the port they are plugged into.
+  A serial number alone is not enough: cheap devices often repeat one.
 - Optional facts are `Option` fields marked
   `#[serde(default, skip_serializing_if = "Option::is_none")]`, as in the
   existing records, so an unknown fact is left out of the JSON. A plain
@@ -65,7 +70,8 @@ sysfs, procfs, and `/dev` roots as parameters and fake the ioctl layer, as
 `alsa/tests.rs` and `v4l2/tests.rs` do. Cover each way devices of the class
 differ, not only the device you have: counts, formats, ranges versus discrete
 values, missing optional fields, several identical devices at once, and a
-device that disappears mid-scan. Label fixtures copied from real hardware as
+device that disappears mid-scan. Assert that two identical devices get
+different ids. Label fixtures copied from real hardware as
 real captures.
 
 `cargo test --locked` must pass, and `cargo fmt --check` and `cargo clippy
