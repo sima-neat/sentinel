@@ -100,13 +100,13 @@ fn failed(action: &str, path: &Path, error: &io::Error, eperm: bool) -> Failure 
     Failure { errno, error }
 }
 
-fn value_cmp(left: &Fraction, right: &Fraction) -> Ordering {
+pub(super) fn value_cmp(left: &Fraction, right: &Fraction) -> Ordering {
     let left_value = u64::from(left.numerator) * u64::from(right.denominator);
     left_value.cmp(&(u64::from(right.numerator) * u64::from(left.denominator)))
 }
 
 /// A discrete period or the minimum of a range.
-fn shortest(interval: &Interval) -> Fraction {
+pub(super) fn shortest(interval: &Interval) -> Fraction {
     match *interval {
         Interval::Discrete(period) => period,
         Interval::Stepwise { minimum, .. } | Interval::Continuous { minimum, .. } => minimum,
@@ -115,7 +115,7 @@ fn shortest(interval: &Interval) -> Fraction {
 
 /// Discrete before stepwise before continuous, then by the shortest period's
 /// value, then by its terms.
-fn interval_order(left: &Interval, right: &Interval) -> Ordering {
+pub(super) fn interval_order(left: &Interval, right: &Interval) -> Ordering {
     let key = |interval: &Interval| {
         let kind = match interval {
             Interval::Discrete(_) => 0,
@@ -169,7 +169,7 @@ fn mode_key(mode: &Mode) -> (&str, u8, [u32; 6]) {
 type Size = (u32, u32, Option<SizeRange>);
 
 /// A stepwise or continuous range ends the list.
-fn decode_size(value: FrmSizeEnum) -> Option<ControlFlow<Size, Size>> {
+pub(super) fn decode_size(value: FrmSizeEnum) -> Option<ControlFlow<Size, Size>> {
     let kind = match value.kind {
         V4L2_FRMSIZE_TYPE_DISCRETE => {
             let [width, height, ..] = value.data;
@@ -196,7 +196,7 @@ fn decode_size(value: FrmSizeEnum) -> Option<ControlFlow<Size, Size>> {
 
 /// `data` is the discrete fraction, or the `min`, `max` and `step` fractions
 /// of a range, which ends the list.
-fn decode_interval(value: FrmIvalEnum) -> Option<ControlFlow<Interval, Interval>> {
+pub(super) fn decode_interval(value: FrmIvalEnum) -> Option<ControlFlow<Interval, Interval>> {
     let fraction = |at: usize| {
         let (numerator, denominator) = (value.data[2 * at], value.data[2 * at + 1]);
         (numerator != 0 && denominator != 0).then_some(Fraction {
@@ -351,6 +351,7 @@ impl Enumerator<'_> {
                 height: discrete.then_some(height),
                 size_range,
                 frame_intervals,
+                isp_output: None,
             });
         }
         Ok(modes)
