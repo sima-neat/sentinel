@@ -18,6 +18,7 @@ mod ioctl;
 #[cfg(test)]
 mod tests;
 
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
@@ -25,12 +26,14 @@ use std::io;
 use std::ops::ControlFlow::{self, Continue};
 use std::path::{Path, PathBuf};
 
-use super::camera::{Camera, Interval, Isp, MipiCamera, Mode, SensorTiming, SizeIntervals, Source};
+use super::camera::{
+    Camera, Fraction, Interval, Isp, MipiCamera, Mode, SensorTiming, SizeIntervals, Source,
+};
 use super::sysutil::{
     bounded_string, disappeared, errno_of, io_error, os_message, read_text_file, trim_c_space,
     vanished, CODE_DISCOVERY_FAILED,
 };
-use super::v4l2::{decode_interval, decode_size, interval_order};
+use super::v4l2::{decode_interval, decode_size, interval_order, value_cmp};
 use super::videodev2::{
     effective_capabilities, enumerate, fourcc_string, Capability, EnumerationError, FmtDesc,
     FrmIvalEnum, FrmSizeEnum, MAX_DEVICE_ENUMERATIONS, MAX_ENUMERATION_ENTRIES,
@@ -380,8 +383,13 @@ fn probe_isp(
                         (&other.format, other.width, other.height)
                             == (&mode.format, mode.width, mode.height)
                     })?;
-                    mode.intervals
-                        .retain(|interval| other.intervals.contains(interval));
+                    let shared = |interval: &Interval| {
+                        other
+                            .intervals
+                            .iter()
+                            .any(|other| same_interval(interval, other))
+                    };
+                    mode.intervals.retain(shared);
                     Some(mode)
                 })
                 .collect(),
@@ -394,6 +402,40 @@ fn probe_isp(
             Err("Modalix ISP output nodes reported no common discrete sizes".to_string())
         }
         Some(modes) => Ok((paths, modes)),
+    }
+}
+
+/// Whether two intervals are the same periods, whatever their fractions'
+/// terms (`1/30` and `2/60` are one interval).
+fn same_interval(left: &Interval, right: &Interval) -> bool {
+    let same = |left: &Fraction, right: &Fraction| value_cmp(left, right) == Ordering::Equal;
+    match (left, right) {
+        (Interval::Discrete(l), Interval::Discrete(r)) => same(l, r),
+        (
+            Interval::Stepwise {
+                minimum,
+                maximum,
+                step,
+            },
+            Interval::Stepwise {
+                minimum: m,
+                maximum: x,
+                step: s,
+            },
+        )
+        | (
+            Interval::Continuous {
+                minimum,
+                maximum,
+                step,
+            },
+            Interval::Continuous {
+                minimum: m,
+                maximum: x,
+                step: s,
+            },
+        ) => same(minimum, m) && same(maximum, x) && same(step, s),
+        _ => false,
     }
 }
 
@@ -478,7 +520,7 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
             };
             let mut intervals = isp_list(&mut budget, path, ioctl, query, decode_interval)?;
             intervals.sort_by(interval_order);
-            intervals.dedup();
+            intervals.dedup_by(|left, right| same_interval(left, right));
             modes.insert(IspMode {
                 format: fourcc_string(pixel_format),
                 width,

@@ -489,7 +489,11 @@ fn isp_nodes_provide_the_modes() {
         .intervals
         .push(((nv12_fourcc, 1920, 1080), discrete_interval(1, 60)));
     let mut third = nv12_isp(&[(2048, 1080), (1920, 1080)]);
-    third.intervals.push(at_30);
+    // Fractions compare by value: 2/60 is the 1/30 the other nodes report,
+    // and a node reporting both lists it once.
+    let at_30_unreduced = ((nv12_fourcc, 1920, 1080), discrete_interval(2, 60));
+    third.intervals.push(at_30_unreduced);
+    first.intervals.push(at_30_unreduced);
     let isps = [first, second, third, card, nv12_isp(&[])].map(isp);
     let details = imx477(isps, vec![]);
     let modes = json!([nv12((1920, 1080), Some((30, 1))), nv12((2048, 1080), None)]);
