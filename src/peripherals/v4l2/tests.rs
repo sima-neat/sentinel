@@ -539,4 +539,16 @@ fn enumeration_is_bounded_per_list_and_per_device() {
     assert_eq!(reason(busy), format!("{malformed} {budget}"));
     let enumerations = calls.load(SeqCst) - 1; // Not VIDIOC_QUERYCAP.
     assert_eq!(enumerations, MAX_DEVICE_ENUMERATIONS as usize);
+
+    // A format in both the single- and multi-planar lists is enumerated once:
+    // 1000 sizes with one rate cost about 3000 queries, twice that would not fit.
+    let capture = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE;
+    let mut both = node("both", capture);
+    let sizes = Vec::from_iter((1..=1000).map(|width| (width, 480, &[30][..])));
+    add_format(&mut both, CAPTURE, b"MJPG", &sizes);
+    let mplane = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    both.formats.push((mplane, fourcc(b"MJPG"), ""));
+    let records = scan(root.path(), vec![("video0", Ok(both))]).unwrap();
+    let records = serde_json::to_value(&records).unwrap();
+    assert_eq!(records[0]["modes"].as_array().unwrap().len(), 1000);
 }
