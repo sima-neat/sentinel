@@ -680,6 +680,20 @@ fn card_without_a_live_id_is_skipped() {
     assert!(board.details().is_empty());
 }
 
+/// A USB attribute that exists but cannot be read fails the scan rather than
+/// reading as absent.
+#[test]
+fn unreadable_usb_attributes_fail_the_scan() {
+    let mut board = Board::new();
+    let port = "1-3.2";
+    board.usb_mic(2, port, "Yeti", MONO_STREAM);
+    fs::create_dir_all(board.path(&format!("sys/{XHCI}/{port}/serial"))).unwrap();
+    let error = board.scan().unwrap_err();
+    assert_eq!(error.code, "io.open");
+    let read = "failed to read ALSA sysfs attribute";
+    assert!(error.reason.starts_with(read), "{}", error.reason);
+}
+
 /// A kernel without ALSA, or without sound cards, has no microphones. A
 /// stale or unparsable global card list only loses name and driver. An
 /// unreadable list, a present card with no `device` link, and an incomplete

@@ -281,12 +281,18 @@ fn link_to(directory: &Path, target: &str) -> Option<String> {
 
 /// A USB card's `identity.usb`: from the nearest sysfs ancestor with
 /// `idVendor` and `idProduct` (the USB device) and the USB interface between
-/// it and the card's device. `None` for a card that is not on USB; the only
-/// error is an ancestor with one of `idVendor` and `idProduct`.
+/// it and the card's device. `None` for a card that is not on USB; an error
+/// for an ancestor with one of `idVendor` and `idProduct`, or an attribute
+/// that exists but cannot be read.
 fn usb_identity(sys: &Path, device: &Path) -> Result<Option<UsbIdentity>, ProviderError> {
     for path in device.ancestors().take_while(|path| *path != sys) {
-        let attribute = |name: &str| read_text_file(&path.join(name)).ok().flatten();
-        let (vendor, product) = match (attribute("idVendor"), attribute("idProduct")) {
+        let attribute = |name: &str| {
+            let file = path.join(name);
+            read_text_file(&file).map_err(|error| {
+                io_error("failed to read ALSA sysfs attribute", &file, &error, false)
+            })
+        };
+        let (vendor, product) = match (attribute("idVendor")?, attribute("idProduct")?) {
             (Some(vendor), Some(product)) => (vendor, product),
             (None, None) => continue,
             _ => {
@@ -304,15 +310,15 @@ fn usb_identity(sys: &Path, device: &Path) -> Result<Option<UsbIdentity>, Provid
             .take_while(|child| *child != path)
             .filter_map(|child| child.file_name()?.to_str())
             .find(|name| name.starts_with(&prefix));
-        let text = |key: &str| attribute(key).filter(|text| !text.is_empty());
+        let text = |key: &str| attribute(key).map(|text| text.filter(|text| !text.is_empty()));
         return Ok(Some(UsbIdentity {
             vendor_id: vendor,
             product_id: product,
             bus_path: bus_path.into_owned(),
             interface: interface.map(str::to_owned),
-            manufacturer: text("manufacturer"),
-            product: text("product"),
-            serial: text("serial"),
+            manufacturer: text("manufacturer")?,
+            product: text("product")?,
+            serial: text("serial")?,
         }));
     }
     Ok(None)
