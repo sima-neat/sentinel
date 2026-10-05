@@ -171,4 +171,19 @@ pub(crate) mod tests {
         assert_eq!(value["devices"][0]["id"], "test:a");
         assert_eq!(serde_json::from_value::<Catalog>(value).unwrap(), catalog);
     }
+
+    /// `docs/peripherals/catalog-example.json` is the published contract that
+    /// consumers test against: a DevKit capture (IMX477, Logitech C920 camera
+    /// and microphone) with the USB camera trimmed to one mode per format. It
+    /// must round-trip unchanged, so changing the schema fails here until
+    /// the example, and the consumers using it, are updated.
+    #[test]
+    fn the_published_example_matches_the_schema() {
+        let text = include_str!("../../docs/peripherals/catalog-example.json");
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        let catalog: Catalog = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&catalog).unwrap(), value);
+        let types: Vec<_> = catalog.devices.iter().map(Peripheral::kind).collect();
+        assert_eq!(types, ["camera", "camera", "microphone"]);
+    }
 }

@@ -86,6 +86,11 @@ Device records are described per type: [USB cameras](peripherals/camera.md),
 [MIPI CSI-2 cameras](peripherals/camera-mipi.md),
 [microphones](peripherals/microphone.md).
 
+[`peripherals/catalog-example.json`](peripherals/catalog-example.json) is a
+complete response from a DevKit, with the USB camera trimmed to one mode per
+format. A Sentinel test checks it against the schema, so clients can test
+against it.
+
 ## Security and concurrency
 
 The socket is local to the DevKit and is never exposed remotely by Sentinel.
