@@ -14,7 +14,7 @@ mod worker;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub use worker::{start, Peripherals, Worker};
+pub use worker::{start, Peripherals, RefreshError, Worker};
 
 /// One connected device, serialized flat with a `type` tag. Each device type
 /// is added as a variant together with the provider that discovers it.
