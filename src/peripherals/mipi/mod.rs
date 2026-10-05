@@ -27,8 +27,7 @@ use std::ops::ControlFlow::{self, Continue};
 use std::path::{Path, PathBuf};
 
 use super::camera::{
-    Availability, AvailabilityState, Camera, Fraction, Interval, Isp, MipiCamera, Mode,
-    SensorTiming, SizeIntervals, Source,
+    Camera, Fraction, Interval, Isp, MipiCamera, Mode, SensorTiming, SizeIntervals, Source,
 };
 use super::sysutil::{
     bounded_string, disappeared, errno_of, io_error, os_message, read_text_file, trim_c_space,
@@ -41,6 +40,7 @@ use super::videodev2::{
     V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE,
     V4L2_CAP_VIDEO_CAPTURE_MPLANE,
 };
+use super::{Availability, AvailabilityState};
 use super::{Peripheral, Provider, ProviderError};
 use ioctl::*;
 
@@ -132,6 +132,8 @@ impl Provider for MipiProvider {
                 availability: Availability {
                     state: AvailabilityState::Unknown,
                     reason: Some(AVAILABILITY_REASON.to_string()),
+                    subdevices: None,
+                    subdevices_available: None,
                 },
                 modes: modes.clone(),
                 source: Source::Mipi(MipiCamera {

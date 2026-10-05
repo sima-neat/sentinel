@@ -3,8 +3,10 @@
 //! catalog that the API serves. Sentinel reports hardware facts only; whether
 //! an application supports a device is decided by that application.
 
+mod alsa;
 pub mod camera;
 pub mod cli;
+pub mod microphone;
 mod mipi;
 mod sysutil;
 mod uevent;
@@ -25,6 +27,7 @@ pub use worker::{start, Peripherals, RefreshError, Worker};
 #[cfg_attr(test, allow(clippy::large_enum_variant))]
 pub enum Peripheral {
     Camera(camera::Camera),
+    Microphone(microphone::Microphone),
     #[cfg(test)]
     Test(tests::TestDevice),
 }
@@ -34,6 +37,7 @@ impl Peripheral {
     pub fn id(&self) -> &str {
         match *self {
             Peripheral::Camera(ref camera) => &camera.id,
+            Peripheral::Microphone(ref microphone) => &microphone.id,
             #[cfg(test)]
             Peripheral::Test(ref device) => &device.id,
         }
@@ -43,6 +47,7 @@ impl Peripheral {
     pub fn kind(&self) -> &'static str {
         match *self {
             Peripheral::Camera(_) => "camera",
+            Peripheral::Microphone(_) => "microphone",
             #[cfg(test)]
             Peripheral::Test(_) => "test",
         }
@@ -52,10 +57,34 @@ impl Peripheral {
     pub fn describe(&self) -> String {
         match *self {
             Peripheral::Camera(ref camera) => camera.describe(),
+            Peripheral::Microphone(ref microphone) => microphone.describe(),
             #[cfg(test)]
             Peripheral::Test(ref device) => device.id.clone(),
         }
     }
+}
+
+/// Whether the device is free, as the kernel last reported it. Discovery
+/// never opens a stream, so this is a snapshot from the latest scan, or
+/// `unknown` with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Availability {
+    pub state: AvailabilityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Capture subdevices, and how many of them are free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdevices: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdevices_available: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvailabilityState {
+    Unknown,
+    Available,
+    InUse,
 }
 
 /// The catalog served by `GET /v1/peripherals`.
@@ -112,6 +141,7 @@ pub fn builtin_providers() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(mipi::MipiProvider::new()),
         Box::new(v4l2::V4l2Provider::new()),
+        Box::new(alsa::AlsaProvider::new()),
     ]
 }
 
@@ -140,5 +170,20 @@ pub(crate) mod tests {
         assert_eq!(value["devices"][0]["type"], "test");
         assert_eq!(value["devices"][0]["id"], "test:a");
         assert_eq!(serde_json::from_value::<Catalog>(value).unwrap(), catalog);
+    }
+
+    /// `docs/peripherals/catalog-example.json` is the published contract that
+    /// consumers test against: a DevKit capture (IMX477, Logitech C920 camera
+    /// and microphone) with the USB camera trimmed to one mode per format. It
+    /// must round-trip unchanged, so changing the schema fails here until
+    /// the example, and the consumers using it, are updated.
+    #[test]
+    fn the_published_example_matches_the_schema() {
+        let text = include_str!("../../docs/peripherals/catalog-example.json");
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        let catalog: Catalog = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&catalog).unwrap(), value);
+        let types: Vec<_> = catalog.devices.iter().map(Peripheral::kind).collect();
+        assert_eq!(types, ["camera", "camera", "microphone"]);
     }
 }

@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::Availability;
+
 /// One camera, serialized flat with a `backend` tag from [`Source`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
@@ -22,21 +24,6 @@ pub enum Source {
     V4l2(UsbCamera),
     /// A MIPI CSI-2 sensor behind the Modalix ISP.
     Mipi(MipiCamera),
-}
-
-/// Whether the device is free. Discovery never opens a stream, so a camera's
-/// state is `unknown` with the reason.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Availability {
-    pub state: AvailabilityState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AvailabilityState {
-    Unknown,
 }
 
 /// One output format at one size (or size range) and frame rate.
