@@ -290,8 +290,17 @@ fn overlay_list(
             return Err(ProviderError::new(code, reason));
         }
     };
+    // Read both pipes while waiting: a child that fills a pipe would block
+    // until the timeout otherwise. Output past each limit is read and dropped.
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    set_nonblocking(stdout.as_ref());
+    set_nonblocking(stderr.as_ref());
+    let (mut output, mut errors) = (Vec::new(), Vec::new());
     let deadline = Instant::now() + timeout;
     let status = loop {
+        drain(&mut stdout, &mut output, MAX_COMMAND_OUTPUT);
+        drain(&mut stderr, &mut errors, MAX_COMMAND_ERRORS);
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(FW_PRINTENV_POLL),
@@ -306,10 +315,9 @@ fn overlay_list(
             }
         }
     };
+    drain(&mut stdout, &mut output, MAX_COMMAND_OUTPUT);
+    drain(&mut stderr, &mut errors, MAX_COMMAND_ERRORS);
     if !status.success() {
-        let errors = child.stderr.take().map_or_else(Vec::new, |stderr| {
-            read_available(stderr, MAX_COMMAND_ERRORS)
-        });
         let errors = String::from_utf8_lossy(&errors);
         if errors.contains("not defined") {
             return Ok(None);
@@ -320,9 +328,6 @@ fn overlay_list(
         }
         return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
     }
-    let output = child.stdout.take().map_or_else(Vec::new, |stdout| {
-        read_available(stdout, MAX_COMMAND_OUTPUT)
-    });
     let entries = String::from_utf8_lossy(&output)
         .split_ascii_whitespace()
         .filter(|entry| entry.ends_with(".dtbo"))
@@ -331,29 +336,39 @@ fn overlay_list(
     Ok(Some(entries))
 }
 
-/// Up to `limit` bytes an exited child left in an output pipe, without
-/// blocking on a descendant that still holds the pipe open.
-fn read_available(mut pipe: impl Read + AsRawFd, limit: usize) -> Vec<u8> {
-    let fd = pipe.as_raw_fd();
-    // SAFETY: fcntl on a descriptor owned by `pipe`, which outlives the calls.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+/// Makes `pipe` non-blocking, so `drain` returns when it is empty.
+fn set_nonblocking(pipe: Option<&impl AsRawFd>) {
+    if let Some(pipe) = pipe {
+        let fd = pipe.as_raw_fd();
+        // SAFETY: fcntl on a descriptor owned by `pipe`, which outlives the calls.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
         }
     }
-    let mut output = Vec::new();
+}
+
+/// Reads what `pipe` holds now into `output`, keeping at most `limit` bytes
+/// and dropping the rest; at end of file or on an error the pipe is closed.
+fn drain(pipe: &mut Option<impl Read>, output: &mut Vec<u8>, limit: usize) {
+    let Some(reader) = pipe else {
+        return;
+    };
     let mut chunk = [0u8; 4096];
-    while output.len() < limit {
-        match pipe.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => output.extend_from_slice(&chunk[..read]),
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break *pipe = None,
+            Ok(read) => {
+                let keep = read.min(limit.saturating_sub(output.len()));
+                output.extend_from_slice(&chunk[..keep]);
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => break *pipe = None,
         }
     }
-    output.truncate(limit);
-    output
 }
 
 /// `<bus>-<4 hex digits>`, the kernel's name for an I2C client; adapters are

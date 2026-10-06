@@ -412,6 +412,18 @@ fn the_overlay_list_keeps_dtbo_entries_and_degrades_without_fw_printenv() {
     write_file(&missing, "#!/bin/sh\n");
     let denied = list(&[missing.to_str().unwrap()], second).unwrap_err();
     assert_eq!(denied.code, CODE_PERMISSION_DENIED);
+    // Output larger than a pipe holds is read while the tool runs, kept up to
+    // the limit, and does not hold the tool past the timeout (Codex 4192614464).
+    let started = Instant::now();
+    let flood =
+        "head -c 300000 /dev/zero | tr '\\0' ' '; echo a.dtbo; head -c 300000 /dev/zero >&2";
+    assert_eq!(list(&["sh", "-c", flood], second), Ok(Some(Vec::new())));
+    assert!(started.elapsed() < second, "{:?}", started.elapsed());
+    let tail = "printf 'a.dtbo '; head -c 300000 /dev/zero | tr '\\0' ' '";
+    assert_eq!(
+        list(&["sh", "-c", tail], second),
+        Ok(Some(vec!["a.dtbo".into()]))
+    );
     // A hung tool is killed at the timeout.
     let started = Instant::now();
     let hung = list(&["sh", "-c", "exec sleep 5"], Duration::from_millis(200)).unwrap_err();
