@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+use super::board::Board;
 use super::Catalog;
 
 /// Longer than the daemon's 10 s wait for a refresh scan.
@@ -100,6 +101,9 @@ fn render(catalog: &Catalog) -> String {
             ));
         }
     }
+    if let Some(ref board) = catalog.board {
+        out.push_str(&render_board(board));
+    }
     for error in &catalog.errors {
         out.push_str(&format!(
             "  ! {} {}: {}\n",
@@ -111,10 +115,44 @@ fn render(catalog: &Catalog) -> String {
     out
 }
 
+/// The model, the overlay list, and whether each configured camera was
+/// detected.
+fn render_board(board: &Board) -> String {
+    let model = board.model.as_deref().unwrap_or("unknown");
+    let overlays = match board.camera_overlays {
+        None => "unknown".to_string(),
+        Some(ref overlays) if overlays.is_empty() => "none".to_string(),
+        Some(ref overlays) => overlays.join(" "),
+    };
+    let mut out = format!(
+        "\n  Board      {}\n  Overlays   {}\n",
+        printable(model),
+        printable(&overlays)
+    );
+    if board.configured_cameras.is_empty() {
+        out.push_str("  No cameras configured in the device tree.\n");
+    }
+    for camera in &board.configured_cameras {
+        let state = match (&camera.camera_id, camera.driver_bound) {
+            (Some(id), _) => format!("detected as {}", printable(id)),
+            (None, true) => "not detected".to_string(),
+            (None, false) => "not detected (no driver bound)".to_string(),
+        };
+        out.push_str(&format!(
+            "  Configured {} at {}, {} lanes: {state}\n",
+            printable(&camera.compatible),
+            printable(&camera.i2c_device),
+            camera.data_lanes
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
 
+    use super::super::board::ConfiguredCamera;
     use super::super::tests::device;
     use super::super::CatalogError;
     use super::*;
@@ -124,6 +162,7 @@ mod tests {
         let mut catalog = Catalog {
             revision: 3,
             observed_at: None,
+            board: None,
             devices: vec![device("test:\x1b[2Jcam")],
             errors: vec![CatalogError {
                 provider: "test.scripted".into(),
@@ -145,5 +184,60 @@ mod tests {
         assert!(!text.contains('\x1b'));
         // Bidirectional overrides and isolates cannot reorder the line.
         assert_eq!(printable("cam\u{202E}era\u{2066}x"), "cam?era?x");
+    }
+
+    #[test]
+    fn render_shows_the_board_and_whether_configured_cameras_were_detected() {
+        let camera = |i2c_device: &str, driver_bound, camera_id: Option<&str>| ConfiguredCamera {
+            compatible: "sony,imx477".into(),
+            dt_node: format!("/i2c/imx477@{i2c_device}"),
+            i2c_device: i2c_device.into(),
+            data_lanes: 2,
+            driver_bound,
+            camera_id: camera_id.map(str::to_owned),
+        };
+        let catalog = Catalog {
+            revision: 3,
+            observed_at: Some(Utc::now()),
+            board: Some(Board {
+                model: Some("SiMa.ai Modalix SoM 16Gig Board".into()),
+                camera_overlays: Some(vec!["a.dtbo".into(), "b.dtbo".into()]),
+                configured_cameras: vec![
+                    camera("5-001a", true, Some("camera:imx477 5-001a")),
+                    camera("6-001a", true, None),
+                    camera("7-001a", false, None),
+                ],
+                supported_sensors: Vec::new(),
+            }),
+            devices: Vec::new(),
+            errors: Vec::new(),
+        };
+        let text = render(&catalog);
+        assert!(
+            text.contains("  Board      SiMa.ai Modalix SoM 16Gig Board\n"),
+            "{text}"
+        );
+        assert!(text.contains("  Overlays   a.dtbo b.dtbo\n"), "{text}");
+        assert!(text.contains(
+            "  Configured sony,imx477 at 5-001a, 2 lanes: detected as camera:imx477 5-001a\n"
+        ));
+        assert!(
+            text.contains("at 6-001a, 2 lanes: not detected\n"),
+            "{text}"
+        );
+        assert!(text.contains("at 7-001a, 2 lanes: not detected (no driver bound)\n"));
+
+        let empty = Board {
+            model: None,
+            camera_overlays: None,
+            configured_cameras: Vec::new(),
+            supported_sensors: Vec::new(),
+        };
+        let text = render_board(&empty);
+        assert!(
+            text.contains("Board      unknown\n  Overlays   unknown\n"),
+            "{text}"
+        );
+        assert!(text.contains("No cameras configured"), "{text}");
     }
 }

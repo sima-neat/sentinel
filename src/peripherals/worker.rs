@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use chrono::Utc;
 
+use super::board::BoardProbe;
 use super::uevent::UeventSocket;
 use super::{Catalog, CatalogError, Peripheral, Provider};
 
@@ -116,12 +117,16 @@ impl Worker {
 }
 
 /// Start the worker; it scans immediately, then on every relevant uevent
-/// and refresh request.
+/// and refresh request. Each scan also reads the live system's `board` block.
 pub fn start(providers: Vec<Box<dyn Provider>>) -> Result<Worker> {
-    spawn(providers, true)
+    spawn(providers, Some(BoardProbe::new()), true)
 }
 
-fn spawn(providers: Vec<Box<dyn Provider>>, listen_for_uevents: bool) -> Result<Worker> {
+fn spawn(
+    providers: Vec<Box<dyn Provider>>,
+    board: Option<BoardProbe>,
+    listen_for_uevents: bool,
+) -> Result<Worker> {
     // SAFETY: plain eventfd creation; the result is checked below.
     let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if raw < 0 {
@@ -131,6 +136,7 @@ fn spawn(providers: Vec<Box<dyn Provider>>, listen_for_uevents: bool) -> Result<
         catalog: RwLock::new(Catalog {
             revision: initial_revision(),
             observed_at: None,
+            board: None,
             devices: Vec::new(),
             errors: Vec::new(),
         }),
@@ -144,7 +150,7 @@ fn spawn(providers: Vec<Box<dyn Provider>>, listen_for_uevents: bool) -> Result<
     let worker_shared = shared.clone();
     let thread = thread::Builder::new()
         .name("peripherals".into())
-        .spawn(move || run(&worker_shared, providers, listen_for_uevents))
+        .spawn(move || run(&worker_shared, providers, board, listen_for_uevents))
         .context("spawn peripherals thread")?;
     Ok(Worker { shared, thread })
 }
@@ -180,7 +186,12 @@ impl Drop for RunningGuard<'_> {
     }
 }
 
-fn run(shared: &Shared, mut providers: Vec<Box<dyn Provider>>, listen_for_uevents: bool) {
+fn run(
+    shared: &Shared,
+    mut providers: Vec<Box<dyn Provider>>,
+    mut board_probe: Option<BoardProbe>,
+    listen_for_uevents: bool,
+) {
     let _guard = RunningGuard(shared);
     lower_priority();
     let mut hotplug_error = None;
@@ -214,12 +225,19 @@ fn run(shared: &Shared, mut providers: Vec<Box<dyn Provider>>, listen_for_uevent
             devices.extend(good.iter().flatten().cloned());
         }
         devices.sort_by(|left, right| left.id().cmp(right.id()));
+        // After the providers, so `camera_id` refers to these devices.
+        let board = board_probe.as_mut().map(|probe| {
+            let (board, board_errors) = probe.scan(&devices);
+            errors.extend(board_errors);
+            board
+        });
         let mut catalog = shared
             .catalog
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        if catalog.devices != devices || catalog.errors != errors {
+        if catalog.devices != devices || catalog.errors != errors || catalog.board != board {
             catalog.revision += 1;
+            catalog.board = board;
             catalog.devices = devices;
             catalog.errors = errors;
         }
@@ -411,6 +429,7 @@ mod tests {
             vec![Box::new(Scripted {
                 results: results.clone(),
             })],
+            None,
             false,
         )
         .unwrap();
@@ -471,7 +490,7 @@ mod tests {
             scans: scans.clone(),
         };
         (
-            spawn(vec![Box::new(provider)], false).unwrap(),
+            spawn(vec![Box::new(provider)], None, false).unwrap(),
             release,
             scans,
         )
@@ -518,12 +537,51 @@ mod tests {
         assert!(first < 1 << 52 && second < 1 << 52);
     }
 
+    /// The board block comes from the same scan as the devices, and a change
+    /// in it alone changes the revision.
+    #[test]
+    fn a_board_change_changes_the_revision() {
+        use crate::peripherals::board::tests::{
+            devkit_probe, mipi_camera, set_model, DEVKIT_MODEL,
+        };
+        use crate::peripherals::sysutil::testing::TempDir;
+
+        let root = TempDir::new();
+        let results = VecDeque::from([Ok(vec![mipi_camera("imx477 5-001a")])]);
+        let provider = Scripted {
+            results: Arc::new(Mutex::new(results)),
+        };
+        let probe = devkit_probe(root.path());
+        let worker = spawn(vec![Box::new(provider)], Some(probe), false).unwrap();
+        let peripherals = worker.handle();
+        let model = |catalog: &Catalog| catalog.board.as_ref().unwrap().model.clone();
+
+        let first = wait_for(&peripherals, |catalog| catalog.observed_at.is_some());
+        assert_eq!(model(&first).as_deref(), Some(DEVKIT_MODEL));
+        let configured = &first.board.as_ref().unwrap().configured_cameras;
+        assert_eq!(
+            configured[0].camera_id.as_deref(),
+            Some(first.devices[0].id())
+        );
+
+        let unchanged = peripherals.refresh(TIMEOUT).unwrap();
+        assert_eq!(unchanged.revision, first.revision);
+
+        set_model(root.path(), "Another board");
+        let changed = peripherals.refresh(TIMEOUT).unwrap();
+        assert_eq!(model(&changed).as_deref(), Some("Another board"));
+        assert_eq!(changed.devices, first.devices);
+        assert_ne!(changed.revision, first.revision);
+        worker.stop();
+    }
+
     #[test]
     fn a_panicking_provider_stops_serving_the_catalog() {
         let worker = spawn(
             vec![Box::new(Scripted {
                 results: Arc::new(Mutex::new(VecDeque::new())),
             })],
+            None,
             false,
         )
         .unwrap();
