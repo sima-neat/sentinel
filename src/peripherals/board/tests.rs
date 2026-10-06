@@ -202,16 +202,11 @@ fn dt_sensor(root: &Path, node: &str, compatible: &str, lanes: &[u32]) {
 
 /// `/sys/bus/i2c/devices/<name>`, linked to its device directory, whose
 /// `of_node` links to the live node `node`.
-fn i2c_device(root: &Path, name: &str, node: Option<&str>, bound: bool) {
+fn i2c_device(root: &Path, name: &str, node: Option<&str>) {
     let device = root.join("sys/devices/platform/i2c").join(name);
     fs::create_dir_all(&device).unwrap();
     if let Some(node) = node {
         symlink(dt_base(root).join(node), device.join("of_node")).unwrap();
-    }
-    if bound {
-        let driver = root.join("sys/bus/i2c/drivers/sensor");
-        fs::create_dir_all(&driver).unwrap();
-        symlink(driver, device.join("driver")).unwrap();
     }
     let devices = root.join("sys/bus/i2c/devices");
     fs::create_dir_all(&devices).unwrap();
@@ -234,11 +229,11 @@ fn devkit(root: &Path) {
         "i2c@40/eeprom@50",
         &[("compatible", text("atmel,24c32"))],
     );
-    i2c_device(root, "5-001a", Some(SENSOR_NODE), true);
+    i2c_device(root, "5-001a", Some(SENSOR_NODE));
     // The mux channel is an adapter whose node holds the sensor's endpoint.
-    i2c_device(root, "i2c-5", Some("i2cmux@0/i2c@0"), false);
-    i2c_device(root, "0-0050", Some("i2c@40/eeprom@50"), true);
-    i2c_device(root, "1-0068", None, true);
+    i2c_device(root, "i2c-5", Some("i2cmux@0/i2c@0"));
+    i2c_device(root, "0-0050", Some("i2c@40/eeprom@50"));
+    i2c_device(root, "1-0068", None);
     for slot in ["boot-0", "boot-1"] {
         let path = root.join("boot").join(slot).join(OVERLAY);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -257,7 +252,7 @@ fn scan(probe: &mut BoardProbe, devices: &[Peripheral]) -> (serde_json::Value, V
 }
 
 #[test]
-fn a_configured_camera_that_was_detected_names_its_catalog_camera() {
+fn a_configured_camera_names_the_catalog_camera_that_is_its_sensor() {
     let root = TempDir::new();
     devkit(root.path());
     let mut probe = probe(root.path(), &format!("echo '{OVERLAY}'"));
@@ -274,7 +269,6 @@ fn a_configured_camera_that_was_detected_names_its_catalog_camera() {
                 "dt_node": "/i2cmux@0/i2c@0/imx477@1a",
                 "i2c_device": "5-001a",
                 "data_lanes": 2,
-                "driver_bound": true,
                 "camera_id": "camera:imx477 5-001a"
             }],
             "supported_sensors": [{"compatible": "sony,imx477", "overlays": [OVERLAY]}]
@@ -283,7 +277,7 @@ fn a_configured_camera_that_was_detected_names_its_catalog_camera() {
 }
 
 #[test]
-fn a_configured_camera_without_a_catalog_camera_is_not_detected() {
+fn a_configured_camera_without_a_catalog_camera_has_no_camera_id() {
     let root = TempDir::new();
     devkit(root.path());
     dt_sensor(
@@ -292,12 +286,7 @@ fn a_configured_camera_without_a_catalog_camera_is_not_detected() {
         "sony,imx477",
         &[1, 2, 3, 4],
     );
-    i2c_device(
-        root.path(),
-        "6-001a",
-        Some("i2cmux@0/i2c@1/imx477@1a"),
-        false,
-    );
+    i2c_device(root.path(), "6-001a", Some("i2cmux@0/i2c@1/imx477@1a"));
     let mut probe = probe(root.path(), "true");
     // A camera on another bus, and one whose name only starts with the device.
     let devices = [mipi_camera("imx477 7-001a"), mipi_camera("imx477 5-001a0")];
@@ -307,9 +296,9 @@ fn a_configured_camera_without_a_catalog_camera_is_not_detected() {
         board["configured_cameras"],
         json!([
             {"compatible": "sony,imx477", "dt_node": "/i2cmux@0/i2c@0/imx477@1a",
-             "i2c_device": "5-001a", "data_lanes": 2, "driver_bound": true},
+             "i2c_device": "5-001a", "data_lanes": 2},
             {"compatible": "sony,imx477", "dt_node": "/i2cmux@0/i2c@1/imx477@1a",
-             "i2c_device": "6-001a", "data_lanes": 4, "driver_bound": false}
+             "i2c_device": "6-001a", "data_lanes": 4}
         ])
     );
     // `true` prints nothing: the variable is set but holds no overlay.
@@ -323,7 +312,7 @@ fn camera_id_matches_the_i2c_device_as_a_whole_word() {
     let root = TempDir::new();
     let node = "i2c@40/ccs@10";
     dt_sensor(root.path(), node, "mipi-ccs-1.1", &[1, 2]);
-    i2c_device(root.path(), "5-0010", Some(node), true);
+    i2c_device(root.path(), "5-0010", Some(node));
     let mut probe = probe(root.path(), "exit 0");
     let near_miss = [mipi_camera("ccs 5-00100 pixel_array")];
     let (board, _) = scan(&mut probe, &near_miss);
@@ -364,9 +353,9 @@ fn bridges_in_front_of_a_sensor_are_not_cameras() {
     dt_sensor(root.path(), deserializer, "maxim,max96716a", &[1, 2, 3, 4]);
     dt_sensor(root.path(), &serializer, "maxim,max96717", &[1, 2, 3, 4]);
     dt_sensor(root.path(), &sensor, "sony,imx477", &[1, 2, 3, 4]);
-    i2c_device(root.path(), "3-0028", Some(deserializer), true);
-    i2c_device(root.path(), "3-0042", Some(&serializer), true);
-    i2c_device(root.path(), "9-001a", Some(&sensor), true);
+    i2c_device(root.path(), "3-0028", Some(deserializer));
+    i2c_device(root.path(), "3-0042", Some(&serializer));
+    i2c_device(root.path(), "9-001a", Some(&sensor));
     let (board, errors) = scan(&mut probe(root.path(), NOT_DEFINED), &[]);
     assert_eq!(errors, []);
     let cameras = board["configured_cameras"].as_array().unwrap();
@@ -386,7 +375,7 @@ fn a_board_without_a_device_tree_reports_no_facts_and_no_errors() {
         json!({"configured_cameras": [], "supported_sensors": []})
     );
     // I2C devices without device-tree nodes (ACPI, user-instantiated).
-    i2c_device(root.path(), "0-0050", None, true);
+    i2c_device(root.path(), "0-0050", None);
     assert_eq!(scan(&mut probe, &[]), (board, Vec::new()));
 }
 

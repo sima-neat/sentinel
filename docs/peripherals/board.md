@@ -3,10 +3,10 @@
 The catalog's `board` block describes how the board is set up for MIPI
 cameras: which board it is, which overlays U-Boot applies, which camera
 sensors the booted device tree describes, and which sensors the installed
-overlays can describe. Together with the `camera.mipi` devices it tells a
-configured camera that was detected from one that was configured but not
-detected. Like the device records, it reports facts only and never changes
-the configuration.
+overlays can describe. Each configured camera names the `camera.mipi` camera
+that is its sensor, so a client can find a camera's `compatible` and, in
+`supported_sensors`, the overlays that configure it. Like the device records,
+it reports facts only and never changes the configuration.
 
 The block is read in every scan, after the providers, so `camera_id` always
 refers to the `devices` of the same catalog, and `revision` changes when the
@@ -30,8 +30,7 @@ Each `configured_cameras` entry:
 | `dt_node` | The node's path from the device-tree root, e.g. `/i2cmux@0/i2c@0/imx477@1a` |
 | `i2c_device` | The I2C device, `<bus>-<address>` as sysfs names it, e.g. `5-001a` |
 | `data_lanes` | The number of cells in the sensor endpoint's `data-lanes` |
-| `driver_bound` | Whether a driver is bound to the I2C device |
-| `camera_id` | The `id` of the `camera.mipi` camera that is this sensor; absent when no such camera was detected |
+| `camera_id` | The `id` of the `camera.mipi` camera that is this sensor; absent when the catalog has no such camera |
 
 Each `supported_sensors` entry has `compatible` and `overlays`, the sorted
 file names of the overlays that configure it. Entries are sorted by
@@ -115,7 +114,7 @@ error.
   source, so it is missing from `configured_cameras` and `supported_sensors`.
 - A companion chip with its own CSI-2 endpoint is listed as a configured
   camera, for example the `Metoak,xc9080` in the METOAK-DUAL overlay. No
-  camera is detected for it, so it never has a `camera_id`.
+  `camera.mipi` camera is its sensor, so it never has a `camera_id`.
 
 ## Example
 
@@ -134,7 +133,6 @@ overlays installed lists more of them in `supported_sensors`.
     "dt_node": "/i2cmux@0/i2c@0/imx477@1a",
     "i2c_device": "5-001a",
     "data_lanes": 2,
-    "driver_bound": true,
     "camera_id": "camera:imx477 5-001a"
   }],
   "supported_sensors": [

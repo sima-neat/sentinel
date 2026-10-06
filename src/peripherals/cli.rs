@@ -115,8 +115,8 @@ fn render(catalog: &Catalog) -> String {
     out
 }
 
-/// The model, the overlay list, and whether each configured camera was
-/// detected.
+/// The model, the overlay list, and each configured camera with the catalog
+/// camera that is its sensor.
 fn render_board(board: &Board) -> String {
     let model = board.model.as_deref().unwrap_or("unknown");
     let overlays = match board.overlays {
@@ -133,13 +133,12 @@ fn render_board(board: &Board) -> String {
         out.push_str("  No cameras configured in the device tree.\n");
     }
     for camera in &board.configured_cameras {
-        let state = match (&camera.camera_id, camera.driver_bound) {
-            (Some(id), _) => format!("detected as {}", printable(id)),
-            (None, true) => "not detected".to_string(),
-            (None, false) => "not detected (no driver bound)".to_string(),
+        let camera_id = match camera.camera_id {
+            Some(ref id) => format!(" → {}", printable(id)),
+            None => String::new(),
         };
         out.push_str(&format!(
-            "  Configured {} at {}, {} lanes: {state}\n",
+            "  Configured {} at {}, {} lanes{camera_id}\n",
             printable(&camera.compatible),
             printable(&camera.i2c_device),
             camera.data_lanes
@@ -187,13 +186,12 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_the_board_and_whether_configured_cameras_were_detected() {
-        let camera = |i2c_device: &str, driver_bound, camera_id: Option<&str>| ConfiguredCamera {
+    fn render_shows_the_board_and_the_configured_cameras() {
+        let camera = |i2c_device: &str, camera_id: Option<&str>| ConfiguredCamera {
             compatible: "sony,imx477".into(),
             dt_node: format!("/i2c/imx477@{i2c_device}"),
             i2c_device: i2c_device.into(),
             data_lanes: 2,
-            driver_bound,
             camera_id: camera_id.map(str::to_owned),
         };
         let catalog = Catalog {
@@ -203,9 +201,8 @@ mod tests {
                 model: Some("SiMa.ai Modalix SoM 16Gig Board".into()),
                 overlays: Some(vec!["a.dtbo".into(), "b.dtbo".into()]),
                 configured_cameras: vec![
-                    camera("5-001a", true, Some("camera:imx477 5-001a")),
-                    camera("6-001a", true, None),
-                    camera("7-001a", false, None),
+                    camera("5-001a", Some("camera:imx477 5-001a")),
+                    camera("6-001a", None),
                 ],
                 supported_sensors: Vec::new(),
             }),
@@ -218,14 +215,14 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("  Overlays   a.dtbo b.dtbo\n"), "{text}");
-        assert!(text.contains(
-            "  Configured sony,imx477 at 5-001a, 2 lanes: detected as camera:imx477 5-001a\n"
-        ));
         assert!(
-            text.contains("at 6-001a, 2 lanes: not detected\n"),
+            text.contains("  Configured sony,imx477 at 5-001a, 2 lanes → camera:imx477 5-001a\n"),
             "{text}"
         );
-        assert!(text.contains("at 7-001a, 2 lanes: not detected (no driver bound)\n"));
+        assert!(
+            text.contains("  Configured sony,imx477 at 6-001a, 2 lanes\n"),
+            "{text}"
+        );
 
         let empty = Board {
             model: None,

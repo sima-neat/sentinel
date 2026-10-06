@@ -77,9 +77,7 @@ pub struct ConfiguredCamera {
     pub i2c_device: String,
     /// Cells in the sensor endpoint's `data-lanes`.
     pub data_lanes: u32,
-    /// Whether a driver is bound to the I2C device.
-    pub driver_bound: bool,
-    /// The catalog camera this sensor is; absent when none was detected.
+    /// The catalog camera this sensor is; absent when the catalog has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_id: Option<String>,
 }
@@ -430,7 +428,6 @@ fn configured_cameras(
         cameras.push(ConfiguredCamera {
             compatible,
             dt_node: format!("/{}", relative.to_string_lossy()),
-            driver_bound: fs::symlink_metadata(device.join("driver")).is_ok(),
             i2c_device: name,
             data_lanes,
             camera_id,
