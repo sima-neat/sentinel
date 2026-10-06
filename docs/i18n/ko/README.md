@@ -36,4 +36,6 @@ Sentinel은 보드에 연결된 카메라와 마이크도 나열합니다.
 - [USB 카메라](peripherals/camera.md) (V4L2)
 - [MIPI CSI-2 카메라](peripherals/camera-mipi.md)
 - [마이크](peripherals/microphone.md) (ALSA)
+- [보드 카메라 구성](peripherals/board.md): 모델, 카메라
+  오버레이, 구성된 센서와 지원되는 센서
 - 기여자를 위한 [장치 유형 추가](peripherals/adding-a-device-type.md)

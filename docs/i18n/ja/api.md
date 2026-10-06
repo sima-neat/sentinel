@@ -69,16 +69,18 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 
 ```json
 {"revision": 1791155282460, "observed_at": "2026-10-04T23:08:02.460Z",
+ "board": {"model": "SiMa.ai Modalix SoM 16Gig Board", "configured_cameras": [...], ...},
  "devices": [{"type": "camera", "id": "camera:v4l2:3f2a9c0d41b7e650", ...}],
  "errors": [{"provider": "camera.v4l2", "code": "io.permission_denied", "reason": "..."}]}
 ```
 
 | フィールド | 意味 |
 | --- | --- |
-| `revision` | `devices`または`errors`が変わるたびに変化します。デーモンの起動時にランダムな値から始まるため、再起動や時刻の変更によって同じ値が繰り返される可能性は非常に低くなっています。比較は等価性の判定にのみ使用してください。値は常に2^52未満であるため、倍精度浮動小数点数を使用するJSONリーダーでも正確に表現されます。 |
+| `revision` | `board`、`devices`、または`errors`が変わるたびに変化します。デーモンの起動時にランダムな値から始まるため、再起動や時刻の変更によって同じ値が繰り返される可能性は非常に低くなっています。比較は等価性の判定にのみ使用してください。値は常に2^52未満であるため、倍精度浮動小数点数を使用するJSONリーダーでも正確に表現されます。 |
 | `observed_at` | この結果の元になったスキャンの開始時刻。最初のスキャンが完了するまでは`null`です。 |
+| `board` | カメラ向けのボードの設定：モデル、U-Bootが適用するオーバーレイ、デバイスツリーが構成するカメラ（カタログに該当するカメラがある場合は、それぞれのセンサーにあたる`camera.mipi`カメラの`id`を含みます）、およびインストール済みのオーバーレイがサポートするセンサー。`devices`と同じスキャンで読み取られます。最初のスキャンが完了するまでは存在しません。[ボードのカメラ構成](peripherals/board.md)を参照してください。 |
 | `devices` | デバイスごとに1つのオブジェクトで、`type`でタグ付けされます。`id`は同じポートへの再接続後も変わらず、`/dev/videoN`の名前になることはありません。 |
-| `errors` | 最新のスキャンで失敗したプロバイダー。失敗したプロバイダーのデバイスは、最後に成功したスキャンの結果が`devices`に残ります。`hotplug.unavailable`は、カーネルのueventを受信できないため、再スキャンがリフレッシュ時にしか行われないことを意味します。 |
+| `errors` | 最新のスキャンで失敗したプロバイダー、および`board`ブロックのうち読み取れなかった部分（プロバイダー`board`）。失敗したプロバイダーのデバイスは、最後に成功したスキャンの結果が`devices`に残ります。`hotplug.unavailable`は、カーネルのueventを受信できないため、再スキャンがリフレッシュ時にしか行われないことを意味します。 |
 
 Sentinelはハードウェアの事実のみを報告します。
 アプリケーションがデバイスやモードをサポートするかどうかは、そのアプリケーションが判断します。
@@ -96,10 +98,12 @@ Sentinelはハードウェアの事実のみを報告します。
 
 デバイスレコードはタイプごとに説明しています：[USBカメラ](peripherals/camera.md)、
 [MIPI CSI-2カメラ](peripherals/camera-mipi.md)、
-[マイク](peripherals/microphone.md)。
+[マイク](peripherals/microphone.md)。`board`ブロックについては
+[ボードのカメラ構成](peripherals/board.md)で説明しています。
 
 [`peripherals/catalog-example.json`](peripherals/catalog-example.json)は、
 DevKitから取得した完全なレスポンスです（USBカメラはフォーマットごとに1つのモードに絞っています）。
+その`board`ブロックは、キャプチャしたものではなくDevKitから書き写したものです。
 Sentinelのテストがこれをスキーマに照らして検証しているため、
 クライアントはこれを基準にテストできます。
 

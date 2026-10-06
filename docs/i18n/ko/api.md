@@ -69,16 +69,18 @@ HTTP 409를 반환합니다. ID 비교와 중지는 동일한 실행 저장소
 
 ```json
 {"revision": 1791155282460, "observed_at": "2026-10-04T23:08:02.460Z",
+ "board": {"model": "SiMa.ai Modalix SoM 16Gig Board", "configured_cameras": [...], ...},
  "devices": [{"type": "camera", "id": "camera:v4l2:3f2a9c0d41b7e650", ...}],
  "errors": [{"provider": "camera.v4l2", "code": "io.permission_denied", "reason": "..."}]}
 ```
 
 | 필드 | 의미 |
 | --- | --- |
-| `revision` | `devices` 또는 `errors`가 변경될 때마다 바뀝니다. 데몬이 시작될 때 임의의 값에서 시작하므로 재시작이나 시계 변경으로 같은 값이 반복될 가능성은 매우 낮습니다. 같은지 여부만 비교하십시오. 항상 2^52 미만이므로 double을 사용하는 JSON 리더에서도 정확하게 표현됩니다. |
+| `revision` | `board`, `devices` 또는 `errors`가 변경될 때마다 바뀝니다. 데몬이 시작될 때 임의의 값에서 시작하므로 재시작이나 시계 변경으로 같은 값이 반복될 가능성은 매우 낮습니다. 같은지 여부만 비교하십시오. 항상 2^52 미만이므로 double을 사용하는 JSON 리더에서도 정확하게 표현됩니다. |
 | `observed_at` | 이 결과의 기반이 된 스캔이 시작된 시각. 첫 스캔이 완료될 때까지는 `null`입니다. |
+| `board` | 보드가 카메라용으로 설정된 방식: 모델, U-Boot가 적용하는 오버레이, 디바이스 트리가 구성하는 카메라(카탈로그에 해당 카메라가 있으면 각각 자신의 센서에 해당하는 `camera.mipi` 카메라의 `id` 포함), 설치된 오버레이가 지원하는 센서. `devices`와 같은 스캔에서 읽으며, 첫 스캔이 완료될 때까지는 없습니다. [보드 카메라 구성](peripherals/board.md)을 참조하십시오. |
 | `devices` | 장치당 하나의 객체이며 `type`으로 구분됩니다. `id`는 같은 포트에 다시 연결해도 유지되며 `/dev/videoN` 이름이 되는 일은 없습니다. |
-| `errors` | 최근 스캔에서 실패한 프로바이더. 실패한 프로바이더가 마지막으로 성공한 스캔에서 찾은 장치는 `devices`에 그대로 남습니다. `hotplug.unavailable`은 커널 uevent를 수신할 수 없어 새로 고침 시에만 재스캔이 이루어진다는 의미입니다. |
+| `errors` | 최근 스캔에서 실패한 프로바이더, 그리고 `board` 블록 중 읽을 수 없었던 부분(프로바이더 `board`). 실패한 프로바이더가 마지막으로 성공한 스캔에서 찾은 장치는 `devices`에 그대로 남습니다. `hotplug.unavailable`은 커널 uevent를 수신할 수 없어 새로 고침 시에만 재스캔이 이루어진다는 의미입니다. |
 
 Sentinel은 하드웨어 사실만 보고합니다. 애플리케이션이
 장치나 모드를 지원하는지는 해당 애플리케이션이 결정합니다. `CameraInput`의 경우
@@ -96,11 +98,13 @@ HTTP 504를, 이미 8개의 새로 고침 요청이 대기 중이면 HTTP 429를
 
 장치 레코드는 유형별로 설명되어 있습니다: [USB 카메라](peripherals/camera.md),
 [MIPI CSI-2 카메라](peripherals/camera-mipi.md),
-[마이크](peripherals/microphone.md).
+[마이크](peripherals/microphone.md). `board` 블록은
+[보드 카메라 구성](peripherals/board.md)에 설명되어 있습니다.
 
 [`peripherals/catalog-example.json`](peripherals/catalog-example.json)은
 DevKit에서 얻은 전체 응답이며, USB 카메라는 형식당 하나의 모드로
-축약되어 있습니다. Sentinel 테스트가 이를 스키마와 대조하여 검사하므로 클라이언트도 이를 기준으로
+축약되어 있습니다. 이 응답의 `board` 블록은 캡처한 것이 아니라 DevKit에서
+옮겨 적은 것입니다. Sentinel 테스트가 이를 스키마와 대조하여 검사하므로 클라이언트도 이를 기준으로
 테스트할 수 있습니다.
 
 ## 보안 및 동시성
