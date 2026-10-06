@@ -2,8 +2,10 @@
 //! for MIPI cameras. The model and the configured cameras come from the live
 //! device tree the kernel booted with, the overlay list from the U-Boot
 //! environment, and the sensors each shipped overlay can configure from the
-//! overlay files themselves. Like the providers, it never writes anything and
-//! encodes no policy; resolutions still come from the ISP, not from overlays.
+//! overlay files themselves. Like the providers, Sentinel itself writes
+//! nothing and encodes no policy; the only program it runs is the platform's
+//! read tool, `fw_printenv`, which may take its own lock file. Resolutions
+//! still come from the ISP, not from overlays.
 
 mod dt;
 #[cfg(test)]
@@ -13,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -35,6 +38,8 @@ const FW_PRINTENV_TIMEOUT: Duration = Duration::from_secs(2);
 const FW_PRINTENV_POLL: Duration = Duration::from_millis(10);
 /// `fw_printenv` output beyond this is not read.
 const MAX_COMMAND_OUTPUT: usize = 64 * 1024;
+/// `fw_printenv` error output beyond this is not read.
+const MAX_COMMAND_ERRORS: usize = 4 * 1024;
 /// I2C devices examined for configured cameras.
 const MAX_I2C_DEVICES: usize = 1024;
 /// Entries listed in `/boot` and in each of its directories.
@@ -51,9 +56,10 @@ pub struct Board {
     /// The device tree's `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// The `.dtbo` entries of the U-Boot `dtbos` variable, in order.
+    /// The `.dtbo` entries of the U-Boot `dtbos` variable, in order: every
+    /// overlay U-Boot applies, whatever it configures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub camera_overlays: Option<Vec<String>>,
+    pub overlays: Option<Vec<String>>,
     /// I2C devices in the live device tree that are MIPI CSI-2 sources.
     pub configured_cameras: Vec<ConfiguredCamera>,
     /// The sensors the overlay files under `/boot` can configure.
@@ -94,12 +100,18 @@ pub struct BoardProbe {
     /// The program and arguments that print the overlay list.
     overlay_command: Vec<String>,
     timeout: Duration,
-    /// Parsed overlays by path, reused while their size and mtime match.
+    /// Parsed overlays by path, reused while their [`Stamp`] matches.
     overlays: HashMap<PathBuf, CachedOverlay>,
 }
 
+/// Size, mtime, ctime and inode: a rewrite that restores the size and mtime
+/// still changes the ctime, and a replacement changes the inode.
+type Stamp = (u64, Option<SystemTime>, (i64, i64), u64);
+
+/// What the bytes of one overlay file gave: its sensors, or why it is
+/// malformed. I/O errors are not cached.
 struct CachedOverlay {
-    stamp: (u64, Option<SystemTime>),
+    stamp: Stamp,
     sensors: Result<Vec<String>, ProviderError>,
 }
 
@@ -136,11 +148,10 @@ impl BoardProbe {
             report(error);
             None
         });
-        let camera_overlays =
-            overlay_list(&self.overlay_command, self.timeout).unwrap_or_else(|error| {
-                report(error);
-                None
-            });
+        let overlays = overlay_list(&self.overlay_command, self.timeout).unwrap_or_else(|error| {
+            report(error);
+            None
+        });
         let (configured_cameras, configured_error) =
             configured_cameras(&self.sys_root, &base, devices);
         let (supported_sensors, overlay_error) = self.supported_sensors();
@@ -150,7 +161,7 @@ impl BoardProbe {
             .for_each(report);
         let board = Board {
             model,
-            camera_overlays,
+            overlays,
             configured_cameras,
             supported_sensors,
         };
@@ -174,12 +185,20 @@ impl BoardProbe {
                     continue;
                 }
             };
-            let stamp = (metadata.len(), metadata.modified().ok());
+            let stamp = (
+                metadata.len(),
+                metadata.modified().ok(),
+                (metadata.ctime(), metadata.ctime_nsec()),
+                metadata.ino(),
+            );
             let overlay = match self.overlays.remove(&path) {
                 Some(cached) if cached.stamp == stamp => cached,
-                _ => CachedOverlay {
-                    stamp,
-                    sensors: parse_overlay(&path, metadata.len()),
+                _ => match parse_overlay(&path, metadata.len()) {
+                    Ok(sensors) => CachedOverlay { stamp, sensors },
+                    Err(error) => {
+                        skipped.add(error);
+                        continue;
+                    }
                 },
             };
             match overlay.sensors {
@@ -244,10 +263,10 @@ fn read_model(base: &Path) -> Result<Option<String>, ProviderError> {
 }
 
 /// The `.dtbo` entries that `command` (`fw_printenv -n dtbos`) prints, split
-/// on whitespace. `None` when the program is missing or exits unsuccessfully,
-/// as it does when the variable is not set. An error when it cannot be
-/// started for another reason or does not finish within `timeout`; it is
-/// then killed.
+/// on whitespace. `None` when the program is missing, or exits unsuccessfully
+/// saying the variable is `not defined`, as u-boot-tools does when it is not
+/// set. An error, and `None`, when it exits unsuccessfully for another reason,
+/// cannot be started, or does not finish within `timeout`; it is then killed.
 fn overlay_list(
     command: &[String],
     timeout: Duration,
@@ -259,7 +278,7 @@ fn overlay_list(
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
@@ -290,9 +309,22 @@ fn overlay_list(
         }
     };
     if !status.success() {
-        return Ok(None);
+        let errors = child.stderr.take().map_or_else(Vec::new, |stderr| {
+            read_available(stderr, MAX_COMMAND_ERRORS)
+        });
+        let errors = String::from_utf8_lossy(&errors);
+        if errors.contains("not defined") {
+            return Ok(None);
+        }
+        let mut reason = format!("{program} failed ({status})");
+        if let Some(line) = errors.lines().map(str::trim).find(|line| !line.is_empty()) {
+            reason = format!("{reason}: {line}");
+        }
+        return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
     }
-    let output = child.stdout.take().map(read_available).unwrap_or_default();
+    let output = child.stdout.take().map_or_else(Vec::new, |stdout| {
+        read_available(stdout, MAX_COMMAND_OUTPUT)
+    });
     let entries = String::from_utf8_lossy(&output)
         .split_ascii_whitespace()
         .filter(|entry| entry.ends_with(".dtbo"))
@@ -301,11 +333,11 @@ fn overlay_list(
     Ok(Some(entries))
 }
 
-/// What an exited child left in its stdout pipe, without blocking on a
-/// descendant that still holds the pipe open.
-fn read_available(mut stdout: std::process::ChildStdout) -> Vec<u8> {
-    let fd = stdout.as_raw_fd();
-    // SAFETY: fcntl on a descriptor owned by `stdout`, which outlives the calls.
+/// Up to `limit` bytes an exited child left in an output pipe, without
+/// blocking on a descendant that still holds the pipe open.
+fn read_available(mut pipe: impl Read + AsRawFd, limit: usize) -> Vec<u8> {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: fcntl on a descriptor owned by `pipe`, which outlives the calls.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         if flags >= 0 {
@@ -314,15 +346,15 @@ fn read_available(mut stdout: std::process::ChildStdout) -> Vec<u8> {
     }
     let mut output = Vec::new();
     let mut chunk = [0u8; 4096];
-    while output.len() < MAX_COMMAND_OUTPUT {
-        match stdout.read(&mut chunk) {
+    while output.len() < limit {
+        match pipe.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => output.extend_from_slice(&chunk[..read]),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
     }
-    output.truncate(MAX_COMMAND_OUTPUT);
+    output.truncate(limit);
     output
 }
 
@@ -339,8 +371,9 @@ fn is_i2c_client(name: &str) -> bool {
 
 /// Every I2C client whose `of_node` is a MIPI CSI-2 source in the live device
 /// tree under `base`, sorted by `dt_node`. `camera_id` names the MIPI camera
-/// whose sensor entity name ends with ` <i2c_device>`, as V4L2 names an I2C
-/// sub-device `<driver> <bus>-<address>`.
+/// whose sensor entity name has `<i2c_device>` as a space-separated word, as
+/// V4L2 names an I2C sub-device `<driver> <bus>-<address>`, sometimes with a
+/// suffix (`ccs 5-0010 pixel_array`).
 fn configured_cameras(
     sys_root: &Path,
     base: &Path,
@@ -385,10 +418,9 @@ fn configured_cameras(
         let Some(compatible) = tree.compatible(0) else {
             continue;
         };
-        let suffix = format!(" {name}");
         let camera_id = devices.iter().find_map(|device| match *device {
             Peripheral::Camera(ref camera) => match camera.source {
-                Source::Mipi(ref mipi) if mipi.camera_name.ends_with(&suffix) => {
+                Source::Mipi(ref mipi) if mipi.camera_name.split(' ').any(|word| word == name) => {
                     Some(camera.id.clone())
                 }
                 _ => None,
@@ -452,9 +484,13 @@ fn overlay_files(boot_root: &Path, skipped: &mut Skipped) -> Vec<(PathBuf, Strin
     files
 }
 
-/// The sensors one overlay file configures; an error when it is too large,
-/// unreadable, or malformed.
-fn parse_overlay(path: &Path, length: u64) -> Result<Vec<String>, ProviderError> {
+/// The sensors an overlay file's bytes configure, or why they are not an
+/// overlay (too large or malformed).
+type ParsedOverlay = Result<Vec<String>, ProviderError>;
+
+/// What one overlay file's bytes give; an error, which is not cached, when the
+/// file was not read: it is unreadable, or too large by its size.
+fn parse_overlay(path: &Path, length: u64) -> Result<ParsedOverlay, ProviderError> {
     let too_large = || {
         let reason = format!(
             "overlay {} is larger than {MAX_OVERLAY_BYTES} bytes",
@@ -468,11 +504,13 @@ fn parse_overlay(path: &Path, length: u64) -> Result<Vec<String>, ProviderError>
     let bytes = dt::read_bounded(path, MAX_OVERLAY_BYTES + 1)
         .map_err(|error| io_error("failed to read", path, &error, false))?;
     if bytes.len() as u64 > MAX_OVERLAY_BYTES {
-        return Err(too_large());
+        return Ok(Err(too_large()));
     }
-    let tree = dt::parse_fdt(&bytes).map_err(|reason| {
-        let reason = format!("overlay {} is malformed: {reason}", path.display());
-        ProviderError::new(CODE_DISCOVERY_FAILED, reason)
-    })?;
-    Ok(dt::overlay_sensors(&tree))
+    let parsed = dt::parse_fdt(&bytes)
+        .map(|tree| dt::overlay_sensors(&tree))
+        .map_err(|reason| {
+            let reason = format!("overlay {} is malformed: {reason}", path.display());
+            ProviderError::new(CODE_DISCOVERY_FAILED, reason)
+        });
+    Ok(parsed)
 }

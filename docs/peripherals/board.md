@@ -1,7 +1,7 @@
 # Board camera configuration
 
 The catalog's `board` block describes how the board is set up for MIPI
-cameras: which board it is, which camera overlays U-Boot applies, which camera
+cameras: which board it is, which overlays U-Boot applies, which camera
 sensors the booted device tree describes, and which sensors the installed
 overlays can describe. Together with the `camera.mipi` devices it tells a
 configured camera that was detected from one that was configured but not
@@ -18,7 +18,7 @@ returns HTTP 503 as before when discovery is disabled.
 | Field | Present | Meaning |
 | --- | --- | --- |
 | `model` | when the device tree has one | `/sys/firmware/devicetree/base/model`, up to its first NUL and without surrounding whitespace, e.g. `SiMa.ai Modalix SoM 16Gig Board` |
-| `camera_overlays` | when `fw_printenv -n dtbos` succeeds | The entries of the U-Boot `dtbos` variable that end in `.dtbo`, in their order |
+| `overlays` | when `fw_printenv -n dtbos` succeeds | The entries of the U-Boot `dtbos` variable that end in `.dtbo`, in their order: every overlay U-Boot applies, not only camera overlays (PCIe, secure-boot and flash overlays use the same variable). Sentinel does not say which entry configures a camera; `supported_sensors` lists the overlays that configure a sensor |
 | `configured_cameras` | always | The MIPI CSI-2 sensors on I2C in the live device tree; may be empty |
 | `supported_sensors` | always | The sensors the overlay files under `/boot` configure; may be empty |
 
@@ -35,7 +35,8 @@ Each `configured_cameras` entry:
 
 Each `supported_sensors` entry has `compatible` and `overlays`, the sorted
 file names of the overlays that configure it. Entries are sorted by
-`compatible`.
+`compatible`. The list merges every slot directory under `/boot`, so it can
+include overlays that are installed only in a slot that is not booted.
 
 ## Where each fact comes from
 
@@ -48,9 +49,10 @@ file names of the overlays that configure it. Entries are sorted by
   the live device tree is a candidate. It is a configured camera when its node
   has `compatible` and an `endpoint` node below it, not inside another
   device's node, has `data-lanes`, which marks a MIPI CSI-2 source. V4L2 names
-  an I2C sensor's sub-device `<driver> <bus>-<address>`, so the camera whose
-  `camera_name` ends with ` <i2c_device>` is this sensor. This matches the
-  exact device, without comparing vendor or sensor names.
+  an I2C sensor's sub-device `<driver> <bus>-<address>`, sometimes followed by
+  another word (`ccs 5-0010 pixel_array`), so the camera whose `camera_name`
+  has `<i2c_device>` as a whole space-separated word is this sensor. This
+  matches the exact device, without comparing vendor or sensor names.
 - **The overlay list** is the platform's own record, kept in the U-Boot
   environment. `fw_printenv` knows where that environment is stored on the
   board, so Sentinel asks it instead of reading flash itself. The value is the
@@ -76,8 +78,10 @@ Camera resolutions and formats still come from the ISP, in the camera's
 Discovery reads at most 1024 I2C devices, 256 nodes of each device's subtree,
 4096 entries of `/boot` and of each of its directories, and 512 overlay files
 of at most 1 MiB each. Overlay files are parsed once and parsed again only
-when their size or modification time changes. `fw_printenv` is killed after
-2 seconds.
+when their size, modification time, change time or inode changes; a file that
+could not be read is read again in the next scan. `fw_printenv` is killed
+after 2 seconds, and at most 64 KiB of its output and 4 KiB of its error
+output are read.
 
 ## Errors
 
@@ -87,13 +91,15 @@ Errors have `provider: "board"`. The rest of the block is still published.
 | --- | --- |
 | `io.open` | `model`, `/sys/bus/i2c/devices`, a device's node, `/boot`, one of its directories, or an overlay file exists but cannot be read |
 | `io.permission_denied` | The same, failing with `EACCES`; or `fw_printenv` exists but cannot be run |
-| `peripherals.discovery_failed` | `fw_printenv` did not finish in time; an overlay file is malformed or larger than 1 MiB; more than 512 overlay files |
+| `peripherals.discovery_failed` | `fw_printenv` did not finish in time, or exited unsuccessfully for a reason other than `dtbos` not being set (the reason names the first line it printed to stderr); an overlay file is malformed or larger than 1 MiB; more than 512 overlay files |
 
 Skipped overlay files, and unreadable I2C devices, are reported as one error
 each, with the first problem's code and reason and the number of others. A missing `fw_printenv`,
-or one that exits unsuccessfully (as it does when `dtbos` is not set), leaves
-`camera_overlays` out without an error. A board without a device tree, I2C
-devices, or `/boot` reports empty lists without an error.
+or one that exits unsuccessfully saying the variable is `not defined` (as
+u-boot-tools does when `dtbos` is not set), leaves `overlays` out without an
+error; any other unsuccessful exit leaves it out with an error. A board
+without a device tree, I2C devices, or `/boot` reports empty lists without an
+error.
 
 ## Limitations
 
@@ -105,6 +111,11 @@ devices, or `/boot` reports empty lists without an error.
   start with `i2c` is not recognised.
 - `data_lanes` comes from the first endpoint in node order; a sensor with
   several endpoints of different widths reports one.
+- A sensor whose endpoint has no `data-lanes` is not recognised as a CSI-2
+  source, so it is missing from `configured_cameras` and `supported_sensors`.
+- A companion chip with its own CSI-2 endpoint is listed as a configured
+  camera, for example the `Metoak,xc9080` in the METOAK-DUAL overlay. No
+  camera is detected for it, so it never has a `camera_id`.
 
 ## Example
 
@@ -117,7 +128,7 @@ overlays installed lists more of them in `supported_sensors`.
 ```json
 "board": {
   "model": "SiMa.ai Modalix SoM 16Gig Board",
-  "camera_overlays": ["modalix-som-waveshare-ARDU-IMX477-1CAM.dtbo"],
+  "overlays": ["modalix-som-waveshare-ARDU-IMX477-1CAM.dtbo"],
   "configured_cameras": [{
     "compatible": "sony,imx477",
     "dt_node": "/i2cmux@0/i2c@0/imx477@1a",

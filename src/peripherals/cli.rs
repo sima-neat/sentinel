@@ -119,7 +119,7 @@ fn render(catalog: &Catalog) -> String {
 /// detected.
 fn render_board(board: &Board) -> String {
     let model = board.model.as_deref().unwrap_or("unknown");
-    let overlays = match board.camera_overlays {
+    let overlays = match board.overlays {
         None => "unknown".to_string(),
         Some(ref overlays) if overlays.is_empty() => "none".to_string(),
         Some(ref overlays) => overlays.join(" "),
@@ -201,7 +201,7 @@ mod tests {
             observed_at: Some(Utc::now()),
             board: Some(Board {
                 model: Some("SiMa.ai Modalix SoM 16Gig Board".into()),
-                camera_overlays: Some(vec!["a.dtbo".into(), "b.dtbo".into()]),
+                overlays: Some(vec!["a.dtbo".into(), "b.dtbo".into()]),
                 configured_cameras: vec![
                     camera("5-001a", true, Some("camera:imx477 5-001a")),
                     camera("6-001a", true, None),
@@ -229,7 +229,7 @@ mod tests {
 
         let empty = Board {
             model: None,
-            camera_overlays: None,
+            overlays: None,
             configured_cameras: Vec::new(),
             supported_sensors: Vec::new(),
         };

@@ -91,9 +91,9 @@ pub enum AvailabilityState {
 /// The catalog served by `GET /v1/peripherals`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
-    /// Changes whenever `board`, `devices` or `errors` change. Seeded from
-    /// the daemon start time, so a value is never reused after a restart;
-    /// compare it for equality only.
+    /// Changes whenever `board`, `devices` or `errors` change. Starts from a
+    /// random value when the daemon starts, so a restart is very unlikely to
+    /// repeat one; compare it for equality only.
     pub revision: u64,
     /// When the scan that produced this catalog started; `null` until the
     /// first scan completes.

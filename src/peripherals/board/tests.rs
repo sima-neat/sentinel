@@ -5,7 +5,7 @@
 //! none of the files are captures.
 
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,8 @@ use crate::peripherals::{Availability, AvailabilityState};
 const MODEL: &str = "SiMa.ai Modalix SoM 16Gig Board";
 const OVERLAY: &str = "modalix-som-waveshare-ARDU-IMX477-1CAM.dtbo";
 const SENSOR_NODE: &str = "i2cmux@0/i2c@0/imx477@1a";
+/// u-boot-tools' `fw_printenv` when `dtbos` is not set.
+const NOT_DEFINED: &str = "echo '## Error: \"dtbos\" not defined' >&2; exit 1";
 
 /// A flattened-device-tree writer (version 17, big-endian).
 #[derive(Default)]
@@ -266,7 +268,7 @@ fn a_configured_camera_that_was_detected_names_its_catalog_camera() {
         board,
         json!({
             "model": MODEL,
-            "camera_overlays": [OVERLAY],
+            "overlays": [OVERLAY],
             "configured_cameras": [{
                 "compatible": "sony,imx477",
                 "dt_node": "/i2cmux@0/i2c@0/imx477@1a",
@@ -297,8 +299,8 @@ fn a_configured_camera_without_a_catalog_camera_is_not_detected() {
         false,
     );
     let mut probe = probe(root.path(), "true");
-    // A camera on another bus, and one whose name only contains the device.
-    let devices = [mipi_camera("imx477 7-001a"), mipi_camera("imx477 5-001a x")];
+    // A camera on another bus, and one whose name only starts with the device.
+    let devices = [mipi_camera("imx477 7-001a"), mipi_camera("imx477 5-001a0")];
     let (board, errors) = scan(&mut probe, &devices);
     assert_eq!(errors, []);
     assert_eq!(
@@ -311,7 +313,44 @@ fn a_configured_camera_without_a_catalog_camera_is_not_detected() {
         ])
     );
     // `true` prints nothing: the variable is set but holds no overlay.
-    assert_eq!(board["camera_overlays"], json!([]));
+    assert_eq!(board["overlays"], json!([]));
+}
+
+/// V4L2 may add a word after the I2C device (`ccs 5-0010 pixel_array`); a
+/// longer address that starts with the device is another device.
+#[test]
+fn camera_id_matches_the_i2c_device_as_a_whole_word() {
+    let root = TempDir::new();
+    let node = "i2c@40/ccs@10";
+    dt_sensor(root.path(), node, "mipi-ccs-1.1", &[1, 2]);
+    i2c_device(root.path(), "5-0010", Some(node), true);
+    let mut probe = probe(root.path(), "exit 0");
+    let near_miss = [mipi_camera("ccs 5-00100 pixel_array")];
+    let (board, _) = scan(&mut probe, &near_miss);
+    assert!(
+        board["configured_cameras"][0].get("camera_id").is_none(),
+        "{board}"
+    );
+    let devices = [
+        mipi_camera("ccs 5-00100"),
+        mipi_camera("ccs 5-0010 pixel_array"),
+    ];
+    let (board, errors) = scan(&mut probe, &devices);
+    assert_eq!(errors, []);
+    assert_eq!(
+        board["configured_cameras"][0]["camera_id"],
+        "camera:ccs 5-0010 pixel_array"
+    );
+}
+
+/// `dtbos` holds every overlay U-Boot applies, not only camera overlays.
+#[test]
+fn overlays_lists_every_dtbos_entry_in_order() {
+    let root = TempDir::new();
+    let mut probe = probe(root.path(), "echo 'pcie-8rc.dtbo a-imx477.dtbo'");
+    let (board, errors) = scan(&mut probe, &[]);
+    assert_eq!(errors, []);
+    assert_eq!(board["overlays"], json!(["pcie-8rc.dtbo", "a-imx477.dtbo"]));
 }
 
 /// A GMSL link: deserializer, serializer, and sensor are all I2C devices
@@ -328,7 +367,7 @@ fn bridges_in_front_of_a_sensor_are_not_cameras() {
     i2c_device(root.path(), "3-0028", Some(deserializer), true);
     i2c_device(root.path(), "3-0042", Some(&serializer), true);
     i2c_device(root.path(), "9-001a", Some(&sensor), true);
-    let (board, errors) = scan(&mut probe(root.path(), "exit 1"), &[]);
+    let (board, errors) = scan(&mut probe(root.path(), NOT_DEFINED), &[]);
     assert_eq!(errors, []);
     let cameras = board["configured_cameras"].as_array().unwrap();
     assert_eq!(cameras.len(), 1, "{board}");
@@ -339,7 +378,7 @@ fn bridges_in_front_of_a_sensor_are_not_cameras() {
 #[test]
 fn a_board_without_a_device_tree_reports_no_facts_and_no_errors() {
     let root = TempDir::new();
-    let mut probe = probe(root.path(), "exit 1");
+    let mut probe = probe(root.path(), NOT_DEFINED);
     let (board, errors) = scan(&mut probe, &[]);
     assert_eq!(errors, []);
     assert_eq!(
@@ -367,7 +406,19 @@ fn the_overlay_list_keeps_dtbo_entries_and_degrades_without_fw_printenv() {
     // Missing tool, and a variable that is not set: no list, no error.
     let missing = root.path().join("fw_printenv");
     assert_eq!(list(&[missing.to_str().unwrap()], second), Ok(None));
-    assert_eq!(list(&["sh", "-c", "echo a.dtbo; exit 1"], second), Ok(None));
+    let not_defined = "echo a.dtbo; echo '## Error: \"dtbos\" not defined' >&2; exit 1";
+    assert_eq!(list(&["sh", "-c", not_defined], second), Ok(None));
+    // Any other failure: no list, and an error naming the first line.
+    let failed =
+        "echo a.dtbo; printf '\\nCannot read environment, using default\\nmore\\n' >&2; exit 1";
+    let failed = list(&["sh", "-c", failed], second).unwrap_err();
+    assert_eq!(failed.code, CODE_DISCOVERY_FAILED);
+    assert_eq!(
+        failed.reason,
+        "sh failed (exit status: 1): Cannot read environment, using default"
+    );
+    let silent = list(&["sh", "-c", "exit 3"], second).unwrap_err();
+    assert_eq!(silent.reason, "sh failed (exit status: 3)");
     // Present but not executable.
     write_file(&missing, "#!/bin/sh\n");
     let denied = list(&[missing.to_str().unwrap()], second).unwrap_err();
@@ -387,11 +438,34 @@ fn a_hung_fw_printenv_omits_the_list_and_reports_one_error() {
     let mut probe = probe(root.path(), "exec sleep 5");
     probe.timeout = Duration::from_millis(100);
     let (board, errors) = scan(&mut probe, &[]);
-    assert!(board.get("camera_overlays").is_none(), "{board}");
+    assert!(board.get("overlays").is_none(), "{board}");
     assert_eq!(board["model"], MODEL);
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].provider, "board");
     assert_eq!(errors[0].code, CODE_DISCOVERY_FAILED);
+}
+
+#[test]
+fn a_failing_fw_printenv_reports_one_error_unless_the_variable_is_not_defined() {
+    let root = TempDir::new();
+    devkit(root.path());
+    let (board, errors) = scan(&mut probe(root.path(), NOT_DEFINED), &[]);
+    assert_eq!(errors, []);
+    assert!(board.get("overlays").is_none(), "{board}");
+    let unreadable = "echo 'Cannot read environment, using default' >&2; exit 1";
+    let (board, errors) = scan(&mut probe(root.path(), unreadable), &[]);
+    assert!(board.get("overlays").is_none(), "{board}");
+    assert_eq!(board["model"], MODEL);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].provider, "board");
+    assert_eq!(errors[0].code, CODE_DISCOVERY_FAILED);
+    assert!(
+        errors[0]
+            .reason
+            .ends_with(": Cannot read environment, using default"),
+        "{}",
+        errors[0].reason
+    );
 }
 
 #[test]
@@ -497,7 +571,7 @@ fn overlays_are_deduplicated_and_malformed_ones_are_skipped_with_one_error() {
         mux_overlay("sony,imx999"),
     )
     .unwrap();
-    let mut probe = probe(root.path(), "exit 1");
+    let mut probe = probe(root.path(), NOT_DEFINED);
     let (board, errors) = scan(&mut probe, &[]);
     assert_eq!(
         board["supported_sensors"],
@@ -537,6 +611,79 @@ fn overlays_are_deduplicated_and_malformed_ones_are_skipped_with_one_error() {
     );
 }
 
+/// An unreadable overlay is not cached, so it parses again once it is
+/// readable, without a restart.
+#[test]
+fn an_unreadable_overlay_is_read_again_when_it_becomes_readable() {
+    let root = TempDir::new();
+    let path = root.path().join("boot/boot-0/a-imx477.dtbo");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, mux_overlay("sony,imx477")).unwrap();
+    let mut probe = probe_at(root.path());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let (denied_board, denied) = scan(&mut probe, &[]);
+    // chmod changes the ctime too; the cache must not hold the error either.
+    let cached = probe.overlays.contains_key(&path);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let (board, errors) = scan(&mut probe, &[]);
+    assert_eq!(errors, []);
+    assert_eq!(
+        board["supported_sensors"],
+        json!([{"compatible": "sony,imx477", "overlays": ["a-imx477.dtbo"]}])
+    );
+    if unsafe { libc::geteuid() } == 0 {
+        return; // Root ignores the permission bits.
+    }
+    assert!(!cached);
+    assert_eq!(denied_board["supported_sensors"], json!([]));
+    assert_eq!(denied.len(), 1, "{denied:?}");
+    assert_eq!(denied[0].code, CODE_PERMISSION_DENIED);
+}
+
+/// A rewrite that keeps the size and restores the mtime is still seen, by
+/// its ctime in place and by its inode when the file is replaced.
+#[test]
+fn a_same_size_rewrite_with_the_mtime_restored_is_parsed_again() {
+    let root = TempDir::new();
+    let path = root.path().join("boot/boot-0/a.dtbo");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let blob = |compatible| fixup_overlay(compatible, "i2c01");
+    assert_eq!(blob("sony,imx219").len(), blob("sony,imx415").len());
+    fs::write(&path, blob("sony,imx219")).unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    let mut probe = probe_at(root.path());
+    let sensor = |probe: &mut BoardProbe| {
+        let (board, errors) = scan(probe, &[]);
+        assert_eq!(errors, []);
+        board["supported_sensors"][0]["compatible"].clone()
+    };
+    assert_eq!(sensor(&mut probe), "sony,imx219");
+
+    // In place: the ctime changes. Past the coarse clock's tick.
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(&path, blob("sony,imx415")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    assert_eq!(sensor(&mut probe), "sony,imx415");
+
+    // Replaced by rename: the inode changes.
+    let replacement = root.path().join("boot/replacement");
+    fs::write(&replacement, blob("sony,imx219")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert_eq!(sensor(&mut probe), "sony,imx219");
+}
+
 #[test]
 fn overlay_files_and_sizes_are_capped() {
     let root = TempDir::new();
@@ -546,7 +693,7 @@ fn overlay_files_and_sizes_are_capped() {
     for index in 0..=MAX_OVERLAY_FILES {
         fs::write(slot.join(format!("{index:04}.dtbo")), &blob).unwrap();
     }
-    let mut probe = probe(root.path(), "exit 1");
+    let mut probe = probe(root.path(), NOT_DEFINED);
     let (board, errors) = scan(&mut probe, &[]);
     let overlays = board["supported_sensors"][0]["overlays"]
         .as_array()
@@ -567,7 +714,7 @@ fn overlay_files_and_sizes_are_capped() {
 }
 
 fn probe_at(root: &Path) -> BoardProbe {
-    probe(root, "exit 1")
+    probe(root, NOT_DEFINED)
 }
 
 #[test]
@@ -603,7 +750,7 @@ pub(crate) const DEVKIT_MODEL: &str = MODEL;
 
 pub(crate) fn devkit_probe(root: &Path) -> BoardProbe {
     devkit(root);
-    probe(root, "exit 1")
+    probe(root, NOT_DEFINED)
 }
 
 pub(crate) fn set_model(root: &Path, model: &str) {
