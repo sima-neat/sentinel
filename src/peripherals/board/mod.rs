@@ -409,9 +409,17 @@ fn configured_cameras(
     let mut cameras = Vec::new();
     for name in names.into_iter().filter(|name| is_i2c_client(name)) {
         let device = directory.join(&name);
-        // Devices not described by the device tree have no of_node.
-        let Ok(node) = fs::canonicalize(device.join("of_node")) else {
-            continue;
+        // Devices not described by the device tree have no of_node, and a
+        // device that went away mid-scan has none either; any other failure
+        // is reported, so a partial list is not mistaken for a complete one.
+        let link = device.join("of_node");
+        let node = match fs::canonicalize(&link) {
+            Ok(node) => node,
+            Err(error) if disappeared(errno_of(&error)) => continue,
+            Err(error) => {
+                skipped.add(io_error("failed to resolve", &link, &error, false));
+                continue;
+            }
         };
         let Ok(relative) = node.strip_prefix(&base) else {
             continue;

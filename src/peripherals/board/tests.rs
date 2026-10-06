@@ -277,6 +277,29 @@ fn a_configured_camera_names_the_catalog_camera_that_is_its_sensor() {
 }
 
 #[test]
+fn an_of_node_that_cannot_be_resolved_is_reported() {
+    // Codex 4192655546: a failure other than a vanished device must not read
+    // as "no configured camera".
+    let root = TempDir::new();
+    devkit(root.path());
+    let device = root.path().join("sys/devices/platform/i2c/9-0010");
+    fs::create_dir_all(&device).unwrap();
+    symlink(device.join("of_node"), device.join("of_node")).unwrap();
+    symlink(&device, root.path().join("sys/bus/i2c/devices/9-0010")).unwrap();
+    let mut probe = probe(root.path(), "true");
+    let (board, errors) = scan(&mut probe, &[mipi_camera("imx477 5-001a")]);
+    // The resolvable camera is still listed; the loop is one board error.
+    assert_eq!(board["configured_cameras"][0]["i2c_device"], "5-001a");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].provider, "board");
+    assert!(
+        errors[0].reason.contains("failed to resolve"),
+        "{}",
+        errors[0].reason
+    );
+}
+
+#[test]
 fn a_configured_camera_without_a_catalog_camera_has_no_camera_id() {
     let root = TempDir::new();
     devkit(root.path());
