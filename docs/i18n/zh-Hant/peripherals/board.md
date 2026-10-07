@@ -18,7 +18,7 @@ API 會如同以往傳回 HTTP 503。
 | 欄位 | 出現時機 | 意義 |
 | --- | --- | --- |
 | `model` | 裝置樹中有此值時 | `/sys/firmware/devicetree/base/model`，取到第一個 NUL 為止並去除前後空白，例如 `SiMa.ai Modalix SoM 16Gig Board` |
-| `overlays` | `fw_printenv -n dtbos` 成功時 | U-Boot `dtbos` 變數中以 `.dtbo` 結尾的項目，保持原本順序：U-Boot 套用的每一個 overlay，而不只是攝影機 overlay（PCIe、安全開機與快閃記憶體的 overlay 也使用同一個變數）。Sentinel 不會指出哪個項目設定了攝影機；`supported_sensors` 會列出設定某個感測器的 overlay |
+| `overlays` | `fw_printenv -n dtbos` 曾經成功後 | U-Boot `dtbos` 變數中以 `.dtbo` 結尾的項目，保持原本順序：U-Boot 套用的每一個 overlay，而不只是攝影機 overlay（PCIe、安全開機與快閃記憶體的 overlay 也使用同一個變數）。Sentinel 不會指出哪個項目設定了攝影機；`supported_sensors` 會列出設定某個感測器的 overlay。若之後的執行失敗，會保留最後一次成功執行的清單，並回報該失敗 |
 | `configured_cameras` | 一律 | 即時裝置樹中位於 I2C 上的 MIPI CSI-2 感測器；可能為空 |
 | `supported_sensors` | 一律 | `/boot` 下的 overlay 檔案所設定的感測器；可能為空 |
 
@@ -56,7 +56,11 @@ overlay 的檔名，已排序。項目依
   環境中。`fw_printenv` 知道該環境在開發板上的
   儲存位置，因此 Sentinel 會詢問它，而不是自行讀取快閃記憶體。其值是
   U-Boot 在下次開機時套用的清單；除非開機後
-  曾經變更，否則它就是本次開機所用的清單。
+  曾經變更，否則它就是本次開機所用的清單。這是探索功能中唯一執行程式、
+  而非讀取核心介面的部分。`fw_printenv` 以 root 身分執行，絕不會變更環境，
+  但會取得環境的鎖：DevKit 隨附的 libubootenv 會建立
+  `/var/lock/fw_printenv.lock` 並等待取得其獨占 `flock`，因此同時執行的
+  `fw_setenv` 可能使掃描一直等到逾時。
 - **overlay 檔案**是平台隨附的 overlay。每個 `*.dtbo`
   檔案，只要位於 `/boot` 正下方的目錄中（例如 `/boot/boot-0/` 與
   `/boot/boot-1/`，即 A/B 槽位），都會被解析。感測器是指 overlay 加到 I2C 匯流排上、
@@ -74,29 +78,35 @@ I2C 多工器，或 GMSL 解串器與串列器；它在兩份清單中都會被�
 
 ## 讀取上限
 
-探索功能最多讀取 1024 個 I2C 裝置、每個裝置子樹的 256 個節點、
-`/boot` 及其每個目錄的 4096 個項目，以及 512 個 overlay 檔案，
-每個檔案最大 1 MiB。overlay 檔案只解析一次，只有在其大小、修改時間、變更時間或 inode
+探索功能最多讀取 1024 個 I2C 裝置；每個裝置的子樹最多讀取 256 個節點、每個節點的
+256 個項目，以及含裝置本身節點在內的 32 層節點；`/boot` 及其每個目錄的 4096 個項目；
+以及 512 個 overlay 檔案，每個檔案最大 1 MiB。在這些上限處被截斷的清單，會作為其欄位的
+錯誤回報，已讀取的部分仍會發布。overlay 檔案只解析一次，只有在其大小、修改時間、變更時間或 inode
 改變時才會重新解析；無法讀取的檔案
 會在下一次掃描中重新讀取。`fw_printenv` 在 2 秒後
-會被終止，且最多只讀取其 64 KiB 的輸出與 4 KiB 的錯誤
+會被終止。掃描最多再等待 0.5 秒讓它結束，之後便交由背景回收。最多只讀取其 64 KiB 的輸出與 4 KiB 的錯誤
 輸出。
 
 ## 錯誤
 
-錯誤帶有 `provider: "board"`。區塊的其餘部分仍會照常發布。
+每個錯誤都會指出它使哪個欄位不完整：`provider` 為
+`board.model`、`board.overlays`、`board.configured_cameras` 或
+`board.supported_sensors`。區塊的其餘部分仍會照常發布。
 
 | 代碼 | 發生時機 |
 | --- | --- |
 | `io.open` | `model`、`/sys/bus/i2c/devices`、某個裝置的節點、`/boot`、其中某個目錄，或某個 overlay 檔案存在但無法讀取 |
-| `io.permission_denied` | 同上，但以 `EACCES` 失敗；或 `fw_printenv` 存在但無法執行 |
-| `peripherals.discovery_failed` | `fw_printenv` 未及時完成，或因 `dtbos` 未設定以外的原因而以失敗結束（原因會列出它印到 stderr 的第一行）；overlay 檔案格式錯誤或大於 1 MiB；overlay 檔案超過 512 個 |
+| `io.permission_denied` | 同上，但以 `EACCES` 失敗；或 `fw_printenv` 存在但無法執行（`EACCES` 或 `EPERM`） |
+| `peripherals.discovery_failed` | `fw_printenv` 因其他原因無法啟動、無法讀取其輸出、等待它時失敗、未及時完成，或因 `dtbos` 未設定以外的原因而以失敗結束（原因會列出它印到 stderr 的第一行）；overlay 檔案格式錯誤或大於 1 MiB；某份清單在上述上限之一處被截斷 |
 
-被略過的 overlay 檔案與無法讀取的 I2C 裝置，各彙整為一個錯誤回報，
-附上第一個問題的代碼與原因，以及其他問題的數量。若缺少 `fw_printenv`，
+每份清單的問題彙整為一個錯誤回報，附上第一個問題的代碼與原因，以及其他問題的數量。
+對 `supported_sensors` 而言，`/boot` 或其中某個目錄的清單無法讀取或被截斷，會與被略過的
+overlay 檔案一併計算；對 `configured_cameras` 而言，I2C 裝置清單被截斷，會與無法讀取或
+被截斷的裝置一併計算。若缺少 `fw_printenv`，
 或它以失敗結束並表示變數 `not defined`（如同
 u-boot-tools 在 `dtbos` 未設定時的行為），則會省略 `overlays` 且不回報
-錯誤；任何其他失敗結束都會省略它並回報錯誤。沒有裝置樹、I2C 裝置或 `/boot` 的
+錯誤。DevKit 隨附的 libubootenv 對未設定的變數會印出空值，因此此時 `overlays` 為空清單。
+任何其他失敗都會保留最後的清單並回報錯誤；在任何一次執行成功之前，會省略 `overlays`。沒有裝置樹、I2C 裝置或 `/boot` 的
 開發板會回報空清單，且不回報
 錯誤。
 
@@ -115,6 +125,8 @@ u-boot-tools 在 `dtbos` 未設定時的行為），則會省略 `overlays` 且�
 - 具有自己 CSI-2 端點的輔助晶片會被列為已設定的
   攝影機，例如 METOAK-DUAL overlay 中的 `Metoak,xc9080`。沒有任何
   `camera.mipi` 攝影機以它為感測器，因此它永遠不會有 `camera_id`。
+- 沒有任何機制監看 `/boot` 或 U-Boot 環境。以 `fw_setenv` 所做的變更，或安裝、移除的
+  overlay 檔案，會在下一次掃描時出現；下一次掃描會在攝影機或音訊裝置事件之後，或重新整理時執行。
 
 ## 範例
 

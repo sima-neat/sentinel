@@ -63,8 +63,10 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 ## 周邊裝置
 
 探索執行緒會在守護程式啟動時、核心回報裝置變更時，
-以及收到重新整理請求時，掃描開發板的周邊裝置。它只讀取
-核心介面，從不開啟串流。`GET /v1/peripherals` 會傳回
+以及收到重新整理請求時，掃描開發板的周邊裝置。裝置提供者只讀取
+核心介面，從不開啟串流。為了讀取 `board` 區塊的 U-Boot overlay 清單，每次掃描也會以 root
+身分執行 `fw_printenv -n dtbos`。它絕不會變更環境，但會取得環境的鎖，因此會建立
+`/var/lock/fw_printenv.lock`。`GET /v1/peripherals` 會傳回
 最新結果：
 
 ```json
@@ -80,7 +82,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 | `observed_at` | 產生此結果的那次掃描開始的時間；第一次掃描完成前為 `null`。 |
 | `board` | 開發板針對攝影機的設定方式：型號、U-Boot 套用的 overlay、裝置樹所設定的攝影機（目錄中有對應項目時，各附上作為其感測器的 `camera.mipi` 攝影機的 `id`），以及已安裝的 overlay 所支援的感測器。與 `devices` 在同一次掃描中讀取；第一次掃描完成前不存在。請參閱 [開發板攝影機設定](peripherals/board.md)。 |
 | `devices` | 每個裝置一個物件，以 `type` 標記類型。`id` 在重新插拔至同一連接埠後保持不變，且絕不會是 `/dev/videoN` 名稱。 |
-| `errors` | 在最近一次掃描中失敗的提供者，以及 `board` 區塊中無法讀取的部分（提供者 `board`）。失敗的提供者在上次成功掃描中找到的裝置會保留在 `devices` 中。`hotplug.unavailable` 表示無法接收核心 uevent，因此只有在重新整理時才會重新掃描。 |
+| `errors` | 在最近一次掃描中失敗的提供者，以及 `board` 區塊中無法完整讀取的欄位（提供者 `board.<field>`，例如 `board.overlays`）。失敗的提供者在上次成功掃描中找到的裝置會保留在 `devices` 中，而失敗的 `fw_printenv` 會保留最後的 overlay 清單。`hotplug.unavailable` 表示無法接收核心 uevent，因此只有在重新整理時才會重新掃描。 |
 
 Sentinel 只回報硬體事實。應用程式是否支援某個
 裝置或模式，由該應用程式決定；Neat Core 會為

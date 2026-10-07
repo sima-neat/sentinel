@@ -63,9 +63,12 @@ default. Add `raw=1` only when timestamped samples are required.
 ## Peripherals
 
 A discovery thread scans the board's peripherals when the daemon starts, when
-the kernel reports a device change, and on refresh requests. It only reads
-kernel interfaces and never opens a stream. `GET /v1/peripherals` returns the
-latest result:
+the kernel reports a device change, and on refresh requests. Device providers only
+read kernel interfaces and never open a stream. To read the U-Boot overlay list
+for the `board` block, each scan also runs `fw_printenv -n dtbos` as root. It
+never changes the environment, but it takes the environment's lock, which
+creates `/var/lock/fw_printenv.lock`. `GET /v1/peripherals` returns the latest
+result:
 
 ```json
 {"revision": 1791155282460, "observed_at": "2026-10-04T23:08:02.460Z",
@@ -80,7 +83,7 @@ latest result:
 | `observed_at` | When the scan behind this result started; `null` until the first scan completes. |
 | `board` | How the board is set up for cameras: model, the overlays U-Boot applies, the cameras the device tree configures (each with the `id` of the `camera.mipi` camera that is its sensor, when the catalog has one), and the sensors the installed overlays support. Read in the same scan as `devices`; absent until the first scan completes. See [board camera configuration](peripherals/board.md). |
 | `devices` | One object per device, tagged by `type`. `id` is stable across replugs into the same port and is never a `/dev/videoN` name. |
-| `errors` | Providers that failed in the latest scan, and parts of the `board` block that could not be read (provider `board`). A failed provider's devices from its last successful scan stay in `devices`. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
+| `errors` | Providers that failed in the latest scan, and fields of the `board` block that could not be read completely (provider `board.<field>`, for example `board.overlays`). A failed provider's devices from its last successful scan stay in `devices`, and a failed `fw_printenv` keeps the last overlay list. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
 
 Sentinel reports hardware facts only. Whether an application supports a
 device or mode is decided by that application; Neat Core does this for
