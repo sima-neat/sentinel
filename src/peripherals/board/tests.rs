@@ -293,7 +293,7 @@ fn an_of_node_that_cannot_be_resolved_is_reported() {
     // The resolvable camera is still listed; the loop is one board error.
     assert_eq!(board["configured_cameras"][0]["i2c_device"], "5-001a");
     assert_eq!(errors.len(), 1, "{errors:?}");
-    assert_eq!(errors[0].provider, "board");
+    assert_eq!(errors[0].provider, "board.configured_cameras");
     assert!(
         errors[0].reason.contains("failed to resolve"),
         "{}",
@@ -503,7 +503,7 @@ fn a_hung_fw_printenv_omits_the_list_and_reports_one_error() {
     assert!(board.get("overlays").is_none(), "{board}");
     assert_eq!(board["model"], MODEL);
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].provider, "board");
+    assert_eq!(errors[0].provider, "board.overlays");
     assert_eq!(errors[0].code, CODE_DISCOVERY_FAILED);
 }
 
@@ -519,7 +519,7 @@ fn a_failing_fw_printenv_reports_one_error_unless_the_variable_is_not_defined() 
     assert!(board.get("overlays").is_none(), "{board}");
     assert_eq!(board["model"], MODEL);
     assert_eq!(errors.len(), 1, "{errors:?}");
-    assert_eq!(errors[0].provider, "board");
+    assert_eq!(errors[0].provider, "board.overlays");
     assert_eq!(errors[0].code, CODE_DISCOVERY_FAILED);
     assert!(
         errors[0]
@@ -643,7 +643,7 @@ fn overlays_are_deduplicated_and_malformed_ones_are_skipped_with_one_error() {
         ])
     );
     assert_eq!(errors.len(), 1, "{errors:?}");
-    assert_eq!(errors[0].provider, "board");
+    assert_eq!(errors[0].provider, "board.supported_sensors");
     assert_eq!(errors[0].code, CODE_DISCOVERY_FAILED);
     assert!(
         errors[0].reason.contains("broken.dtbo is malformed")
@@ -775,10 +775,12 @@ fn overlay_files_and_sizes_are_capped() {
     assert!(errors[0].reason.contains("larger than 1048576 bytes"));
 }
 
-/// The one error of a scan of `root`, which must say `expected`.
-fn only_error_says(root: &Path, expected: &str) {
+/// The one error of a scan of `root`, which must be `provider`'s and say
+/// `expected`.
+fn only_error_says(root: &Path, provider: &str, expected: &str) {
     let (_, errors) = scan(&mut probe_at(root), &[]);
     assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].provider, provider);
     assert_eq!(errors[0].code, CODE_DISCOVERY_FAILED);
     assert!(errors[0].reason.contains(expected), "{errors:?}");
 }
@@ -792,7 +794,11 @@ fn every_listing_and_subtree_cut_at_a_bound_is_reported() {
     for bus in 0..MAX_I2C_DEVICES {
         fs::create_dir(devices.join(format!("i2c-{}", bus + 100))).unwrap();
     }
-    only_error_says(root.path(), "more than 1024 I2C devices in ");
+    only_error_says(
+        root.path(),
+        "board.configured_cameras",
+        "more than 1024 I2C devices in ",
+    );
 
     // More entries in /boot, and in one of its directories, than are listed.
     for directory in ["boot", "boot/boot-0"] {
@@ -803,7 +809,7 @@ fn every_listing_and_subtree_cut_at_a_bound_is_reported() {
             fs::write(directory.join(format!("{index:04}.txt")), "").unwrap();
         }
         let expected = format!("more than 4096 entries in {}", directory.display());
-        only_error_says(root.path(), &expected);
+        only_error_says(root.path(), "board.supported_sensors", &expected);
     }
 
     // A live node with more entries, a subtree with more nodes, and nodes
@@ -814,7 +820,11 @@ fn every_listing_and_subtree_cut_at_a_bound_is_reported() {
     for index in 0..256 {
         fs::write(sensor.join(format!("property-{index:03}")), "").unwrap();
     }
-    only_error_says(root.path(), "more than 256 entries in ");
+    only_error_says(
+        root.path(),
+        "board.configured_cameras",
+        "more than 256 entries in ",
+    );
 
     // 16 groups of 16 keep every node under the entry bound.
     let root = TempDir::new();
@@ -825,7 +835,11 @@ fn every_listing_and_subtree_cut_at_a_bound_is_reported() {
             fs::create_dir_all(sensor.join(format!("g@{group}/n@{index}"))).unwrap();
         }
     }
-    only_error_says(root.path(), "more than 256 device-tree nodes in ");
+    only_error_says(
+        root.path(),
+        "board.configured_cameras",
+        "more than 256 device-tree nodes in ",
+    );
 
     // The sensor is level 1; its 32nd descendant level is not read.
     let root = TempDir::new();
@@ -838,6 +852,7 @@ fn every_listing_and_subtree_cut_at_a_bound_is_reported() {
     fs::create_dir_all(chain(32)).unwrap();
     only_error_says(
         root.path(),
+        "board.configured_cameras",
         "n31 is nested deeper than 32 nodes and was not read",
     );
 
@@ -873,6 +888,7 @@ fn unreadable_sources_are_reported_and_the_rest_is_kept() {
     assert!(board.get("model").is_none());
     assert_eq!(board["configured_cameras"].as_array().unwrap().len(), 1);
     assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].provider, "board.model");
     assert_eq!(errors[0].code, "io.open");
     assert!(
         errors[0].reason.ends_with("model: Is a directory"),

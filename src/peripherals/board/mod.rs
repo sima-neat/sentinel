@@ -30,7 +30,8 @@ use super::sysutil::{
 };
 use super::{CatalogError, Peripheral, ProviderError};
 
-/// The provider name on the block's errors.
+/// The block's errors name the field they leave incomplete:
+/// `board.<field>`, e.g. `board.overlays`.
 pub const PROVIDER_NAME: &str = "board";
 
 /// `fw_printenv` gets this long before it is killed.
@@ -137,29 +138,31 @@ impl BoardProbe {
     /// be read completely. `devices` are the scan's devices.
     pub fn scan(&mut self, devices: &[Peripheral]) -> (Board, Vec<CatalogError>) {
         let mut errors = Vec::new();
-        let mut report = |error: ProviderError| {
+        let mut report = |field: &str, error: ProviderError| {
             errors.push(CatalogError {
-                provider: PROVIDER_NAME.into(),
+                provider: format!("{PROVIDER_NAME}.{field}"),
                 code: error.code,
                 reason: error.reason,
             })
         };
         let base = self.sys_root.join("firmware/devicetree/base");
         let model = read_model(&base).unwrap_or_else(|error| {
-            report(error);
+            report("model", error);
             None
         });
         let overlays = overlay_list(&self.overlay_command, self.timeout).unwrap_or_else(|error| {
-            report(error);
+            report("overlays", error);
             None
         });
         let (configured_cameras, configured_error) =
             configured_cameras(&self.sys_root, &base, devices);
+        if let Some(error) = configured_error {
+            report("configured_cameras", error);
+        }
         let (supported_sensors, overlay_error) = self.supported_sensors();
-        configured_error
-            .into_iter()
-            .chain(overlay_error)
-            .for_each(report);
+        if let Some(error) = overlay_error {
+            report("supported_sensors", error);
+        }
         let board = Board {
             model,
             overlays,
