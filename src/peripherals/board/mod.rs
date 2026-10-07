@@ -17,7 +17,7 @@ use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -36,6 +36,9 @@ pub const PROVIDER_NAME: &str = "board";
 /// `fw_printenv` gets this long before it is killed.
 const FW_PRINTENV_TIMEOUT: Duration = Duration::from_secs(2);
 const FW_PRINTENV_POLL: Duration = Duration::from_millis(10);
+/// A killed `fw_printenv` that has not exited after this long (stuck in
+/// uninterruptible I/O) is left to a reaper thread.
+const FW_PRINTENV_KILL_GRACE: Duration = Duration::from_millis(500);
 /// `fw_printenv` output beyond this is not read.
 const MAX_COMMAND_OUTPUT: usize = 64 * 1024;
 /// `fw_printenv` error output beyond this is not read.
@@ -294,8 +297,13 @@ fn overlay_list(
     // until the timeout otherwise. Output past each limit is read and dropped.
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
-    set_nonblocking(stdout.as_ref());
-    set_nonblocking(stderr.as_ref());
+    // A pipe left blocking would hold `drain` past the timeout.
+    let nonblocking = set_nonblocking(stdout.as_ref()).and(set_nonblocking(stderr.as_ref()));
+    if let Err(error) = nonblocking {
+        stop(child, FW_PRINTENV_KILL_GRACE);
+        let reason = format!("failed to read from {program}: {}", os_message(&error));
+        return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+    }
     let (mut output, mut errors) = (Vec::new(), Vec::new());
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -305,8 +313,7 @@ fn overlay_list(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(FW_PRINTENV_POLL),
             outcome => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop(child, FW_PRINTENV_KILL_GRACE);
                 let reason = match outcome {
                     Err(error) => format!("failed to wait for {program}: {}", os_message(&error)),
                     _ => format!("{program} did not finish within {timeout:?} and was killed"),
@@ -336,18 +343,49 @@ fn overlay_list(
     Ok(Some(entries))
 }
 
-/// Makes `pipe` non-blocking, so `drain` returns when it is empty.
-fn set_nonblocking(pipe: Option<&impl AsRawFd>) {
-    if let Some(pipe) = pipe {
-        let fd = pipe.as_raw_fd();
-        // SAFETY: fcntl on a descriptor owned by `pipe`, which outlives the calls.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags >= 0 {
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
+/// Kills `child` and waits at most `grace` for it to exit. A child that is
+/// still there (SIGKILL waits for uninterruptible I/O to return) is handed to
+/// a thread that reaps it whenever it exits, so the caller never blocks on it.
+fn stop(mut child: Child, grace: Duration) {
+    let _ = child.kill();
+    reap_within(child, grace);
+}
+
+/// Waits at most `grace` for `child` to exit, then leaves it to a reaper
+/// thread. Returns whether it was reaped here.
+fn reap_within(mut child: Child, grace: Duration) -> bool {
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => thread::sleep(FW_PRINTENV_POLL),
+            Ok(None) => break,
+            // Already reaped, or not ours to wait for.
+            Err(_) => return true,
         }
     }
+    let reaper = thread::Builder::new().name("fw_printenv-reaper".into());
+    // Without a thread the child stays a zombie; nothing else can be done.
+    let _ = reaper.spawn(move || child.wait());
+    false
+}
+
+/// Makes `pipe` non-blocking, so `drain` returns when it is empty.
+fn set_nonblocking(pipe: Option<&impl AsRawFd>) -> io::Result<()> {
+    let Some(pipe) = pipe else {
+        return Ok(());
+    };
+    let fd = pipe.as_raw_fd();
+    // SAFETY: fcntl on a descriptor owned by `pipe`, which outlives the calls.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Reads what `pipe` holds now into `output`, keeping at most `limit` bytes

@@ -7,6 +7,8 @@
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
+use std::process::Command;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -453,6 +455,42 @@ fn the_overlay_list_keeps_dtbo_entries_and_degrades_without_fw_printenv() {
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(hung.code, CODE_DISCOVERY_FAILED);
     assert!(hung.reason.contains("did not finish"), "{}", hung.reason);
+}
+
+#[test]
+fn a_child_that_outlives_the_kill_grace_is_reaped_in_the_background() {
+    // SIGKILL waits for uninterruptible I/O, which a test cannot cause; a child
+    // that is not killed stands in for one that has not died yet.
+    let child = Command::new("sleep").arg("1").spawn().unwrap();
+    let pid = child.id();
+    let started = Instant::now();
+    assert!(!reap_within(child, Duration::from_millis(100)));
+    assert!(started.elapsed() < Duration::from_millis(900));
+    // The reaper waits for it, so it does not stay a zombie.
+    let proc = Path::new("/proc").join(pid.to_string());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while proc.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!proc.exists(), "process {pid} was not reaped");
+    // A child that exits within the grace is reaped in place.
+    let mut child = Command::new("true").spawn().unwrap();
+    let _ = child.kill();
+    assert!(reap_within(child, Duration::from_secs(2)));
+}
+
+#[test]
+fn a_pipe_that_cannot_be_made_non_blocking_is_an_error() {
+    /// A descriptor number no test process has open.
+    struct Closed;
+    impl AsRawFd for Closed {
+        fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            1 << 20
+        }
+    }
+    let error = set_nonblocking(Some(&Closed)).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+    assert!(set_nonblocking(None::<&Closed>).is_ok());
 }
 
 #[test]
