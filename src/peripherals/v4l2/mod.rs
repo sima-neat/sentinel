@@ -96,6 +96,18 @@ struct Failure {
 }
 
 /// [`io_error`] with its errno.
+/// An enumeration ioctl the driver does not implement (the V4L2 core answers
+/// `ENOTTY`) lists nothing, so it ends the list like `EINVAL` instead of
+/// failing the scan.
+fn unsupported_is_empty(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(error) if error.raw_os_error() == Some(libc::ENOTTY) => {
+            Err(io::Error::from_raw_os_error(libc::EINVAL))
+        }
+        result => result,
+    }
+}
+
 fn failed(action: &str, path: &Path, error: &io::Error, eperm: bool) -> Failure {
     let (errno, error) = (errno_of(error), io_error(action, path, error, eperm));
     Failure { errno, error }
@@ -304,7 +316,8 @@ impl Enumerator<'_> {
     }
 
     /// One mode per size, with every interval of each probed size; a size
-    /// without intervals has no mode. A range is probed at its minimum and
+    /// without intervals has no mode. A driver without the size or interval
+    /// enumeration ioctl has none, as for `camera.mipi`. A range is probed at its minimum and
     /// maximum.
     fn format_modes(&mut self, pixel_format: u32, description: &str) -> Result<Vec<Mode>, Failure> {
         let query = |node: &mut dyn VideoNode, index| {
@@ -313,7 +326,7 @@ impl Enumerator<'_> {
                 pixel_format,
                 ..FrmSizeEnum::default()
             };
-            node.enum_frame_size(&mut value).map(|()| value)
+            unsupported_is_empty(node.enum_frame_size(&mut value)).map(|()| value)
         };
         let mut modes = Vec::new();
         for (width, height, size_range) in self.list("frame size", query, decode_size)? {
@@ -330,7 +343,7 @@ impl Enumerator<'_> {
                         height,
                         ..FrmIvalEnum::default()
                     };
-                    node.enum_frame_interval(&mut value).map(|()| value)
+                    unsupported_is_empty(node.enum_frame_interval(&mut value)).map(|()| value)
                 };
                 let mut intervals = self.list("frame interval", query, decode_interval)?;
                 intervals.sort_by(interval_order);
