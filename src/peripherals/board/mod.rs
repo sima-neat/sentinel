@@ -184,8 +184,8 @@ impl BoardProbe {
         (board, errors)
     }
 
-    /// Sensors by `compatible`, from every `*.dtbo` one level under the boot
-    /// directory (`/boot/boot-0/`, `/boot/boot-1/`). A file name in several
+    /// Sensors by `compatible`, from every `*.dtbo` in the boot directory or
+    /// one level under it (`/boot/boot-0/`, `/boot/boot-1/`). A file name in several
     /// directories (A/B slots) is listed once.
     fn supported_sensors(&mut self) -> (Vec<SupportedSensor>, Option<ProviderError>) {
         let mut skipped = Skipped::default();
@@ -523,38 +523,57 @@ fn configured_cameras(
     (cameras, skipped.into_error("I2C devices"))
 }
 
-/// `(path, file name)` of every `*.dtbo` file in the directories directly
-/// under `boot_root`, sorted, at most [`MAX_OVERLAY_FILES`].
+/// `(path, file name)` of every `*.dtbo` file directly in `boot_root` (the
+/// flat layout of Platform 3.0) and in the directories directly under it
+/// (the A/B slots of Platform 2.1), at most [`MAX_OVERLAY_FILES`].
 fn overlay_files(boot_root: &Path, skipped: &mut Skipped) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
-    let Some(slots) = boot_listing(boot_root, skipped) else {
+    let Some(entries) = boot_listing(boot_root, skipped) else {
         return files;
     };
-    for slot in slots {
-        let directory = boot_root.join(slot);
+    if !add_overlay_files(boot_root, boot_root, &entries, &mut files, skipped) {
+        return files;
+    }
+    for entry in entries {
+        let directory = boot_root.join(entry);
         if !fs::metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
             continue;
         }
         let Some(names) = boot_listing(&directory, skipped) else {
             continue;
         };
-        for name in names.into_iter().filter(|name| name.ends_with(".dtbo")) {
-            let path = directory.join(&name);
-            if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
-                continue;
-            }
-            if files.len() == MAX_OVERLAY_FILES {
-                let reason = format!(
-                    "more than {MAX_OVERLAY_FILES} overlay files under {}; the rest were not read",
-                    boot_root.display()
-                );
-                skipped.add(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
-                return files;
-            }
-            files.push((path, name));
+        if !add_overlay_files(boot_root, &directory, &names, &mut files, skipped) {
+            break;
         }
     }
     files
+}
+
+/// Adds the `*.dtbo` files among `names` in `directory` to `files`. Returns
+/// `false`, after reporting it, once [`MAX_OVERLAY_FILES`] would be exceeded.
+fn add_overlay_files(
+    boot_root: &Path,
+    directory: &Path,
+    names: &[String],
+    files: &mut Vec<(PathBuf, String)>,
+    skipped: &mut Skipped,
+) -> bool {
+    for name in names.iter().filter(|name| name.ends_with(".dtbo")) {
+        let path = directory.join(name);
+        if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            continue;
+        }
+        if files.len() == MAX_OVERLAY_FILES {
+            let reason = format!(
+                "more than {MAX_OVERLAY_FILES} overlay files under {}; the rest were not read",
+                boot_root.display()
+            );
+            skipped.add(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+            return false;
+        }
+        files.push((path, name.clone()));
+    }
+    true
 }
 
 /// At most [`MAX_BOOT_ENTRIES`] names in `directory`; `None` when it is gone

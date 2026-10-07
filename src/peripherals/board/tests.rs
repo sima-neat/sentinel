@@ -651,11 +651,6 @@ fn overlays_are_deduplicated_and_malformed_ones_are_skipped_with_one_error() {
     // Not an overlay, and an overlay too deep to be read.
     write("boot-0", "board.dtb", &mux_overlay("sony,imx477"));
     write("boot-0/extra", "d.dtbo", &mux_overlay("sony,imx999"));
-    fs::write(
-        root.path().join("boot/top.dtbo"),
-        mux_overlay("sony,imx999"),
-    )
-    .unwrap();
     let mut probe = probe(root.path(), NOT_DEFINED);
     let (board, errors) = scan(&mut probe, &[]);
     assert_eq!(
@@ -698,6 +693,48 @@ fn overlays_are_deduplicated_and_malformed_ones_are_skipped_with_one_error() {
 
 /// An unreadable overlay is not cached, so it parses again once it is
 /// readable, without a restart.
+#[test]
+fn overlays_directly_in_boot_are_read_as_in_the_flat_layout() {
+    // Platform 3.0 installs the overlays directly in /boot, with no slot
+    // directories (145 files on build B1859; transcribed, not captured).
+    let root = TempDir::new();
+    let boot = root.path().join("boot");
+    fs::create_dir_all(&boot).unwrap();
+    fs::write(boot.join(OVERLAY), mux_overlay("sony,imx477")).unwrap();
+    let imx219 = fixup_overlay("sony,imx219", "i2c01");
+    fs::write(boot.join("modalix-dvt-imx219.dtbo"), &imx219).unwrap();
+    fs::write(boot.join("Image.dtb"), mux_overlay("sony,imx999")).unwrap();
+    let flat = json!([
+        {"compatible": "sony,imx219", "overlays": ["modalix-dvt-imx219.dtbo"]},
+        {"compatible": "sony,imx477", "overlays": [OVERLAY]}
+    ]);
+    let (board, errors) = scan(&mut probe_at(root.path()), &[]);
+    assert_eq!(errors, []);
+    assert_eq!(board["supported_sensors"], flat);
+
+    // Both layouts at once: a file name in /boot and in a slot is listed
+    // once, and a directory two levels down is still not read.
+    fs::create_dir_all(boot.join("boot-0/extra")).unwrap();
+    fs::write(
+        boot.join("boot-0").join(OVERLAY),
+        mux_overlay("sony,imx477"),
+    )
+    .unwrap();
+    let imx678 = fixup_overlay("sony,imx678", "i2c01");
+    fs::write(boot.join("boot-0/modalix-dvt-imx678.dtbo"), &imx678).unwrap();
+    fs::write(boot.join("boot-0/extra/d.dtbo"), mux_overlay("sony,imx999")).unwrap();
+    let (board, errors) = scan(&mut probe_at(root.path()), &[]);
+    assert_eq!(errors, []);
+    assert_eq!(
+        board["supported_sensors"],
+        json!([
+            {"compatible": "sony,imx219", "overlays": ["modalix-dvt-imx219.dtbo"]},
+            {"compatible": "sony,imx477", "overlays": [OVERLAY]},
+            {"compatible": "sony,imx678", "overlays": ["modalix-dvt-imx678.dtbo"]}
+        ])
+    );
+}
+
 #[test]
 fn an_unreadable_overlay_is_read_again_when_it_becomes_readable() {
     let root = TempDir::new();
@@ -775,8 +812,14 @@ fn overlay_files_and_sizes_are_capped() {
     let slot = root.path().join("boot/boot-0");
     fs::create_dir_all(&slot).unwrap();
     let blob = fixup_overlay("sony,imx219", "i2c01");
+    // Files directly in /boot and in a slot count against one cap.
     for index in 0..=MAX_OVERLAY_FILES {
-        fs::write(slot.join(format!("{index:04}.dtbo")), &blob).unwrap();
+        let directory = if index % 2 == 0 {
+            slot.parent().unwrap()
+        } else {
+            &slot
+        };
+        fs::write(directory.join(format!("{index:04}.dtbo")), &blob).unwrap();
     }
     let mut probe = probe(root.path(), NOT_DEFINED);
     let (board, errors) = scan(&mut probe, &[]);

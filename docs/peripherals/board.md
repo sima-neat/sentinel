@@ -34,8 +34,8 @@ Each `configured_cameras` entry:
 
 Each `supported_sensors` entry has `compatible` and `overlays`, the sorted
 file names of the overlays that configure it. Entries are sorted by
-`compatible`. The list merges every slot directory under `/boot`, so it can
-include overlays that are installed only in a slot that is not booted.
+`compatible`. The list merges `/boot` and every slot directory under it, so it
+can include overlays that are installed only in a slot that is not booted.
 
 ## Where each fact comes from
 
@@ -63,12 +63,14 @@ include overlays that are installed only in a slot that is not booted.
   an exclusive `flock` on it, so a `fw_setenv` running at the same time can
   hold a scan until the timeout.
 - **The overlay files** are the overlays the platform ships. Every `*.dtbo`
-  file in a directory directly under `/boot` (for example `/boot/boot-0/` and
-  `/boot/boot-1/`, the A/B slots) is parsed. A sensor is a node with
+  file directly in `/boot`, where Platform 3.0 installs them, or in a directory
+  directly under it, as in the A/B slots `/boot/boot-0/` and `/boot/boot-1/` of
+  Platform 2.1, is parsed. A sensor is a node with
   `compatible` and a CSI-2 endpoint, as above, that the overlay adds to an I2C
   bus: below a node whose name starts with `i2c`, or in a fragment whose
   target is one, by `target-path` or by the label in `__fixups__` that its
-  `target` refers to. A file name found in several slots is listed once.
+  `target` refers to. A file name found in several of these directories is
+  listed once.
 
 A CSI-2 source that has another one below it is a bridge, for example an
 I2C mux or a GMSL deserializer and serializer, and is left out in both lists,

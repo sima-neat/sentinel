@@ -34,7 +34,7 @@ API 會如同以往傳回 HTTP 503。
 
 每個 `supported_sensors` 項目都有 `compatible` 與 `overlays`，後者是設定該感測器之
 overlay 的檔名，已排序。項目依
-`compatible` 排序。此清單合併了 `/boot` 下的每個槽位目錄，因此可能
+`compatible` 排序。此清單合併了 `/boot` 本身及其下的每個槽位目錄，因此可能
 包含僅安裝在未開機槽位中的 overlay。
 
 ## 各項事實的來源
@@ -62,12 +62,13 @@ overlay 的檔名，已排序。項目依
   `/var/lock/fw_printenv.lock` 並等待取得其獨占 `flock`，因此同時執行的
   `fw_setenv` 可能使掃描一直等到逾時。
 - **overlay 檔案**是平台隨附的 overlay。每個 `*.dtbo`
-  檔案，只要位於 `/boot` 正下方的目錄中（例如 `/boot/boot-0/` 與
-  `/boot/boot-1/`，即 A/B 槽位），都會被解析。感測器是指 overlay 加到 I2C 匯流排上、
+  檔案，只要直接位於 `/boot` 中（Platform 3.0 的安裝位置），或位於其正下方的目錄中
+  （例如 Platform 2.1 的 A/B 槽位 `/boot/boot-0/` 與
+  `/boot/boot-1/`），都會被解析。感測器是指 overlay 加到 I2C 匯流排上、
   具有 `compatible` 與 CSI-2 端點（判斷方式同上）的節點：
   位於名稱以 `i2c` 開頭的節點之下，或位於目標為此類節點的 fragment 中；
   目標可由 `target-path` 指定，或由其 `target` 所參照、
-  位於 `__fixups__` 中的標籤指定。在多個槽位中出現的同名檔案只會列出一次。
+  位於 `__fixups__` 中的標籤指定。在這些目錄中的多處出現的同名檔案只會列出一次。
 
 下方還有另一個 CSI-2 來源的 CSI-2 來源屬於橋接器，例如
 I2C 多工器，或 GMSL 解串器與串列器；它在兩份清單中都會被排除，
