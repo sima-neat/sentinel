@@ -508,6 +508,29 @@ fn a_hung_fw_printenv_omits_the_list_and_reports_one_error() {
 }
 
 #[test]
+fn a_failed_fw_printenv_keeps_the_last_overlay_list() {
+    let root = TempDir::new();
+    devkit(root.path());
+    let mut probe = probe(root.path(), "echo a.dtbo");
+    let mut overlays = |script: &str| {
+        probe.overlay_command[2] = script.into();
+        let (board, errors) = scan(&mut probe, &[]);
+        let providers: Vec<_> = errors.into_iter().map(|error| error.provider).collect();
+        (board.get("overlays").cloned(), providers)
+    };
+    let failed = "echo 'Cannot read environment, using default' >&2; exit 1";
+    assert_eq!(overlays("echo a.dtbo"), (Some(json!(["a.dtbo"])), vec![]));
+    // The failure is reported, and the last list is kept.
+    let kept = (Some(json!(["a.dtbo"])), vec!["board.overlays".to_string()]);
+    assert_eq!(overlays(failed), kept);
+    assert_eq!(overlays("echo b.dtbo"), (Some(json!(["b.dtbo"])), vec![]));
+    // A variable that is not set is a result too: no list, then none kept.
+    assert_eq!(overlays(NOT_DEFINED), (None, vec![]));
+    let none = (None, vec!["board.overlays".to_string()]);
+    assert_eq!(overlays(failed), none);
+}
+
+#[test]
 fn a_failing_fw_printenv_reports_one_error_unless_the_variable_is_not_defined() {
     let root = TempDir::new();
     devkit(root.path());

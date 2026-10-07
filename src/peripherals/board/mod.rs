@@ -102,6 +102,9 @@ pub struct BoardProbe {
     /// The program and arguments that print the overlay list.
     overlay_command: Vec<String>,
     timeout: Duration,
+    /// The overlay list of the last run that succeeded, published while
+    /// later runs fail, as a failed provider's devices are.
+    last_overlay_list: Option<Vec<String>>,
     /// Parsed overlays by path, reused while their [`Stamp`] matches.
     overlays: HashMap<PathBuf, CachedOverlay>,
 }
@@ -130,6 +133,7 @@ impl BoardProbe {
             boot_root: boot_root.into(),
             overlay_command: ["fw_printenv", "-n", "dtbos"].map(String::from).to_vec(),
             timeout: FW_PRINTENV_TIMEOUT,
+            last_overlay_list: None,
             overlays: HashMap::new(),
         }
     }
@@ -150,10 +154,18 @@ impl BoardProbe {
             report("model", error);
             None
         });
-        let overlays = overlay_list(&self.overlay_command, self.timeout).unwrap_or_else(|error| {
-            report("overlays", error);
-            None
-        });
+        // A failed run (a timeout, e.g. while fw_setenv holds the lock)
+        // keeps the last list, so the field does not flicker.
+        let overlays = match overlay_list(&self.overlay_command, self.timeout) {
+            Ok(list) => {
+                self.last_overlay_list.clone_from(&list);
+                list
+            }
+            Err(error) => {
+                report("overlays", error);
+                self.last_overlay_list.clone()
+            }
+        };
         let (configured_cameras, configured_error) =
             configured_cameras(&self.sys_root, &base, devices);
         if let Some(error) = configured_error {
