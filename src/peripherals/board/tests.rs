@@ -278,8 +278,8 @@ fn a_configured_camera_names_the_catalog_camera_that_is_its_sensor() {
 
 #[test]
 fn an_of_node_that_cannot_be_resolved_is_reported() {
-    // Codex 4192655546: a failure other than a vanished device must not read
-    // as "no configured camera".
+    // A failure other than a vanished device must not read as "no configured
+    // camera".
     let root = TempDir::new();
     devkit(root.path());
     let device = root.path().join("sys/devices/platform/i2c/9-0010");
@@ -436,7 +436,7 @@ fn the_overlay_list_keeps_dtbo_entries_and_degrades_without_fw_printenv() {
     let denied = list(&[missing.to_str().unwrap()], second).unwrap_err();
     assert_eq!(denied.code, CODE_PERMISSION_DENIED);
     // Output larger than a pipe holds is read while the tool runs, kept up to
-    // the limit, and does not hold the tool past the timeout (Codex 4192614464).
+    // the limit, and does not hold the tool past the timeout.
     let started = Instant::now();
     let flood =
         "head -c 300000 /dev/zero | tr '\\0' ' '; echo a.dtbo; head -c 300000 /dev/zero >&2";
