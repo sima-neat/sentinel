@@ -459,6 +459,36 @@ fn vanished_devices_are_skipped() {
     assert_eq!(device_paths(&records), ["/dev/video3"]);
 }
 
+/// A driver without `VIDIOC_ENUM_FRAMESIZES` or `VIDIOC_ENUM_FRAMEINTERVALS`
+/// (an analog USB grabber, for example) answers `ENOTTY`. Its camera is listed
+/// without modes instead of failing the scan, as `camera.mipi` does, and the
+/// other cameras keep theirs.
+#[test]
+fn enumeration_ioctls_a_driver_lacks_give_no_modes() {
+    for request in [VIDIOC_ENUM_FRAMESIZES, VIDIOC_ENUM_FRAMEINTERVALS] {
+        let root = TempDir::new();
+        let sys = root.path().join("sys");
+        add_camera(&sys, USB, &[], &[("video0", "0")]);
+        add_camera(
+            &sys,
+            "devices/platform/xhci/usb1/1-2",
+            &[],
+            &[("video2", "0")],
+        );
+        let mut grabber = uvc_camera("Grabber");
+        grabber.fail = Some((request, libc::ENOTTY));
+        let nodes = vec![("video0", Ok(grabber)), ("video2", Ok(uvc_camera("C920")))];
+        let records = scan(root.path(), nodes).unwrap();
+        let modes = |path: &str| {
+            let device = records.iter().find(|d| usb(d).1.device_path == path);
+            usb(device.unwrap()).0.modes.len()
+        };
+        assert_eq!(device_paths(&records).len(), 2);
+        assert_eq!(modes("/dev/video0"), 0, "request {request:#x}");
+        assert_eq!(modes("/dev/video2"), 3);
+    }
+}
+
 /// A camera unplugged once its node is open is skipped, though its `index`
 /// then reads as nothing rather than failing with a disappearance errno;
 /// other cameras are kept. A present node without `index` still fails the
