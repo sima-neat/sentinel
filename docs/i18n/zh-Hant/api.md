@@ -85,8 +85,7 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 | `errors` | 在最近一次掃描中失敗的提供者，以及 `board` 區塊中無法完整讀取的欄位（提供者 `board.<field>`，例如 `board.overlays`）。失敗的提供者在上次成功掃描中找到的裝置會保留在 `devices` 中，而失敗的 `fw_printenv` 會保留最後的 overlay 清單。`hotplug.unavailable` 表示無法接收核心 uevent，因此只有在重新整理時才會重新掃描。 |
 
 Sentinel 只回報硬體事實。應用程式是否支援某個
-裝置或模式，由該應用程式決定；Neat Core 會為
-`CameraInput` 做這項判斷。
+裝置或模式，由該應用程式決定。
 
 `POST /v1/peripherals/refresh` 會等待一次在該請求之後開始的掃描，
 並以 HTTP 200 傳回該目錄，與 `GET` 的文件相同。

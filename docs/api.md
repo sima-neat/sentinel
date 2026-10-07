@@ -86,8 +86,7 @@ result:
 | `errors` | Providers that failed in the latest scan, and fields of the `board` block that could not be read completely (provider `board.<field>`, for example `board.overlays`). A failed provider's devices from its last successful scan stay in `devices`, and a failed `fw_printenv` keeps the last overlay list. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
 
 Sentinel reports hardware facts only. Whether an application supports a
-device or mode is decided by that application; Neat Core does this for
-`CameraInput`.
+device or mode is decided by that application.
 
 `POST /v1/peripherals/refresh` waits for a scan that starts after the request
 and returns HTTP 200 with that catalog, the same document as `GET`. Concurrent

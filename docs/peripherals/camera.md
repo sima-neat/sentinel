@@ -47,7 +47,7 @@ single- and multi-planar listings of a format are merged.
 
 A size range is probed at its minimum and maximum size. A size without frame
 intervals has no mode. Sentinel does not say whether a mode is supported;
-Neat Core decides that for `CameraInput`.
+the application that uses the camera decides that.
 
 ## Limits and errors
 

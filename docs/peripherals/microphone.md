@@ -31,8 +31,7 @@ sysfs:devices/platform/soc/xhci-hcd.0.auto/usb1/1-1.2/1-1.2:1.0:pcm0c
 For a USB microphone the sysfs device is the audio interface on its port, so
 the id survives replugs into the same port, reboots and ALSA card
 renumbering, and identical microphones on different ports get different ids.
-The card number, card id and `/dev/snd` names never enter it. These are the
-ids Neat Core's earlier ALSA provider produced.
+The card number, card id and `/dev/snd` names never enter it.
 
 A card with no parent device (under `/sys/devices/virtual/sound`, no `device`
 link) has no device path, so its key is the live card id:
