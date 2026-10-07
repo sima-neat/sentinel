@@ -1,7 +1,7 @@
 # System panel
 
 The System panel combines Linux CPU counters, load average, memory accounting,
-the SiMa MLA allocator report, the EV74 contiguous-memory pool, and periodic
+SiMa MLA memory telemetry, the EV74 contiguous-memory pool, and periodic
 process snapshots.
 
 ## CPU fields
@@ -55,18 +55,25 @@ MiB even though the UI label is MB.
 
 ## MLA memory
 
-Sentinel reads `/dev/simaai-mem`, finds `Total allocated size:`, parses the
-following hexadecimal byte count, and converts it to MiB.
+On Platform 3.0, the presence of `/dev/dma_heap/simaai,dms` selects DMA-BUF
+telemetry. Sentinel reads `/sys/kernel/debug/dma_buf/bufinfo` and counts the
+inode-deduplicated union of objects exported by `mla` or `simaai,dms` and
+objects attached to an MLA device. Each DMA-BUF object is counted at most once.
 
-This is MLA allocator memory currently allocated. It is not:
+On earlier releases without that heap, Sentinel reads `/dev/simaai-mem`, finds
+`Total allocated size:`, parses the following hexadecimal byte count, and
+converts it to MiB.
+
+This is MLA memory currently allocated. It is not:
 
 - MLA compute utilization;
 - model FPS or latency;
 - total physical DRAM use;
 - a measurement of `MLA 0.68V` power.
 
-If the device cannot be read or its text format is unrecognized, the value is
-unavailable rather than zero.
+If the selected interface cannot be read or its text format is unrecognized,
+the value is unavailable rather than zero. Sentinel does not fall back to the
+legacy allocator after selecting DMA-BUF telemetry.
 
 ## EV74 CMA memory
 

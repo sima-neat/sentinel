@@ -1,6 +1,6 @@
 # 系統面板
 
-「系統」面板整合了 Linux CPU 計數器、系統負載平均值、記憶體使用量、SiMa MLA 分配器報告、EV74 連續記憶體池，以及週期性的程序快照。
+「系統」面板整合了 Linux CPU 計數器、系統負載平均值、記憶體使用量、SiMa MLA 記憶體遙測、EV74 連續記憶體池，以及週期性的程序快照。
 
 ## CPU 欄位
 
@@ -44,16 +44,18 @@ used_pct   = used_bytes / MemTotal × 100
 
 ## MLA 記憶體
 
-Sentinel 讀取 `/dev/simaai-mem`，找到 `Total allocated size:`，解析以下十六進位位元組計數，並將其轉換為 MiB。
+在 Platform 3.0 上，若存在 `/dev/dma_heap/simaai,dms`，便會選用 DMA-BUF 遙測。Sentinel 讀取 `/sys/kernel/debug/dma_buf/bufinfo`，將由 `mla` 或 `simaai,dms` 匯出的物件與附加至 MLA 裝置的物件取聯集，並依 inode 去除重複後計算。每個 DMA-BUF 物件最多只會計算一次。
 
-這是 MLA 分配器目前已分配的記憶體。它不是：
+在沒有此 heap 的舊版上，Sentinel 讀取 `/dev/simaai-mem`，找到 `Total allocated size:`，解析其後的十六進位位元組數，並換算為 MiB。
+
+這是目前配置給 MLA 的記憶體。它不是：
 
 - MLA 計算資源使用率；
 - 模型中的每秒畫面數 (FPS) 或延遲時間；
 - 總體實體 DRAM 使用量；
 - 一種測量 `MLA 0.68V` 功率的方法。
 
-如果無法讀取裝置，或其文字格式無法識別，則該值將為「無法取得」，而非零。
+如果無法讀取所選介面，或其文字格式無法識別，則該值將為「無法取得」，而非零。選用 DMA-BUF 遙測後，Sentinel 不會退回使用舊版配置器。
 
 ## EV74 CMA 記憶體
 

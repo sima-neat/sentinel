@@ -10,7 +10,7 @@
 | 目前電力 | `power_current_watts` | 已成功讀取對應電源通道中的最新有效總數的 PMBus 軌線。請參閱 [Power](power.md)，以了解部分讀取行為。 |
 | 中央處理器 | `cpu_usage_pct` | 彙總 Linux 在最新的系統樣本時間範圍內，CPU 使用率百分比。 |
 | 記憶 | `linux_mem_used_pct` | `(MemTotal - MemAvailable) / MemTotal × 100`. |
-| MLA 記憶體 | `mla_mem_allocated_mb` | 由 `/dev/simaai-mem` 報告的已配置位元組數，轉換為 MiB。這表示配置器的使用情況，而非 MLA 的使用情況。 |
+| MLA 記憶體 | `mla_mem_allocated_mb` | 在 Platform 3.0 上，將由 `mla`/`simaai,dms` 匯出或附加至 MLA 裝置的 DMA-BUF 物件聯集依 inode 去除重複後，換算為 MiB。舊版則使用 `/dev/simaai-mem` 的已配置位元組總數。這是已配置的記憶體，而非 MLA 使用率。 |
 | 網路 | `net_rx_mbps + net_tx_mbps` | 所有非迴路介面的總和接收和傳輸速率。儘管名稱中有「關鍵」，但顯示的單位是相當於 MiB/s，而不是兆位元/秒。 |
 
 「熱點圖」對於找出溫度最高的區域很有幫助，但它不應取代「熱感應面板」：它會隱藏哪個感測器負責監測，並且可以在晶片上的感測器和板上的感測器之間切換。
@@ -21,7 +21,7 @@
 
 - 標準化的每分鐘 CPU 負載量；
 - Linux 記憶體使用量，單位為 MiB；
-- MLA 分配器使用的記憶體量，單位為 MiB；
+- 配置給 MLA 的記憶體量，單位為 MiB；
 - 目前板緣的電力供應；
 - eMMC 以及可選的 NVMe 檔案系統使用方式；
 - 彙總接收和傳輸速率。

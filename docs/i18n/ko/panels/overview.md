@@ -10,7 +10,7 @@
 | 현재 전력 | `power_current_watts` | 해당 전원 경로에서 성공적으로 읽은 최신 유효한 총 PMBus 레일 값입니다. 부분적으로 읽는 방식에 대한 자세한 내용은 [Power](power.md)를 참조하십시오. |
 | CPU | `cpu_usage_pct` | 집계 Linux 최신 시스템 샘플링 기간 동안 CPU 사용률. |
 | 메모리 | `linux_mem_used_pct` | `(MemTotal - MemAvailable) / MemTotal × 100`. |
-| MLA 메모리 | `mla_mem_allocated_mb` | `/dev/simaai-mem`에서 보고하는 할당된 바이트 수를 MiB 단위로 변환한 값입니다. 이는 MLA 사용량이 아닌 할당량 사용량을 나타냅니다. |
+| MLA 메모리 | `mla_mem_allocated_mb` | Platform 3.0에서는 `mla`/`simaai,dms`가 내보내거나 MLA 장치에 연결된 DMA-BUF 객체의 합집합을 inode 기준으로 중복 제거하여 MiB로 변환합니다. 이전 릴리스에서는 `/dev/simaai-mem`의 총 할당 바이트 수를 사용합니다. 이는 할당된 메모리이며 MLA 활용률이 아닙니다. |
 | 네트워크 | `net_rx_mbps + net_tx_mbps` | 모든 루프백 인터페이스를 제외한 인터페이스의 총 수신 및 전송 속도를 합산한 값입니다. 키 이름과는 달리, 표시되는 단위는 MiB/s와 동일하며, 메가비트/s는 아닙니다. |
 
 열 최대값 차트는 가장 뜨거운 지점을 파악하는 데 유용하지만, 열 패널을 대체해서는 안 됩니다. 열 최대값 차트는 어떤 센서가 해당 지점에 해당하는지 숨기고, 다이 내부 센서와 보드 센서 간을 전환할 수 있습니다.
@@ -21,7 +21,7 @@
 
 - 정규화된 1분 단위 CPU 사용량
 - Linux에서 사용 중인 메모리(MiB 단위);
-- MLA 할당 메모리(MiB 단위);
+- MLA에 할당된 메모리(MiB 단위);
 - 현재 보드 레일 전원;
 - eMMC 및 선택 사항인 NVMe 파일 시스템 사용;
 - 전체 수신 및 전송 속도.
