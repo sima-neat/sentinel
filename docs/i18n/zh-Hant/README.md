@@ -36,4 +36,6 @@ Sentinel 也會列出連接到開發板的攝影機與麥克風。
 - [USB 攝影機](peripherals/camera.md)（V4L2）
 - [MIPI CSI-2 攝影機](peripherals/camera-mipi.md)
 - [麥克風](peripherals/microphone.md)（ALSA）
+- [開發板攝影機設定](peripherals/board.md)：型號、攝影機
+  overlay，以及已設定與支援的感測器
 - [新增裝置類型](peripherals/adding-a-device-type.md)（供貢獻者參考）

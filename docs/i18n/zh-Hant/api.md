@@ -63,22 +63,26 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 ## 周邊裝置
 
 探索執行緒會在守護程式啟動時、核心回報裝置變更時，
-以及收到重新整理請求時，掃描開發板的周邊裝置。它只讀取
-核心介面，從不開啟串流。`GET /v1/peripherals` 會傳回
+以及收到重新整理請求時，掃描開發板的周邊裝置。裝置提供者只讀取
+核心介面，從不開啟串流。為了讀取 `board` 區塊的 U-Boot overlay 清單，每次掃描也會以 root
+身分執行 `fw_printenv -n dtbos`。它絕不會變更環境，但會取得環境的鎖，因此會建立
+`/var/lock/fw_printenv.lock`。`GET /v1/peripherals` 會傳回
 最新結果：
 
 ```json
 {"revision": 1791155282460, "observed_at": "2026-10-04T23:08:02.460Z",
+ "board": {"model": "SiMa.ai Modalix SoM 16Gig Board", "configured_cameras": [...], ...},
  "devices": [{"type": "camera", "id": "camera:v4l2:3f2a9c0d41b7e650", ...}],
  "errors": [{"provider": "camera.v4l2", "code": "io.permission_denied", "reason": "..."}]}
 ```
 
 | 欄位 | 意義 |
 | --- | --- |
-| `revision` | 每當 `devices` 或 `errors` 變更時就會改變。守護程式啟動時它從隨機值開始，因此重新啟動或時鐘變更幾乎不可能讓它重複出現相同的值；只能比較是否相等。其值小於 2^52，因此在以 double 讀取數值的 JSON 讀取器中也能精確表示。 |
+| `revision` | 每當 `board`、`devices` 或 `errors` 變更時就會改變。守護程式啟動時它從隨機值開始，因此重新啟動或時鐘變更幾乎不可能讓它重複出現相同的值；只能比較是否相等。其值小於 2^52，因此在以 double 讀取數值的 JSON 讀取器中也能精確表示。 |
 | `observed_at` | 產生此結果的那次掃描開始的時間；第一次掃描完成前為 `null`。 |
+| `board` | 開發板針對攝影機的設定方式：型號、U-Boot 套用的 overlay、裝置樹所設定的攝影機（目錄中有對應項目時，各附上作為其感測器的 `camera.mipi` 攝影機的 `id`），以及已安裝的 overlay 所支援的感測器。與 `devices` 在同一次掃描中讀取；第一次掃描完成前不存在。請參閱 [開發板攝影機設定](peripherals/board.md)。 |
 | `devices` | 每個裝置一個物件，以 `type` 標記類型。`id` 在重新插拔至同一連接埠後保持不變，且絕不會是 `/dev/videoN` 名稱。 |
-| `errors` | 在最近一次掃描中失敗的提供者。失敗的提供者在上次成功掃描中找到的裝置會保留在 `devices` 中。`hotplug.unavailable` 表示無法接收核心 uevent，因此只有在重新整理時才會重新掃描。 |
+| `errors` | 在最近一次掃描中失敗的提供者，以及 `board` 區塊中無法完整讀取的欄位（提供者 `board.<field>`，例如 `board.overlays`）。失敗的提供者在上次成功掃描中找到的裝置會保留在 `devices` 中，而失敗的 `fw_printenv` 會保留最後的 overlay 清單。`hotplug.unavailable` 表示無法接收核心 uevent，因此只有在重新整理時才會重新掃描。 |
 
 Sentinel 只回報硬體事實。應用程式是否支援某個
 裝置或模式，由該應用程式決定；Neat Core 會為
@@ -96,11 +100,13 @@ Sentinel 只回報硬體事實。應用程式是否支援某個
 
 各類型的裝置記錄分別說明於：[USB 攝影機](peripherals/camera.md)、
 [MIPI CSI-2 攝影機](peripherals/camera-mipi.md)、
-[麥克風](peripherals/microphone.md)。
+[麥克風](peripherals/microphone.md)。`board` 區塊說明於
+[開發板攝影機設定](peripherals/board.md)。
 
 [`peripherals/catalog-example.json`](peripherals/catalog-example.json) 是一份
 來自 DevKit 的完整回應，其中 USB 攝影機已精簡為每種格式一個模式。
-Sentinel 的測試會依據結構描述檢查它，因此用戶端可以
+其 `board` 區塊抄錄自 DevKit，而非
+實際擷取。Sentinel 的測試會依據結構描述檢查它，因此用戶端可以
 拿它來測試。
 
 ## 安全性與並行性

@@ -4,6 +4,7 @@
 //! an application supports a device is decided by that application.
 
 mod alsa;
+pub mod board;
 pub mod camera;
 pub mod cli;
 pub mod microphone;
@@ -90,13 +91,17 @@ pub enum AvailabilityState {
 /// The catalog served by `GET /v1/peripherals`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
-    /// Changes whenever `devices` or `errors` change. Seeded from the daemon
-    /// start time, so a value is never reused after a restart; compare it
-    /// for equality only.
+    /// Changes whenever `board`, `devices` or `errors` change. Starts from a
+    /// random value when the daemon starts, so a restart is very unlikely to
+    /// repeat one; compare it for equality only.
     pub revision: u64,
     /// When the scan that produced this catalog started; `null` until the
     /// first scan completes.
     pub observed_at: Option<DateTime<Utc>>,
+    /// How the board is set up for cameras, from the same scan as `devices`;
+    /// absent until the first scan completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<board::Board>,
     pub devices: Vec<Peripheral>,
     pub errors: Vec<CatalogError>,
 }
@@ -163,6 +168,7 @@ pub(crate) mod tests {
         let catalog = Catalog {
             revision: 7,
             observed_at: None,
+            board: None,
             devices: vec![device("test:a")],
             errors: Vec::new(),
         };
@@ -174,7 +180,8 @@ pub(crate) mod tests {
 
     /// `docs/peripherals/catalog-example.json` is the published contract that
     /// consumers test against: a DevKit capture (IMX477, Logitech C920 camera
-    /// and microphone) with the USB camera trimmed to one mode per format. It
+    /// and microphone) with the USB camera trimmed to one mode per format, and
+    /// a `board` block transcribed from the same DevKit. It
     /// must round-trip unchanged, so changing the schema fails here until
     /// the example, and the consumers using it, are updated.
     #[test]
@@ -185,5 +192,8 @@ pub(crate) mod tests {
         assert_eq!(serde_json::to_value(&catalog).unwrap(), value);
         let types: Vec<_> = catalog.devices.iter().map(Peripheral::kind).collect();
         assert_eq!(types, ["camera", "camera", "microphone"]);
+        let board = catalog.board.unwrap();
+        let camera_id = board.configured_cameras[0].camera_id.as_deref();
+        assert_eq!(camera_id, Some(catalog.devices[0].id()));
     }
 }

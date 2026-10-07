@@ -36,4 +36,6 @@ it; each device type has its own page:
 - [USB cameras](peripherals/camera.md) (V4L2)
 - [MIPI CSI-2 cameras](peripherals/camera-mipi.md)
 - [Microphones](peripherals/microphone.md) (ALSA)
+- [Board camera configuration](peripherals/board.md): the model, camera
+  overlays, and configured and supported sensors
 - [Adding a device type](peripherals/adding-a-device-type.md) for contributors

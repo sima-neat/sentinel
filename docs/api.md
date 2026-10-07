@@ -63,22 +63,27 @@ default. Add `raw=1` only when timestamped samples are required.
 ## Peripherals
 
 A discovery thread scans the board's peripherals when the daemon starts, when
-the kernel reports a device change, and on refresh requests. It only reads
-kernel interfaces and never opens a stream. `GET /v1/peripherals` returns the
-latest result:
+the kernel reports a device change, and on refresh requests. Device providers only
+read kernel interfaces and never open a stream. To read the U-Boot overlay list
+for the `board` block, each scan also runs `fw_printenv -n dtbos` as root. It
+never changes the environment, but it takes the environment's lock, which
+creates `/var/lock/fw_printenv.lock`. `GET /v1/peripherals` returns the latest
+result:
 
 ```json
 {"revision": 1791155282460, "observed_at": "2026-10-04T23:08:02.460Z",
+ "board": {"model": "SiMa.ai Modalix SoM 16Gig Board", "configured_cameras": [...], ...},
  "devices": [{"type": "camera", "id": "camera:v4l2:3f2a9c0d41b7e650", ...}],
  "errors": [{"provider": "camera.v4l2", "code": "io.permission_denied", "reason": "..."}]}
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `revision` | Changes whenever `devices` or `errors` change. It starts from a random value when the daemon starts, so a restart or a clock change is very unlikely to repeat one; compare it for equality only. It stays below 2^52, so it is exact in JSON readers that use doubles. |
+| `revision` | Changes whenever `board`, `devices` or `errors` change. It starts from a random value when the daemon starts, so a restart or a clock change is very unlikely to repeat one; compare it for equality only. It stays below 2^52, so it is exact in JSON readers that use doubles. |
 | `observed_at` | When the scan behind this result started; `null` until the first scan completes. |
+| `board` | How the board is set up for cameras: model, the overlays U-Boot applies, the cameras the device tree configures (each with the `id` of the `camera.mipi` camera that is its sensor, when the catalog has one), and the sensors the installed overlays support. Read in the same scan as `devices`; absent until the first scan completes. See [board camera configuration](peripherals/board.md). |
 | `devices` | One object per device, tagged by `type`. `id` is stable across replugs into the same port and is never a `/dev/videoN` name. |
-| `errors` | Providers that failed in the latest scan. A failed provider's devices from its last successful scan stay in `devices`. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
+| `errors` | Providers that failed in the latest scan, and fields of the `board` block that could not be read completely (provider `board.<field>`, for example `board.overlays`). A failed provider's devices from its last successful scan stay in `devices`, and a failed `fw_printenv` keeps the last overlay list. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
 
 Sentinel reports hardware facts only. Whether an application supports a
 device or mode is decided by that application; Neat Core does this for
@@ -96,11 +101,13 @@ for the raw document and `--refresh` to rescan first.
 
 Device records are described per type: [USB cameras](peripherals/camera.md),
 [MIPI CSI-2 cameras](peripherals/camera-mipi.md),
-[microphones](peripherals/microphone.md).
+[microphones](peripherals/microphone.md). The `board` block is described in
+[board camera configuration](peripherals/board.md).
 
 [`peripherals/catalog-example.json`](peripherals/catalog-example.json) is a
 complete response from a DevKit, with the USB camera trimmed to one mode per
-format. A Sentinel test checks it against the schema, so clients can test
+format. Its `board` block is transcribed from the DevKit rather than
+captured. A Sentinel test checks it against the schema, so clients can test
 against it.
 
 ## Security and concurrency

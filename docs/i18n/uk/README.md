@@ -36,4 +36,6 @@ Sentinel також показує камери та мікрофони, під�
 - [USB-камери](peripherals/camera.md) (V4L2)
 - [Камери MIPI CSI-2](peripherals/camera-mipi.md)
 - [Мікрофони](peripherals/microphone.md) (ALSA)
+- [Конфігурація камер плати](peripherals/board.md): модель, оверлеї
+  камер, а також налаштовані й підтримувані сенсори
 - [Додавання типу пристрою](peripherals/adding-a-device-type.md) — для учасників розробки
