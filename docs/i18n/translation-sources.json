@@ -1,6 +1,6 @@
 {
   "ja": {
-    "docs/api.md": "29b91660128af59395c0484df19cc11f2f056f48a1c67bb96847c7623e7a793d",
+    "docs/api.md": "d434b10557bfc5d4ccb8243357369dc23de8638e20b3505f0d367bebcb0c7277",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -10,14 +10,14 @@
     "docs/peripherals/adding-a-device-type.md": "ccb7a14074822baa9900c5cbf3be26ecd8bab929aeeac609cd95f67851460f9b",
     "docs/peripherals/board.md": "f7945ebac359022f29f5d11a55f11892fbca4c99a0e53bd7a2e6f538ced99698",
     "docs/peripherals/camera-mipi.md": "c09f2522dfc28d71ce99f52eb48200bcbd75cb1923b108760334742bd079699e",
-    "docs/peripherals/camera.md": "0cee7792223aef8dacb88a1095b28e259c371ff0d423cc51f1b5cd2e27626d39",
-    "docs/peripherals/microphone.md": "bd8315ec1df855dd338a538809e41d13126d64c7ede2287c02209db04ae14eb0",
+    "docs/peripherals/camera.md": "b35658f08849d563a9917b7bb4d2bf510b793d6cd75bb290c8e9232b89761ae0",
+    "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",
     "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "ko": {
-    "docs/api.md": "29b91660128af59395c0484df19cc11f2f056f48a1c67bb96847c7623e7a793d",
+    "docs/api.md": "d434b10557bfc5d4ccb8243357369dc23de8638e20b3505f0d367bebcb0c7277",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -27,14 +27,14 @@
     "docs/peripherals/adding-a-device-type.md": "ccb7a14074822baa9900c5cbf3be26ecd8bab929aeeac609cd95f67851460f9b",
     "docs/peripherals/board.md": "f7945ebac359022f29f5d11a55f11892fbca4c99a0e53bd7a2e6f538ced99698",
     "docs/peripherals/camera-mipi.md": "c09f2522dfc28d71ce99f52eb48200bcbd75cb1923b108760334742bd079699e",
-    "docs/peripherals/camera.md": "0cee7792223aef8dacb88a1095b28e259c371ff0d423cc51f1b5cd2e27626d39",
-    "docs/peripherals/microphone.md": "bd8315ec1df855dd338a538809e41d13126d64c7ede2287c02209db04ae14eb0",
+    "docs/peripherals/camera.md": "b35658f08849d563a9917b7bb4d2bf510b793d6cd75bb290c8e9232b89761ae0",
+    "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",
     "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "uk": {
-    "docs/api.md": "29b91660128af59395c0484df19cc11f2f056f48a1c67bb96847c7623e7a793d",
+    "docs/api.md": "d434b10557bfc5d4ccb8243357369dc23de8638e20b3505f0d367bebcb0c7277",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -44,14 +44,14 @@
     "docs/peripherals/adding-a-device-type.md": "ccb7a14074822baa9900c5cbf3be26ecd8bab929aeeac609cd95f67851460f9b",
     "docs/peripherals/board.md": "f7945ebac359022f29f5d11a55f11892fbca4c99a0e53bd7a2e6f538ced99698",
     "docs/peripherals/camera-mipi.md": "c09f2522dfc28d71ce99f52eb48200bcbd75cb1923b108760334742bd079699e",
-    "docs/peripherals/camera.md": "0cee7792223aef8dacb88a1095b28e259c371ff0d423cc51f1b5cd2e27626d39",
-    "docs/peripherals/microphone.md": "bd8315ec1df855dd338a538809e41d13126d64c7ede2287c02209db04ae14eb0",
+    "docs/peripherals/camera.md": "b35658f08849d563a9917b7bb4d2bf510b793d6cd75bb290c8e9232b89761ae0",
+    "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",
     "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "zh-Hant": {
-    "docs/api.md": "29b91660128af59395c0484df19cc11f2f056f48a1c67bb96847c7623e7a793d",
+    "docs/api.md": "d434b10557bfc5d4ccb8243357369dc23de8638e20b3505f0d367bebcb0c7277",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "3ecae0ac5dfe02a1b26edb3d5c98960245d5f944a14987007f3f4b1068950caa",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -61,8 +61,8 @@
     "docs/peripherals/adding-a-device-type.md": "ccb7a14074822baa9900c5cbf3be26ecd8bab929aeeac609cd95f67851460f9b",
     "docs/peripherals/board.md": "f7945ebac359022f29f5d11a55f11892fbca4c99a0e53bd7a2e6f538ced99698",
     "docs/peripherals/camera-mipi.md": "c09f2522dfc28d71ce99f52eb48200bcbd75cb1923b108760334742bd079699e",
-    "docs/peripherals/camera.md": "0cee7792223aef8dacb88a1095b28e259c371ff0d423cc51f1b5cd2e27626d39",
-    "docs/peripherals/microphone.md": "bd8315ec1df855dd338a538809e41d13126d64c7ede2287c02209db04ae14eb0",
+    "docs/peripherals/camera.md": "b35658f08849d563a9917b7bb4d2bf510b793d6cd75bb290c8e9232b89761ae0",
+    "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",
     "docs/reports.md": "4ab4b344758d8c6ed85526ff72a11d415dddd80c4cec55538db112700b16d26c",
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"

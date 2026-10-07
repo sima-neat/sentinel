@@ -47,7 +47,7 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 
 尺寸範圍會以其最小與最大尺寸進行探測。
 沒有影格間隔的尺寸不構成模式。Sentinel 不判斷模式是否受支援；
-Neat Core 會為 `CameraInput` 做此判斷。
+由使用攝影機的應用程式做此判斷。
 
 ## 限制與錯誤
 

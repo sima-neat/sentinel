@@ -31,8 +31,7 @@ sysfs:devices/platform/soc/xhci-hcd.0.auto/usb1/1-1.2/1-1.2:1.0:pcm0c
 USB 마이크의 경우 sysfs 장치는 해당 포트의 오디오 인터페이스이므로
 id는 같은 포트로의 재연결, 재부팅 및 ALSA 카드
 번호 재지정 후에도 유지되며, 서로 다른 포트에 있는 동일한 마이크는 서로 다른 id를 갖습니다.
-카드 번호, 카드 id 및 `/dev/snd` 이름은 id에 포함되지 않습니다. 이는
-Neat Core의 이전 ALSA 프로바이더가 생성하던 것과 같은 id입니다.
+카드 번호, 카드 id 및 `/dev/snd` 이름은 id에 포함되지 않습니다.
 
 상위 장치가 없는 카드(`/sys/devices/virtual/sound` 아래에 있으며 `device`
 링크가 없음)는 장치 경로가 없으므로 키로 현재 카드 id를 사용합니다:

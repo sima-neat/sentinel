@@ -32,7 +32,6 @@ sysfs:devices/platform/soc/xhci-hcd.0.auto/usb1/1-1.2/1-1.2:1.0:pcm0c
 因此 id 在重新插拔至同一連接埠、重新開機及 ALSA 音效卡重新編號後都保持不變，
 而插在不同連接埠的相同麥克風會得到不同的 id。
 音效卡編號、音效卡 id 與 `/dev/snd` 名稱都不會納入其中。
-這些 id 與 Neat Core 先前的 ALSA 提供者所產生的相同。
 
 沒有父裝置的音效卡（位於 `/sys/devices/virtual/sound` 下，且沒有 `device`
 連結）沒有裝置路徑，因此其鍵值是即時的音效卡 id：
