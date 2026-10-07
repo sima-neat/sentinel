@@ -11,7 +11,7 @@ detailed panels. It does not collect separate data.
 | Current Power | `power_current_watts` | Latest valid total of PMBus rails successfully read in the corresponding power pass. See [Power](power.md) for partial-read behavior. |
 | CPU | `cpu_usage_pct` | Aggregate Linux CPU busy percentage over the latest system sample window. |
 | Memory | `linux_mem_used_pct` | `(MemTotal - MemAvailable) / MemTotal × 100`. |
-| MLA Memory | `mla_mem_allocated_mb` | Allocated bytes reported by `/dev/simaai-mem`, converted to MiB. This is allocator usage, not MLA utilization. |
+| MLA Memory | `mla_mem_allocated_mb` | On Platform 3.0, the inode-deduplicated union of DMA-BUF objects exported by `mla`/`simaai,dms` or attached to an MLA device, converted to MiB. On earlier releases, the total allocated bytes from `/dev/simaai-mem`. This is allocated memory, not MLA utilization. |
 | Network | `net_rx_mbps + net_tx_mbps` | Combined aggregate receive and transmit rate for all non-loopback interfaces. Despite the key name, the displayed unit is MiB/s-equivalent, not megabits/s. |
 
 The Thermal Max chart is useful for spotting the hottest location but should
@@ -24,7 +24,7 @@ The table reports:
 
 - normalized one-minute CPU load;
 - Linux memory used in MiB;
-- MLA allocator memory in MiB;
+- MLA allocated memory in MiB;
 - current board-rail power;
 - eMMC and optional NVMe filesystem usage;
 - aggregate receive and transmit rates.

@@ -1,6 +1,6 @@
 # 시스템 패널
 
-시스템 패널은 Linux CPU 카운터, 시스템 부하 평균, 메모리 사용량, SiMa MLA 할당자 보고서, EV74 연속 메모리 풀, 주기적인 프로세스 스냅샷을 통합합니다.
+시스템 패널은 Linux CPU 카운터, 시스템 부하 평균, 메모리 사용량, SiMa MLA 메모리 텔레메트리, EV74 연속 메모리 풀, 주기적인 프로세스 스냅샷을 통합합니다.
 
 ## CPU 필드
 
@@ -44,16 +44,18 @@ used_pct   = used_bytes / MemTotal × 100
 
 ## MLA 메모리
 
-Sentinel은 `/dev/simaai-mem`을 읽고, `Total allocated size:`를 찾은 다음, 다음 16진수 바이트 수를 파싱하여 MiB 단위로 변환합니다.
+Platform 3.0에서는 `/dev/dma_heap/simaai,dms`가 존재하면 DMA-BUF 텔레메트리를 선택합니다. Sentinel은 `/sys/kernel/debug/dma_buf/bufinfo`를 읽고 `mla` 또는 `simaai,dms`가 내보낸 객체와 MLA 장치에 연결된 객체의 합집합을 inode 기준으로 중복 제거하여 계산합니다. 각 DMA-BUF 객체는 최대 한 번만 계산됩니다.
 
-이는 현재 할당된 MLA 할당 메모리입니다. 다음은 해당하지 않습니다.
+이 힙이 없는 이전 릴리스에서는 Sentinel이 `/dev/simaai-mem`을 읽고 `Total allocated size:` 뒤의 16진수 바이트 수를 파싱하여 MiB로 변환합니다.
+
+이는 현재 MLA에 할당된 메모리입니다. 다음은 해당하지 않습니다.
 
 - MLA에서 컴퓨팅 자원 활용률을 계산합니다.
 - 모델의 FPS(초당 프레임 수) 또는 지연 시간
 - 총 물리적 DRAM 사용량
 - `MLA 0.68V` 전력을 측정하는 값입니다.
 
-장치를 읽을 수 없거나 텍스트 형식을 인식할 수 없는 경우, 값은 0이 아닌 ‘사용 불가능’으로 표시됩니다.
+선택된 인터페이스를 읽을 수 없거나 텍스트 형식을 인식할 수 없는 경우, 값은 0이 아닌 ‘사용 불가능’으로 표시됩니다. DMA-BUF 텔레메트리를 선택한 후에는 Sentinel이 레거시 할당자로 폴백하지 않습니다.
 
 ## EV74 CMA 메모리
 
