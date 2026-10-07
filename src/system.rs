@@ -670,6 +670,23 @@ fn parse_dma_buf_objects(raw: &str) -> Option<Vec<DmaBufObject<'_>>> {
         return None;
     }
 
+    let mut summary_counts = raw.lines().filter_map(|line| {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() == 5
+            && fields[0] == "Total"
+            && matches!(fields[2], "object," | "objects,")
+            && fields[4] == "bytes"
+        {
+            fields[1].parse::<usize>().ok()
+        } else {
+            None
+        }
+    });
+    let expected_object_count = summary_counts.next()?;
+    if summary_counts.next().is_some() {
+        return None;
+    }
+
     let mut objects = Vec::new();
     let mut current: Option<DmaBufObject<'_>> = None;
     let mut reading_devices = false;
@@ -717,6 +734,9 @@ fn parse_dma_buf_objects(raw: &str) -> Option<Vec<DmaBufObject<'_>>> {
 
     if let Some(object) = current {
         objects.push(object);
+    }
+    if objects.len() != expected_object_count {
+        return None;
     }
     Some(objects)
 }
@@ -1000,6 +1020,27 @@ Total 4 objects, 14163968 bytes
 
         assert_eq!(parse_dma_buf_mla_bytes(idle), Some(0));
         assert_eq!(parse_dma_buf_mla_bytes("permission denied"), None);
+    }
+
+    #[test]
+    fn dma_buf_mla_accounting_rejects_unparsed_objects() {
+        let malformed = "Dma-buf Objects:\n\
+                         size flags mode count exp_name ino name\n\
+                         shifted object row\n\
+                         Total 1 objects, 4096 bytes\n";
+
+        assert!(parse_dma_buf_objects(malformed).is_none());
+        assert_eq!(parse_dma_buf_mla_bytes(malformed), None);
+    }
+
+    #[test]
+    fn dma_buf_mla_accounting_rejects_missing_summary() {
+        let truncated = "Dma-buf Objects:\n\
+                         size flags mode count exp_name ino name\n\
+                         00004096 00000002 02080007 00000002 mla 00000014 weights\n";
+
+        assert!(parse_dma_buf_objects(truncated).is_none());
+        assert_eq!(parse_dma_buf_mla_bytes(truncated), None);
     }
 
     #[test]
