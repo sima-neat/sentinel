@@ -6,6 +6,23 @@ use std::time::{Duration, Instant};
 use crate::model::{MetricDefinition, ProcessInfo};
 
 const PROCESS_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+const LEGACY_MLA_MEMORY_PATH: &str = "/dev/simaai-mem";
+const MLA_DMA_HEAP_PATH: &str = "/dev/dma_heap/simaai,dms";
+const DMA_BUFINFO_PATH: &str = "/sys/kernel/debug/dma_buf/bufinfo";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MlaMemorySource {
+    DmaBuf,
+    Legacy,
+}
+
+#[derive(Debug)]
+struct DmaBufObject<'a> {
+    size_bytes: u64,
+    exporter: &'a str,
+    inode: u64,
+    attached_devices: Vec<&'a str>,
+}
 
 pub fn system_metric_definitions() -> Vec<MetricDefinition> {
     let mut out = vec![
@@ -65,7 +82,7 @@ pub fn system_metric_definitions() -> Vec<MetricDefinition> {
             "MLAMB",
             "MLA",
             "MB",
-            "MLA allocator total allocated size parsed from /dev/simaai-mem.",
+            "MLA DMA-BUF allocation on Platform 3.0, with legacy allocator fallback on older releases.",
             None,
             None,
         ),
@@ -610,18 +627,122 @@ fn parse_meminfo(raw: &str) -> BTreeMap<String, u64> {
 }
 
 fn read_mla_memory_mb() -> f64 {
-    let Ok(raw) = fs::read_to_string("/dev/simaai-mem") else {
-        return f64::NAN;
-    };
-    let marker = "Total allocated size:";
-    let Some(rest) = raw.split(marker).nth(1) else {
-        return f64::NAN;
-    };
-    let token = rest.split_whitespace().next().unwrap_or("");
-    let hex = token.trim_start_matches("0x");
-    u64::from_str_radix(hex, 16)
+    read_mla_memory_bytes()
         .map(|bytes| bytes as f64 / 1024.0 / 1024.0)
         .unwrap_or(f64::NAN)
+}
+
+fn detect_mla_memory_source(mut path_exists: impl FnMut(&str) -> bool) -> Option<MlaMemorySource> {
+    if path_exists(MLA_DMA_HEAP_PATH) {
+        return Some(MlaMemorySource::DmaBuf);
+    }
+    if path_exists(LEGACY_MLA_MEMORY_PATH) {
+        return Some(MlaMemorySource::Legacy);
+    }
+    None
+}
+
+fn read_mla_memory_bytes() -> Option<u64> {
+    match detect_mla_memory_source(|path| Path::new(path).exists())? {
+        MlaMemorySource::DmaBuf => fs::read_to_string(DMA_BUFINFO_PATH)
+            .ok()
+            .and_then(|raw| parse_dma_buf_mla_bytes(&raw)),
+        MlaMemorySource::Legacy => fs::read_to_string(LEGACY_MLA_MEMORY_PATH)
+            .ok()
+            .and_then(|raw| parse_legacy_mla_memory_bytes(&raw)),
+    }
+}
+
+fn parse_legacy_mla_memory_bytes(raw: &str) -> Option<u64> {
+    let marker = "Total allocated size:";
+    let rest = raw.split(marker).nth(1)?;
+    let token = rest.split_whitespace().next().unwrap_or("");
+    let hex = token.trim_start_matches("0x");
+    u64::from_str_radix(hex, 16).ok()
+}
+
+fn parse_dma_buf_objects(raw: &str) -> Option<Vec<DmaBufObject<'_>>> {
+    let has_header = raw.lines().any(|line| {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        fields.first() == Some(&"size") && fields.contains(&"exp_name") && fields.contains(&"ino")
+    });
+    if !has_header {
+        return None;
+    }
+
+    let mut objects = Vec::new();
+    let mut current: Option<DmaBufObject<'_>> = None;
+    let mut reading_devices = false;
+
+    for line in raw.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let parsed_object = if fields.len() >= 6 {
+            fields[0]
+                .parse::<u64>()
+                .ok()
+                .zip(fields[5].parse::<u64>().ok())
+                .map(|(size_bytes, inode)| DmaBufObject {
+                    size_bytes,
+                    exporter: fields[4],
+                    inode,
+                    attached_devices: Vec::new(),
+                })
+        } else {
+            None
+        };
+
+        if let Some(object) = parsed_object {
+            if let Some(previous) = current.replace(object) {
+                objects.push(previous);
+            }
+            reading_devices = false;
+            continue;
+        }
+
+        let stripped = line.trim();
+        if stripped == "Attached Devices:" {
+            reading_devices = current.is_some();
+            continue;
+        }
+        if reading_devices && stripped.starts_with("Total ") {
+            reading_devices = false;
+            continue;
+        }
+        if reading_devices && !stripped.is_empty() {
+            if let Some(object) = current.as_mut() {
+                object.attached_devices.push(stripped);
+            }
+        }
+    }
+
+    if let Some(object) = current {
+        objects.push(object);
+    }
+    Some(objects)
+}
+
+fn parse_dma_buf_mla_bytes(raw: &str) -> Option<u64> {
+    let mut matched_by_inode = BTreeMap::new();
+    for object in parse_dma_buf_objects(raw)? {
+        let exporter = object.exporter.to_ascii_lowercase();
+        let exported_for_mla = exporter == "mla" || exporter == "simaai,dms";
+        let attached_to_mla = object.attached_devices.iter().any(|device| {
+            let device = device.trim().to_ascii_lowercase();
+            device == "mla" || device.ends_with(".mla")
+        });
+        if !exported_for_mla && !attached_to_mla {
+            continue;
+        }
+
+        if let Some(previous_size) = matched_by_inode.insert(object.inode, object.size_bytes) {
+            if previous_size != object.size_bytes {
+                return None;
+            }
+        }
+    }
+    matched_by_inode
+        .values()
+        .try_fold(0_u64, |total, size| total.checked_add(*size))
 }
 
 fn read_mounts() -> BTreeMap<String, String> {
@@ -799,7 +920,115 @@ impl MountCheck for Path {
 
 #[cfg(test)]
 mod tests {
-    use super::{network_utilization_percent, parse_default_route_interface, parse_meminfo};
+    use super::{
+        detect_mla_memory_source, network_utilization_percent, parse_default_route_interface,
+        parse_dma_buf_mla_bytes, parse_dma_buf_objects, parse_legacy_mla_memory_bytes,
+        parse_meminfo, MlaMemorySource, LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
+    };
+
+    const DMA_BUF_FIXTURE: &str = "\
+Dma-buf Objects:
+size    flags   mode    count   exp_name   ino     name
+00004096 00000002 02080007 00000002 linux,cma 00000014 <none>
+    Attached Devices:
+Total 0 devices attached
+
+02097152 00000002 02080007 00000002 simaai,dms 00000013 weights
+    Attached Devices:
+    5000000.mla
+Total 1 devices attached
+
+01048576 00000002 02080007 00000002 linux,cma 00000004 input
+    Attached Devices:
+    5000000.mla
+Total 1 devices attached
+
+00524288 00000002 02080007 00000002 linux,cma 00000003 camera
+    Attached Devices:
+    5100000.cvu
+Total 1 devices attached
+
+Total 4 objects, 14163968 bytes
+";
+
+    #[test]
+    fn parses_legacy_mla_allocator_bytes() {
+        assert_eq!(
+            parse_legacy_mla_memory_bytes(
+                "| Total buffers allocated: 8 | Total allocated size: 0x0000301044 |"
+            ),
+            Some(0x301044)
+        );
+        assert_eq!(
+            parse_legacy_mla_memory_bytes(
+                "| Total buffers allocated: 0 | Total allocated size: 0x0000000000 |"
+            ),
+            Some(0)
+        );
+        assert_eq!(parse_legacy_mla_memory_bytes("invalid"), None);
+    }
+
+    #[test]
+    fn parses_dma_buf_objects_and_attachments() {
+        let objects = parse_dma_buf_objects(DMA_BUF_FIXTURE).unwrap();
+
+        assert_eq!(objects.len(), 4);
+        assert_eq!(objects[1].size_bytes, 2_097_152);
+        assert_eq!(objects[1].exporter, "simaai,dms");
+        assert_eq!(objects[1].inode, 13);
+        assert_eq!(objects[1].attached_devices, ["5000000.mla"]);
+    }
+
+    #[test]
+    fn dma_buf_mla_accounting_uses_inode_union() {
+        assert_eq!(
+            parse_dma_buf_mla_bytes(DMA_BUF_FIXTURE),
+            Some(2_097_152 + 1_048_576)
+        );
+        assert_eq!(
+            parse_dma_buf_mla_bytes(&DMA_BUF_FIXTURE.replace("simaai,dms", "mla")),
+            Some(2_097_152 + 1_048_576)
+        );
+    }
+
+    #[test]
+    fn dma_buf_mla_accounting_accepts_an_idle_snapshot() {
+        let idle = "Dma-buf Objects:\n\
+                    size flags mode count exp_name ino name\n\
+                    \n\
+                    Total 0 objects, 0 bytes\n";
+
+        assert_eq!(parse_dma_buf_mla_bytes(idle), Some(0));
+        assert_eq!(parse_dma_buf_mla_bytes("permission denied"), None);
+    }
+
+    #[test]
+    fn dma_buf_mla_accounting_rejects_conflicting_inode_sizes() {
+        let conflicting = format!(
+            "{}\n{}",
+            DMA_BUF_FIXTURE,
+            DMA_BUF_FIXTURE.replace("02097152", "02097153")
+        );
+
+        assert_eq!(parse_dma_buf_mla_bytes(&conflicting), None);
+    }
+
+    #[test]
+    fn selects_platform_3_dma_buf_before_the_legacy_allocator() {
+        let source = detect_mla_memory_source(|path| {
+            path == MLA_DMA_HEAP_PATH || path == LEGACY_MLA_MEMORY_PATH
+        });
+
+        assert_eq!(source, Some(MlaMemorySource::DmaBuf));
+    }
+
+    #[test]
+    fn selects_the_legacy_allocator_on_older_releases() {
+        let source = detect_mla_memory_source(|path| path == LEGACY_MLA_MEMORY_PATH);
+
+        assert_eq!(source, Some(MlaMemorySource::Legacy));
+        assert_eq!(detect_mla_memory_source(|_| false), None);
+    }
 
     #[test]
     fn parses_cma_meminfo_fields_as_bytes() {
