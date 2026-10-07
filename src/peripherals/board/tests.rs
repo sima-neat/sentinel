@@ -409,7 +409,7 @@ fn the_overlay_list_keeps_dtbo_entries_and_degrades_without_fw_printenv() {
     let root = TempDir::new();
     let list = |command: &[&str], timeout| {
         let command: Vec<String> = command.iter().map(|part| part.to_string()).collect();
-        overlay_list(&command, timeout)
+        overlay_list(&command, timeout, &Arc::default())
     };
     let second = Duration::from_secs(2);
     let printed = list(
@@ -463,20 +463,32 @@ fn a_child_that_outlives_the_kill_grace_is_reaped_in_the_background() {
     // that is not killed stands in for one that has not died yet.
     let child = Command::new("sleep").arg("1").spawn().unwrap();
     let pid = child.id();
+    let unreaped = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
-    assert!(!reap_within(child, Duration::from_millis(100)));
+    assert!(!reap_within(child, Duration::from_millis(100), &unreaped));
     assert!(started.elapsed() < Duration::from_millis(900));
-    // The reaper waits for it, so it does not stay a zombie.
+    // Until it exits, no other run starts, so a hung tool is not joined by
+    // another one in every scan.
+    assert!(unreaped.load(Ordering::Acquire));
+    let command = ["sh", "-c", "echo a.dtbo"].map(String::from);
+    let held = overlay_list(&command, Duration::from_secs(2), &unreaped).unwrap_err();
+    assert_eq!(held.code, CODE_DISCOVERY_FAILED);
+    assert!(held.reason.contains("has not exited"), "{}", held.reason);
+    // The reaper waits for it, so it does not stay a zombie, and runs resume.
     let proc = Path::new("/proc").join(pid.to_string());
     let deadline = Instant::now() + Duration::from_secs(5);
-    while proc.exists() && Instant::now() < deadline {
+    while (proc.exists() || unreaped.load(Ordering::Acquire)) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(!proc.exists(), "process {pid} was not reaped");
+    assert!(!unreaped.load(Ordering::Acquire));
+    let resumed = overlay_list(&command, Duration::from_secs(2), &unreaped);
+    assert_eq!(resumed, Ok(Some(vec!["a.dtbo".into()])));
     // A child that exits within the grace is reaped in place.
     let mut child = Command::new("true").spawn().unwrap();
     let _ = child.kill();
-    assert!(reap_within(child, Duration::from_secs(2)));
+    assert!(reap_within(child, Duration::from_secs(2), &unreaped));
+    assert!(!unreaped.load(Ordering::Acquire));
 }
 
 #[test]

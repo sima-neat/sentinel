@@ -18,6 +18,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -105,6 +107,9 @@ pub struct BoardProbe {
     /// The overlay list of the last run that succeeded, published while
     /// later runs fail, as a failed provider's devices are.
     last_overlay_list: Option<Vec<String>>,
+    /// Set while a killed `fw_printenv` waits for its reaper. No other run
+    /// starts until it exits, so a hung one cannot be joined by one per scan.
+    unreaped: Arc<AtomicBool>,
     /// Parsed overlays by path, reused while their [`Stamp`] matches.
     overlays: HashMap<PathBuf, CachedOverlay>,
 }
@@ -134,6 +139,7 @@ impl BoardProbe {
             overlay_command: ["fw_printenv", "-n", "dtbos"].map(String::from).to_vec(),
             timeout: FW_PRINTENV_TIMEOUT,
             last_overlay_list: None,
+            unreaped: Arc::default(),
             overlays: HashMap::new(),
         }
     }
@@ -156,7 +162,7 @@ impl BoardProbe {
         });
         // A failed run (a timeout, e.g. while fw_setenv holds the lock)
         // keeps the last list, so the field does not flicker.
-        let overlays = match overlay_list(&self.overlay_command, self.timeout) {
+        let overlays = match overlay_list(&self.overlay_command, self.timeout, &self.unreaped) {
             Ok(list) => {
                 self.last_overlay_list.clone_from(&list);
                 list
@@ -283,13 +289,19 @@ fn read_model(base: &Path) -> Result<Option<String>, ProviderError> {
 /// saying the variable is `not defined`, as u-boot-tools does when it is not
 /// set. An error, and `None`, when it exits unsuccessfully for another reason,
 /// cannot be started, or does not finish within `timeout`; it is then killed.
+/// It is not started while `unreaped` says a killed run has not exited.
 fn overlay_list(
     command: &[String],
     timeout: Duration,
+    unreaped: &Arc<AtomicBool>,
 ) -> Result<Option<Vec<String>>, ProviderError> {
     let Some((program, arguments)) = command.split_first() else {
         return Ok(None);
     };
+    if unreaped.load(Ordering::Acquire) {
+        let reason = format!("{program} from an earlier scan has not exited, so it was not run");
+        return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+    }
     let spawned = Command::new(program)
         .args(arguments)
         .stdin(Stdio::null())
@@ -315,7 +327,7 @@ fn overlay_list(
     // A pipe left blocking would hold `drain` past the timeout.
     let nonblocking = set_nonblocking(stdout.as_ref()).and(set_nonblocking(stderr.as_ref()));
     if let Err(error) = nonblocking {
-        stop(child, FW_PRINTENV_KILL_GRACE);
+        stop(child, FW_PRINTENV_KILL_GRACE, unreaped);
         let reason = format!("failed to read from {program}: {}", os_message(&error));
         return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
     }
@@ -328,7 +340,7 @@ fn overlay_list(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(FW_PRINTENV_POLL),
             outcome => {
-                stop(child, FW_PRINTENV_KILL_GRACE);
+                stop(child, FW_PRINTENV_KILL_GRACE, unreaped);
                 let reason = match outcome {
                     Err(error) => format!("failed to wait for {program}: {}", os_message(&error)),
                     _ => format!("{program} did not finish within {timeout:?} and was killed"),
@@ -361,14 +373,15 @@ fn overlay_list(
 /// Kills `child` and waits at most `grace` for it to exit. A child that is
 /// still there (SIGKILL waits for uninterruptible I/O to return) is handed to
 /// a thread that reaps it whenever it exits, so the caller never blocks on it.
-fn stop(mut child: Child, grace: Duration) {
+fn stop(mut child: Child, grace: Duration, unreaped: &Arc<AtomicBool>) {
     let _ = child.kill();
-    reap_within(child, grace);
+    reap_within(child, grace, unreaped);
 }
 
 /// Waits at most `grace` for `child` to exit, then leaves it to a reaper
-/// thread. Returns whether it was reaped here.
-fn reap_within(mut child: Child, grace: Duration) -> bool {
+/// thread, with `unreaped` set until it exits. Returns whether it was reaped
+/// here.
+fn reap_within(mut child: Child, grace: Duration, unreaped: &Arc<AtomicBool>) -> bool {
     let deadline = Instant::now() + grace;
     loop {
         match child.try_wait() {
@@ -379,9 +392,18 @@ fn reap_within(mut child: Child, grace: Duration) -> bool {
             Err(_) => return true,
         }
     }
+    unreaped.store(true, Ordering::Release);
+    let flag = Arc::clone(unreaped);
     let reaper = thread::Builder::new().name("fw_printenv-reaper".into());
-    // Without a thread the child stays a zombie; nothing else can be done.
-    let _ = reaper.spawn(move || child.wait());
+    let spawned = reaper.spawn(move || {
+        let _ = child.wait();
+        flag.store(false, Ordering::Release);
+    });
+    // Without a thread the child stays a zombie; nothing else can be done,
+    // and later runs are not held back for it.
+    if spawned.is_err() {
+        unreaped.store(false, Ordering::Release);
+    }
     false
 }
 

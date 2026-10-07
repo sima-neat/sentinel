@@ -90,6 +90,8 @@ parsed once and parsed again only when their size, modification time, change
 time or inode changes; a file that could not be read is read again in the next
 scan. `fw_printenv` is killed after 2 seconds. A scan waits at most another
 0.5 seconds for it to exit, and then leaves it to be reaped in the background.
+Until it exits, later scans do not run `fw_printenv`; they report an error and
+keep the last list.
 At most 64 KiB of its output and 4 KiB of its error output are read.
 
 ## Errors
