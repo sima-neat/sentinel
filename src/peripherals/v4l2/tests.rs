@@ -123,16 +123,13 @@ fn one_camera(videos: &[(&str, &str)]) -> TempDir {
     root
 }
 
-/// The C920 of Core's v1 catalog fixture (`devices[1]` of
-/// `tests/fixtures/peripherals/v1/catalog.json`) with the same id, identity,
-/// model and mode, in the flat schema: without the v1 envelope (`provider`,
-/// nested `camera`), `connection`, or the support stage's `supported` and
-/// `reason`. Its metadata node is excluded. Then with the details a fuller
+/// A Logitech C920 with a pinned id, identity, model and mode. Its metadata
+/// node is excluded. Then with the details a fuller
 /// system provides: manufacturer, speed and serial from the USB device,
 /// `by_id_path` from the udev link that resolves to the node (none once the
 /// node does not resolve), and the format description.
 #[test]
-fn usb_camera_carries_the_v1_fixture_facts_plus_optional_details() {
+fn usb_camera_carries_its_facts_plus_optional_details() {
     let root = TempDir::new();
     let (sys, dev) = (root.path().join("sys"), root.path().join("dev"));
     let usb = "devices/pci0000:00/usb1/1-2.3";

@@ -394,8 +394,8 @@ fn stream_formats_cover_the_class() {
 /// The id is the card's sysfs device and the PCM number: unchanged when the
 /// card is renumbered or a temporary card id changes, different for identical
 /// microphones on two ports and for a second capture PCM. Missing USB strings
-/// are omitted. The key and hash match Core's earlier ALSA provider, so a
-/// microphone keeps its id across the move to Sentinel.
+/// are omitted. The key and its hash are pinned, so a microphone keeps its id
+/// from one release to the next.
 #[test]
 fn ids_follow_the_sysfs_device_not_the_card_number() {
     let scan_as = |index: u32, id: &str| {
@@ -417,7 +417,7 @@ fn ids_follow_the_sysfs_device_not_the_card_number() {
     assert_eq!(
         format!("{:016x}", fnv1a(key)),
         "3ff3d77bf791d455",
-        "Core's id"
+        "pinned id"
     );
 
     let mut board = Board::new();
