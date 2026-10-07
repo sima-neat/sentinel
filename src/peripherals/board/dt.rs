@@ -257,21 +257,39 @@ pub(super) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// At most `limit` entry names of `directory`, sorted.
-pub(super) fn listed(directory: &Path, limit: usize) -> io::Result<Vec<String>> {
+/// At most `limit` entry names of `directory`, sorted, and whether it has
+/// more. Which entries are left out of a truncated listing is arbitrary.
+pub(super) fn listed(directory: &Path, limit: usize) -> io::Result<(Vec<String>, bool)> {
     let mut names = Vec::new();
-    for entry in fs::read_dir(directory)?.take(limit) {
-        names.push(entry?.file_name().to_string_lossy().into_owned());
+    let mut entries = fs::read_dir(directory)?;
+    let mut truncated = false;
+    for entry in entries.by_ref() {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if names.len() == limit {
+            truncated = true;
+            break;
+        }
+        names.push(name);
     }
     names.sort();
-    Ok(names)
+    Ok((names, truncated))
+}
+
+/// Why `listed` left entries of `directory` out.
+pub(super) fn too_many(limit: usize, what: &str, directory: &Path) -> String {
+    format!(
+        "more than {limit} {what} in {}; the rest were not read",
+        directory.display()
+    )
 }
 
 /// The live subtree at `path` (a node directory under
 /// `/sys/firmware/devicetree/base`), with the `compatible` and `data-lanes`
-/// properties only. Bounded in depth, entries per node, and nodes.
-pub(super) fn read_live(path: &Path) -> io::Result<Tree> {
+/// properties only. Bounded in depth, entries per node, and nodes; the second
+/// value says why part of the subtree was not read, when a bound was hit.
+pub(super) fn read_live(path: &Path) -> io::Result<(Tree, Option<String>)> {
     let mut tree = Tree::default();
+    let mut truncated = None;
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
@@ -280,11 +298,17 @@ pub(super) fn read_live(path: &Path) -> io::Result<Tree> {
         vec![(path.to_path_buf(), name.unwrap_or_default(), None, 0)];
     while let Some((directory, name, parent, depth)) = pending.pop() {
         if tree.nodes.len() >= MAX_LIVE_NODES {
+            let reason = too_many(MAX_LIVE_NODES, "device-tree nodes", path);
+            truncated.get_or_insert(reason);
             break;
         }
         let node = tree.push(name, parent);
         let mut children = Vec::new();
-        for entry in listed(&directory, MAX_LIVE_ENTRIES)? {
+        let (entries, more) = listed(&directory, MAX_LIVE_ENTRIES)?;
+        if more {
+            truncated.get_or_insert_with(|| too_many(MAX_LIVE_ENTRIES, "entries", &directory));
+        }
+        for entry in entries {
             let entry_path = directory.join(&entry);
             let metadata = match fs::symlink_metadata(&entry_path) {
                 Ok(metadata) => metadata,
@@ -294,6 +318,11 @@ pub(super) fn read_live(path: &Path) -> io::Result<Tree> {
             if metadata.is_dir() {
                 if depth + 1 < MAX_DEPTH {
                     children.push((entry_path, entry, Some(node), depth + 1));
+                } else {
+                    truncated.get_or_insert_with(|| {
+                        let path = entry_path.display();
+                        format!("{path} is nested deeper than {MAX_DEPTH} nodes and was not read")
+                    });
                 }
             } else if entry == "compatible" || entry == "data-lanes" {
                 match read_bounded(&entry_path, MAX_PROPERTY_BYTES) {
@@ -305,5 +334,5 @@ pub(super) fn read_live(path: &Path) -> io::Result<Tree> {
         }
         pending.extend(children.into_iter().rev());
     }
-    Ok(tree)
+    Ok((tree, truncated))
 }

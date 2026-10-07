@@ -431,8 +431,8 @@ fn configured_cameras(
     devices: &[Peripheral],
 ) -> (Vec<ConfiguredCamera>, Option<ProviderError>) {
     let directory = sys_root.join("bus/i2c/devices");
-    let names = match dt::listed(&directory, MAX_I2C_DEVICES) {
-        Ok(names) => names,
+    let (names, more) = match dt::listed(&directory, MAX_I2C_DEVICES) {
+        Ok(listing) => listing,
         Err(error) if disappeared(errno_of(&error)) => return (Vec::new(), None),
         Err(error) => {
             let error = io_error("failed to read", &directory, &error, false);
@@ -444,6 +444,10 @@ fn configured_cameras(
         return (Vec::new(), None);
     };
     let mut skipped = Skipped::default();
+    if more {
+        let reason = dt::too_many(MAX_I2C_DEVICES, "I2C devices", &directory);
+        skipped.add(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+    }
     let mut cameras = Vec::new();
     for name in names.into_iter().filter(|name| is_i2c_client(name)) {
         let device = directory.join(&name);
@@ -462,8 +466,14 @@ fn configured_cameras(
         let Ok(relative) = node.strip_prefix(&base) else {
             continue;
         };
+        // A subtree cut at a bound is still used, and reported.
         let tree = match dt::read_live(&node) {
-            Ok(tree) => tree,
+            Ok((tree, truncated)) => {
+                if let Some(reason) = truncated {
+                    skipped.add(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+                }
+                tree
+            }
             Err(error) if disappeared(errno_of(&error)) => continue,
             Err(error) => {
                 skipped.add(io_error("failed to read", &node, &error, false));
@@ -502,26 +512,16 @@ fn configured_cameras(
 /// under `boot_root`, sorted, at most [`MAX_OVERLAY_FILES`].
 fn overlay_files(boot_root: &Path, skipped: &mut Skipped) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
-    let slots = match dt::listed(boot_root, MAX_BOOT_ENTRIES) {
-        Ok(slots) => slots,
-        Err(error) if disappeared(errno_of(&error)) => return files,
-        Err(error) => {
-            skipped.add(io_error("failed to read", boot_root, &error, false));
-            return files;
-        }
+    let Some(slots) = boot_listing(boot_root, skipped) else {
+        return files;
     };
     for slot in slots {
         let directory = boot_root.join(slot);
         if !fs::metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
             continue;
         }
-        let names = match dt::listed(&directory, MAX_BOOT_ENTRIES) {
-            Ok(names) => names,
-            Err(error) if disappeared(errno_of(&error)) => continue,
-            Err(error) => {
-                skipped.add(io_error("failed to read", &directory, &error, false));
-                continue;
-            }
+        let Some(names) = boot_listing(&directory, skipped) else {
+            continue;
         };
         for name in names.into_iter().filter(|name| name.ends_with(".dtbo")) {
             let path = directory.join(&name);
@@ -540,6 +540,25 @@ fn overlay_files(boot_root: &Path, skipped: &mut Skipped) -> Vec<(PathBuf, Strin
         }
     }
     files
+}
+
+/// At most [`MAX_BOOT_ENTRIES`] names in `directory`; `None` when it is gone
+/// or unreadable. Unreadable and truncated listings are added to `skipped`.
+fn boot_listing(directory: &Path, skipped: &mut Skipped) -> Option<Vec<String>> {
+    match dt::listed(directory, MAX_BOOT_ENTRIES) {
+        Ok((names, more)) => {
+            if more {
+                let reason = dt::too_many(MAX_BOOT_ENTRIES, "entries", directory);
+                skipped.add(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+            }
+            Some(names)
+        }
+        Err(error) if disappeared(errno_of(&error)) => None,
+        Err(error) => {
+            skipped.add(io_error("failed to read", directory, &error, false));
+            None
+        }
+    }
 }
 
 /// The sensors an overlay file's bytes configure, or why they are not an

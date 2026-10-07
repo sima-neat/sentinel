@@ -775,6 +775,89 @@ fn overlay_files_and_sizes_are_capped() {
     assert!(errors[0].reason.contains("larger than 1048576 bytes"));
 }
 
+/// The one error of a scan of `root`, which must say `expected`.
+fn only_error_says(root: &Path, expected: &str) {
+    let (_, errors) = scan(&mut probe_at(root), &[]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code, CODE_DISCOVERY_FAILED);
+    assert!(errors[0].reason.contains(expected), "{errors:?}");
+}
+
+#[test]
+fn every_listing_and_subtree_cut_at_a_bound_is_reported() {
+    // More I2C devices than are examined.
+    let root = TempDir::new();
+    devkit(root.path());
+    let devices = root.path().join("sys/bus/i2c/devices");
+    for bus in 0..MAX_I2C_DEVICES {
+        fs::create_dir(devices.join(format!("i2c-{}", bus + 100))).unwrap();
+    }
+    only_error_says(root.path(), "more than 1024 I2C devices in ");
+
+    // More entries in /boot, and in one of its directories, than are listed.
+    for directory in ["boot", "boot/boot-0"] {
+        let root = TempDir::new();
+        devkit(root.path());
+        let directory = root.path().join(directory);
+        for index in 0..MAX_BOOT_ENTRIES {
+            fs::write(directory.join(format!("{index:04}.txt")), "").unwrap();
+        }
+        let expected = format!("more than 4096 entries in {}", directory.display());
+        only_error_says(root.path(), &expected);
+    }
+
+    // A live node with more entries, a subtree with more nodes, and nodes
+    // nested deeper than are read.
+    let root = TempDir::new();
+    devkit(root.path());
+    let sensor = dt_base(root.path()).join(SENSOR_NODE);
+    for index in 0..256 {
+        fs::write(sensor.join(format!("property-{index:03}")), "").unwrap();
+    }
+    only_error_says(root.path(), "more than 256 entries in ");
+
+    // 16 groups of 16 keep every node under the entry bound.
+    let root = TempDir::new();
+    devkit(root.path());
+    let sensor = dt_base(root.path()).join(SENSOR_NODE);
+    for group in 0..16 {
+        for index in 0..16 {
+            fs::create_dir_all(sensor.join(format!("g@{group}/n@{index}"))).unwrap();
+        }
+    }
+    only_error_says(root.path(), "more than 256 device-tree nodes in ");
+
+    // The sensor is level 1; its 32nd descendant level is not read.
+    let root = TempDir::new();
+    devkit(root.path());
+    let chain = |levels| {
+        (0..levels).fold(dt_base(root.path()).join(SENSOR_NODE), |path, level| {
+            path.join(format!("n{level}"))
+        })
+    };
+    fs::create_dir_all(chain(32)).unwrap();
+    only_error_says(
+        root.path(),
+        "n31 is nested deeper than 32 nodes and was not read",
+    );
+
+    // At each bound exactly, nothing is cut and nothing is reported: 32
+    // levels, then 256 nodes (the sensor, its port and endpoint, and 253) in
+    // 255 entries.
+    fs::remove_dir(chain(32)).unwrap();
+    let (board, errors) = scan(&mut probe_at(root.path()), &[]);
+    assert_eq!(errors, [], "{board}");
+    let root = TempDir::new();
+    devkit(root.path());
+    let sensor = dt_base(root.path()).join(SENSOR_NODE);
+    for index in 0..253 {
+        fs::create_dir(sensor.join(format!("node@{index}"))).unwrap();
+    }
+    let (board, errors) = scan(&mut probe_at(root.path()), &[]);
+    assert_eq!(errors, [], "{board}");
+    assert_eq!(board["configured_cameras"].as_array().unwrap().len(), 1);
+}
+
 fn probe_at(root: &Path) -> BoardProbe {
     probe(root, NOT_DEFINED)
 }
