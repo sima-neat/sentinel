@@ -22,11 +22,26 @@ pub fn run(
     history: usize,
     runs_dir: &Path,
     api_socket: &Path,
+    peripherals: bool,
 ) -> Result<()> {
     let stopped = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stopped.clone());
-    let api_thread =
-        crate::api::spawn(api_socket, Path::new(cache_path), runs_dir, stopped.clone())?;
+    let peripherals = peripherals
+        .then(|| crate::peripherals::start(crate::peripherals::builtin_providers()))
+        .and_then(|started| {
+            started
+                .map_err(|error| {
+                    eprintln!("Sentinel peripheral discovery failed to start: {error:#}")
+                })
+                .ok()
+        });
+    let api_thread = crate::api::spawn(
+        api_socket,
+        Path::new(cache_path),
+        runs_dir,
+        peripherals.as_ref().map(crate::peripherals::Worker::handle),
+        stopped.clone(),
+    )?;
 
     let mut metrics = Vec::<MetricDefinition>::new();
     metrics.extend(thermal_metric_definitions());
@@ -93,6 +108,9 @@ pub fn run(
     payload.errors = vec!["daemon stopped".into()];
     write_cache(cache_path, &payload)?;
     let _ = api_thread.join();
+    if let Some(worker) = peripherals {
+        worker.stop();
+    }
     Ok(())
 }
 

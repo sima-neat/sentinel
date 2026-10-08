@@ -26,3 +26,16 @@ calculated, and what its limitations are.
   daemon's Unix socket.
 - [Capturing and comparing runs](run-comparison.md) documents persistent
   checkpoints, the Compare Runs tab, retention, and CSV/JSON exports.
+
+## Peripherals
+
+Sentinel also lists the cameras and microphones connected to the board. The
+[Local agent API](api.md#peripherals) describes the catalog and how to refresh
+it; each device type has its own page:
+
+- [USB cameras](peripherals/camera.md) (V4L2)
+- [MIPI CSI-2 cameras](peripherals/camera-mipi.md)
+- [Microphones](peripherals/microphone.md) (ALSA)
+- [Board camera configuration](peripherals/board.md): the model, camera
+  overlays, and configured and supported sensors
+- [Adding a device type](peripherals/adding-a-device-type.md) for contributors
