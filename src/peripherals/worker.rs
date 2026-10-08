@@ -15,6 +15,10 @@ use super::{Catalog, CatalogError, Peripheral, Provider};
 /// How long to let a burst of uevents settle (a USB device with several
 /// interfaces sends many) before scanning.
 const COALESCE: Duration = Duration::from_millis(250);
+/// The worker stays idle at least this long after every scan, so neither a
+/// client repeating refresh requests nor a flapping device keeps discovery
+/// running.
+const REST: Duration = Duration::from_secs(1);
 /// Discovery runs this much nicer than the daemon's metrics sampling.
 const NICE: libc::c_int = 10;
 
@@ -117,15 +121,17 @@ impl Worker {
 }
 
 /// Start the worker; it scans immediately, then on every relevant uevent
-/// and refresh request. Each scan also reads the live system's `board` block.
+/// and refresh request, resting [`REST`] after each scan. Each scan also
+/// reads the live system's `board` block.
 pub fn start(providers: Vec<Box<dyn Provider>>) -> Result<Worker> {
-    spawn(providers, Some(BoardProbe::new()), true)
+    spawn(providers, Some(BoardProbe::new()), true, REST)
 }
 
 fn spawn(
     providers: Vec<Box<dyn Provider>>,
     board: Option<BoardProbe>,
     listen_for_uevents: bool,
+    rest: Duration,
 ) -> Result<Worker> {
     // SAFETY: plain eventfd creation; the result is checked below.
     let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
@@ -150,7 +156,7 @@ fn spawn(
     let worker_shared = shared.clone();
     let thread = thread::Builder::new()
         .name("peripherals".into())
-        .spawn(move || run(&worker_shared, providers, board, listen_for_uevents))
+        .spawn(move || run(&worker_shared, providers, board, listen_for_uevents, rest))
         .context("spawn peripherals thread")?;
     Ok(Worker { shared, thread })
 }
@@ -191,6 +197,7 @@ fn run(
     mut providers: Vec<Box<dyn Provider>>,
     mut board_probe: Option<BoardProbe>,
     listen_for_uevents: bool,
+    rest: Duration,
 ) {
     let _guard = RunningGuard(shared);
     lower_priority();
@@ -249,32 +256,49 @@ fn run(
             .unwrap_or_else(PoisonError::into_inner)
             .covered = covers;
         shared.scanned.notify_all();
-        if !wait(shared, &mut uevents, &mut hotplug_error) {
+        if !wait(shared, &mut uevents, &mut hotplug_error, rest) {
             return;
         }
     }
 }
 
-/// Block until a relevant uevent or a refresh, then let the burst settle.
-/// Returns `false` on stop.
+/// Rest for `rest` after the scan that just finished, block until a
+/// relevant uevent or a refresh, then let the burst settle. Only a stop ends
+/// the rest early; a refresh during it is served by the next scan. Returns
+/// `false` on stop.
 fn wait(
     shared: &Shared,
     uevents: &mut Option<UeventSocket>,
     hotplug_error: &mut Option<CatalogError>,
+    rest: Duration,
 ) -> bool {
     let wake_fd = shared.wake.as_raw_fd();
+    let rested = Instant::now() + rest;
+    let mut triggered = false;
     loop {
+        let left = rested.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        poll(
+            wake_fd,
+            None,
+            left.as_micros().div_ceil(1000) as libc::c_int,
+        );
+        if shared.stopping.load(Ordering::Acquire) {
+            return false;
+        }
+        triggered |= drain_wake(wake_fd);
+    }
+    while !triggered {
         let socket_fd = uevents.as_ref().map(UeventSocket::as_raw_fd);
         let ready = poll(wake_fd, socket_fd, -1);
         if shared.stopping.load(Ordering::Acquire) {
             return false;
         }
-        let mut triggered = drain_wake(wake_fd);
+        triggered = drain_wake(wake_fd);
         if ready.1 {
             triggered |= drain_uevents(uevents, hotplug_error);
-        }
-        if triggered {
-            break;
         }
     }
     // A refresh during the pause wakes it early; that scan serves it too.
@@ -431,6 +455,7 @@ mod tests {
             })],
             None,
             false,
+            Duration::ZERO,
         )
         .unwrap();
         let peripherals = worker.handle();
@@ -490,7 +515,7 @@ mod tests {
             scans: scans.clone(),
         };
         (
-            spawn(vec![Box::new(provider)], None, false).unwrap(),
+            spawn(vec![Box::new(provider)], None, false, Duration::ZERO).unwrap(),
             release,
             scans,
         )
@@ -528,6 +553,82 @@ mod tests {
         worker.stop();
     }
 
+    /// Records when each scan ran; device `test:N` is scan N.
+    struct Timed {
+        scans: Arc<Mutex<Vec<(Instant, Instant)>>>,
+    }
+
+    impl Provider for Timed {
+        fn name(&self) -> &'static str {
+            "test.timed"
+        }
+        fn subsystems(&self) -> &'static [&'static str] {
+            &["test"]
+        }
+        fn discover(&mut self) -> ScanResult {
+            let started = Instant::now();
+            thread::sleep(Duration::from_millis(20));
+            let mut scans = self.scans.lock().unwrap();
+            scans.push((started, Instant::now()));
+            Ok(vec![device(&format!("test:{}", scans.len()))])
+        }
+    }
+
+    /// Clients repeating refresh requests get the rest between scans, and
+    /// each request is still answered by a scan that started after it.
+    #[test]
+    fn repeated_refreshes_wait_out_the_rest_after_each_scan() {
+        let rest = Duration::from_millis(200);
+        let scans = Arc::new(Mutex::new(Vec::new()));
+        let provider = Timed {
+            scans: scans.clone(),
+        };
+        let worker = spawn(vec![Box::new(provider)], None, false, rest).unwrap();
+        let clients: Vec<_> = (0..4)
+            .map(|_| {
+                let peripherals = worker.handle();
+                let scans = scans.clone();
+                thread::spawn(move || {
+                    for _ in 0..3 {
+                        let before = scans.lock().unwrap().len();
+                        let catalog = peripherals.refresh(TIMEOUT).unwrap();
+                        let scan: usize = catalog.devices[0].id()["test:".len()..].parse().unwrap();
+                        assert!(scan > before, "scan {scan} started before the request");
+                    }
+                })
+            })
+            .collect();
+        for client in clients {
+            client.join().unwrap();
+        }
+        worker.stop();
+        let scans = scans.lock().unwrap();
+        assert!(scans.len() >= 4, "{} scans", scans.len());
+        for pair in scans.windows(2) {
+            let idle = pair[1].0 - pair[0].1;
+            assert!(idle >= rest, "only {idle:?} between scans");
+        }
+    }
+
+    #[test]
+    fn a_stop_ends_the_rest() {
+        let scans = Arc::new(Mutex::new(Vec::new()));
+        let provider = Timed {
+            scans: scans.clone(),
+        };
+        let worker = spawn(
+            vec![Box::new(provider)],
+            None,
+            false,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        wait_for(&worker.handle(), |catalog| catalog.observed_at.is_some());
+        let stopping = Instant::now();
+        worker.stop();
+        assert!(stopping.elapsed() < Duration::from_secs(5));
+    }
+
     /// Restarts and clock changes cannot repeat a revision, and it stays
     /// exact in JSON readers that store numbers as doubles.
     #[test]
@@ -552,7 +653,7 @@ mod tests {
             results: Arc::new(Mutex::new(results)),
         };
         let probe = devkit_probe(root.path());
-        let worker = spawn(vec![Box::new(provider)], Some(probe), false).unwrap();
+        let worker = spawn(vec![Box::new(provider)], Some(probe), false, Duration::ZERO).unwrap();
         let peripherals = worker.handle();
         let model = |catalog: &Catalog| catalog.board.as_ref().unwrap().model.clone();
 
@@ -583,6 +684,7 @@ mod tests {
             })],
             None,
             false,
+            Duration::ZERO,
         )
         .unwrap();
         let peripherals = worker.handle();

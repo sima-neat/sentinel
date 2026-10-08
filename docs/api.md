@@ -90,7 +90,9 @@ device or mode is decided by that application.
 
 `POST /v1/peripherals/refresh` waits for a scan that starts after the request
 and returns HTTP 200 with that catalog, the same document as `GET`. Concurrent
-refreshes share scans. It returns HTTP 504 if the scan does not finish within
+refreshes share scans. After every scan the discovery thread rests for 1
+second, so a refresh can wait up to that long before its scan starts, and
+repeated refreshes cannot keep discovery running. It returns HTTP 504 if the scan does not finish within
 10 seconds, and HTTP 429 when 8 refresh requests are already waiting. Both
 routes return HTTP 503 when discovery is disabled (`--no-peripherals`) or has
 stopped.
@@ -112,9 +114,13 @@ against it.
 ## Security and concurrency
 
 The socket is local to the DevKit and is never exposed remotely by Sentinel.
-It is intentionally accessible to local users because the supported control
-operations only start and stop telemetry traces; the API does not delete runs,
-execute workloads, or modify hardware. Remote access should be provided by an
+It is intentionally accessible to local users, so clients such as Insight and
+the CLI work without root. Its control operations start and stop telemetry
+traces and request a peripheral rescan; the API does not delete runs, execute
+workloads, or modify hardware. A rescan only reads, and the 1-second rest after
+every scan bounds how much work refresh requests can cause. A local user who
+keeps 8 refreshes waiting makes other refreshes return HTTP 429, while `GET`
+keeps working. Remote access should be provided by an
 authenticated Kerrigan/Fleet Manager proxy, not by forwarding this socket or
 adding an unauthenticated TCP listener.
 
