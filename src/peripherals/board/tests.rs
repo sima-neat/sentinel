@@ -278,6 +278,56 @@ fn a_configured_camera_names_the_catalog_camera_that_is_its_sensor() {
     );
 }
 
+/// `firmware` is `DISTRO_VERSION` from `etc/buildinfo` beside the boot
+/// directory (transcribed: eLxr 2.0.0 and 2.1.3 base files). Releases older
+/// than 2.1.2 explain why MIPI cameras are missing; newer, pre-release,
+/// unparsable or missing ones add nothing.
+#[test]
+fn firmware_older_than_2_1_2_says_why_mipi_cameras_are_missing() {
+    let buildinfo = |version: &str| {
+        format!(
+            "-----------------------\nBuild Configuration:  |\n-----------------------\n\
+             DISTRO = eLxr\nDISTRO_VERSION = {version}\nMACHINE = modalix\nDATE = 20251202\n"
+        )
+    };
+    let reason = "Firmware 2.0.0 is older than 2.1.2, the oldest release Sentinel supports for \
+                  MIPI cameras, so none are listed; USB cameras and microphones still are. \
+                  Update the board's firmware to 2.1.2 or newer.";
+    let unsupported = |reason: &str| {
+        vec![CatalogError {
+            provider: "board.firmware".into(),
+            code: "platform.unsupported".into(),
+            reason: reason.into(),
+        }]
+    };
+    let cases = [
+        (Some(buildinfo("2.0.0")), Some("2.0.0"), unsupported(reason)),
+        (Some(buildinfo("2.1.2")), Some("2.1.2"), vec![]),
+        (Some(buildinfo("2.1.3")), Some("2.1.3"), vec![]),
+        (Some(buildinfo("3.0.0")), Some("3.0.0"), vec![]),
+        (
+            Some(buildinfo("2.1")),
+            Some("2.1"),
+            unsupported(&reason.replacen("2.0.0", "2.1", 1)),
+        ),
+        (Some(buildinfo("daily")), Some("daily"), vec![]),
+        (Some("DISTRO = eLxr\n".to_string()), None, vec![]),
+        (None, None, vec![]),
+    ];
+    for (file, firmware, expected) in cases {
+        let root = TempDir::new();
+        devkit(root.path());
+        if let Some(file) = file {
+            fs::create_dir_all(root.path().join("etc")).unwrap();
+            fs::write(root.path().join("etc/buildinfo"), file).unwrap();
+        }
+        let mut probe = probe(root.path(), &format!("echo '{OVERLAY}'"));
+        let (board, errors) = scan(&mut probe, &[]);
+        assert_eq!(board.get("firmware").and_then(|v| v.as_str()), firmware);
+        assert_eq!(errors, expected, "{firmware:?}");
+    }
+}
+
 #[test]
 fn an_of_node_that_cannot_be_resolved_is_reported() {
     // A failure other than a vanished device must not read as "no configured

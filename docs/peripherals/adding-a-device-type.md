@@ -3,7 +3,8 @@
 Sentinel's peripheral catalog lists hardware facts. A new kind of device (for
 example a display or a serial adapter) needs a typed record, a provider that
 discovers it, tests, and a page in this directory. Whether an application
-supports a device is decided by that application, not by Sentinel.
+supports a device is decided by that application, not by Sentinel; the only
+exception is the availability of camera modes (see [the catalog](../api.md)).
 
 ## 1. Define the record
 

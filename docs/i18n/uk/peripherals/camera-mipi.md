@@ -28,7 +28,7 @@
 | `camera_name` | завжди | Ім’я сутності сенсора для передавання в `CameraInput` |
 | `media_device` | завжди | `/dev/mediaN` (лише для маршрутизації; не для ідентифікації) |
 | `bus_info` | якщо повідомляється | Шина медіапристрою з `MEDIA_IOC_DEVICE_INFO`, наприклад `platform:csi2video@1` |
-| `isp` | завжди | `{"state": "available", "device_path", "device_paths"}` або `{"state": "unavailable", "reason"}` разом із `modes: []` |
+| `isp` | завжди | `{"state": "available", "device_path", "device_paths", "sizing"}` або `{"state": "unavailable", "reason"}` разом із `modes: []` |
 | `csi_receiver` | якщо є зв’язок | Сутність, з якою зв’язаний вихідний пад (source pad) сенсора, наприклад `csidev-40c3000.csi` |
 | `sensor_timing` | якщо вдається прочитати | `pixel_rate` (пікселів/с), `hblank_min`, `vblank_min`, `width`, `height`, прочитані з `/dev/v4l-subdevN` сенсора |
 | `max_fps` | за наявності `sensor_timing` | `pixel_rate / ((width + hblank_min) * (height + vblank_min))`, з точністю до двох знаків після коми |
@@ -43,6 +43,12 @@
 `isp_v4l2-vid-cap-out` і card `arm-isp-out`. Якщо їх кілька, повідомляються лише
 режими, спільні для всіх.
 
+`sizing` вказує, звідки беруться вихідні розміри ISP; це визначає те, що перелічує
+ISP, а не версія платформи. ISP, що задає розміри під час роботи за сенсором, для
+якого його налаштовано (Platform 3.0), до того перелічує 0x0: якщо будь-який вузол ISP
+перелічує розмір 0x0, `sizing` дорівнює `runtime`. Інакше (Platform 2.1.x) розміри —
+це вбудована в драйвер таблиця: `sizing` дорівнює `fixed`.
+
 ## Режими
 
 Режими — це вихідні формати та дискретні розміри ISP, тобто те, що може захоплювати
@@ -51,6 +57,19 @@
 для USB-камер, лише якщо ISP повідомляє інтервали для свого розміру.
 ISP DevKit їх не повідомляє, тому його режими не мають частоти кадрів; `max_fps` і
 `sensor_timing` описують обмеження сенсора.
+
+Якщо `sizing: "runtime"`, ISP перелічує лише розмір, для якого його зараз
+налаштовано (0x0 у стані спокою), тому ці розміри не використовуються. Режими
+тоді — це формати, які перелічують усі вузли ISP, у кожному дискретному розмірі
+кадру, який субпристрій сенсора повідомляє для всіх своїх кодів медіашини
+(`VIDIOC_SUBDEV_ENUM_MBUS_CODE`, `VIDIOC_SUBDEV_ENUM_FRAME_SIZE`). Кожен має
+`format`, `width`, `height` і `sensor_mode: true`, а також `frame_intervals`, якщо
+сенсор повідомляє інтервали для цього розміру (`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`).
+Діапазони пропускаються. Якщо розміри сенсора не вдається перелічити, `isp` для
+цієї камери недоступний із зазначенням причини.
+
+Кожен режим також має `available` і, якщо воно false, `reason`: чи налаштовано плату
+для нього. Правило описано в [каталозі](../api.md).
 
 ## Помилки
 
@@ -77,7 +96,8 @@ DevKit; значення таймінгів сенсора наведено та
            {"format": "AR24", "width": 2048, "height": 1080, "isp_output": true}],
  "backend": "mipi", "camera_name": "imx477 5-001a", "media_device": "/dev/media0",
  "bus_info": "platform:csi2video@1",
- "isp": {"state": "available", "device_path": "/dev/video1", "device_paths": ["/dev/video1"]},
+ "isp": {"state": "available", "device_path": "/dev/video1", "device_paths": ["/dev/video1"],
+         "sizing": "fixed"},
  "csi_receiver": "csidev-40c3000.csi",
  "sensor_timing": {"pixel_rate": 840000000, "hblank_min": 9332, "vblank_min": 48,
                    "width": 1920, "height": 1080},

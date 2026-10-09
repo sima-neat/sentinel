@@ -366,6 +366,9 @@ impl Enumerator<'_> {
                 size_range,
                 frame_intervals,
                 isp_output: None,
+                sensor_mode: None,
+                available: None,
+                reason: None,
             });
         }
         Ok(modes)

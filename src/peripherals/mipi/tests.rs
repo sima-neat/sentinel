@@ -157,12 +157,37 @@ fn real_media(sensors: &[(u32, &str, u32)]) -> Node<FakeMedia> {
 struct FakeSubdev {
     format: Option<(u32, u32, u32)>,
     controls: Vec<(u32, i64, u32)>,
+    /// The source pad's media-bus codes, in driver order.
+    codes: Vec<u32>,
+    /// `(code, [min width, max width, min height, max height])`.
+    sizes: Vec<(u32, [u32; 4])>,
+    /// `((code, width, height), [numerator, denominator])`; with none at
+    /// all, the driver lacks `VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL` (`ENOTTY`).
+    intervals: Vec<((u32, u32, u32), [u32; 2])>,
+    /// The enumeration ioctl that fails, and its errno.
+    fail: Option<(&'static str, i32)>,
 }
 
 impl FakeSubdev {
     fn control(&self, id: u32) -> io::Result<(u32, i64, u32)> {
         let found = self.controls.iter().find(|control| control.0 == id);
         found.copied().ok_or_else(einval)
+    }
+
+    /// Entry `index` of the entries matching `key`; `EINVAL` past the end.
+    fn nth<K: PartialEq, V: Copy>(
+        &self,
+        ioctl: &str,
+        list: &[(K, V)],
+        key: K,
+        index: u32,
+    ) -> io::Result<V> {
+        if let Some((_, errno)) = self.fail.filter(|(failing, _)| *failing == ioctl) {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
+        let mut matching = list.iter().filter(|(candidate, _)| *candidate == key);
+        let found = matching.nth(index as usize).map(|(_, value)| *value);
+        found.ok_or_else(einval)
     }
 }
 
@@ -183,6 +208,32 @@ impl SubdevNode for FakeSubdev {
     fn control_value(&mut self, id: u32) -> io::Result<i64> {
         Ok(self.control(id)?.1)
     }
+
+    fn enum_mbus_code(&mut self, value: &mut SubdevMbusCodeEnum) -> io::Result<()> {
+        let codes: Vec<_> = self.codes.iter().map(|&code| ((), code)).collect();
+        value.code = self.nth("codes", &codes, (), value.index)?;
+        Ok(())
+    }
+
+    fn enum_mbus_size(&mut self, value: &mut SubdevFrameSizeEnum) -> io::Result<()> {
+        let size = self.nth("sizes", &self.sizes, value.code, value.index)?;
+        [
+            value.min_width,
+            value.max_width,
+            value.min_height,
+            value.max_height,
+        ] = size;
+        Ok(())
+    }
+
+    fn enum_mbus_interval(&mut self, value: &mut SubdevFrameIntervalEnum) -> io::Result<()> {
+        if self.intervals.is_empty() {
+            return Err(io::Error::from_raw_os_error(libc::ENOTTY));
+        }
+        let key = (value.code, value.width, value.height);
+        value.interval = self.nth("intervals", &self.intervals, key, value.index)?;
+        Ok(())
+    }
 }
 
 /// A sensor with the given pixel rate, minimum blanking and pad 0 format.
@@ -191,7 +242,37 @@ fn subdev(pixel_rate: i64, blanking: (i64, i64), size: (u32, u32)) -> FakeSubdev
     controls.push((V4L2_CID_VBLANK, blanking.1, 0));
     controls.push((V4L2_CID_PIXEL_RATE, pixel_rate, 0));
     let format = Some((0, size.0, size.1));
-    FakeSubdev { format, controls }
+    FakeSubdev {
+        format,
+        controls,
+        ..FakeSubdev::default()
+    }
+}
+
+const SRGGB10: u32 = 0x300f; // MEDIA_BUS_FMT_SRGGB10_1X10
+const SRGGB12: u32 = 0x3012; // MEDIA_BUS_FMT_SRGGB12_1X12
+/// Synthetic, from the mode table of the IMX477 driver in SiMa's kernel
+/// source: every size in RAW10 and RAW12 but 1332x990, which is RAW10 only.
+const IMX477_SIZES: [(u32, u32); 8] = [
+    (4056, 3040),
+    (4032, 3040),
+    (4056, 2160),
+    (2028, 1520),
+    (2048, 1080),
+    (2028, 1080),
+    (1920, 1080),
+    (1332, 990),
+];
+
+/// The IMX477 sub-device listing [`IMX477_SIZES`], without frame intervals.
+fn imx477_modes(sensor: &mut FakeSubdev) {
+    sensor.codes = vec![SRGGB10, SRGGB12];
+    for (index, &(width, height)) in IMX477_SIZES.iter().enumerate() {
+        sensor.sizes.push((SRGGB10, [width, width, height, height]));
+        if index < 7 {
+            sensor.sizes.push((SRGGB12, [width, width, height, height]));
+        }
+    }
 }
 
 /// The IMX477 at 1920x1080 as the DevKit reports it: pixel rate 840 MHz,
@@ -360,7 +441,7 @@ fn real_imx477_devkit_board_produces_one_camera_with_isp_modes() {
         "media_device": "/dev/media0",
         "bus_info": "platform:csi2video@1",
         "isp": {"state": "available", "device_path": "/dev/video1",
-                "device_paths": ["/dev/video1"]},
+                "device_paths": ["/dev/video1"], "sizing": "fixed"},
         "csi_receiver": "csidev-40c3000.csi",
     });
     assert_eq!(records.len(), 1);
@@ -538,7 +619,8 @@ fn isp_nodes_provide_the_modes() {
     let modes = json!([nv12((1920, 1080), Some((30, 1))), nv12((2048, 1080), None)]);
     assert_eq!(details["modes"], modes);
     let paths = ["/dev/video0", "/dev/video1", "/dev/video2"];
-    let available = json!({"state": "available", "device_path": paths[0], "device_paths": paths});
+    let available = json!({"state": "available", "device_path": paths[0], "device_paths": paths,
+                           "sizing": "fixed"});
     assert_eq!(details["isp"], available);
 
     let stepwise = raw_interval(V4L2_FRMIVAL_TYPE_STEPWISE, [1, 24, 1, 6, 1, 24]);
@@ -643,6 +725,163 @@ fn isp_failures_leave_the_camera_without_modes() {
     }
     let enumerations = calls.load(SeqCst) - 1; // Not VIDIOC_QUERYCAP.
     assert_eq!(enumerations, MAX_DEVICE_ENUMERATIONS as usize);
+}
+
+/// Synthetic, modelled on a Platform 3.0 DevKit (kernel 6.18.3, `v4l2-ctl`
+/// on `/dev/video0out`, 2026-10-07, no camera configured): the ISP lists each
+/// format, NV16 and NV24 included, at `sizes` (0x0 at rest).
+fn runtime_isp(sizes: &[(u32, u32)]) -> FakeVideoNode {
+    let mut node = FakeVideoNode::new(ISP_CARD_NAME, 0x8520_1000, 0x0520_1000);
+    let mplane = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    for format in [b"AR24", b"RGB3", b"NV12", b"NV16", b"NV24"].map(fourcc) {
+        node.formats.push((mplane, format, ""));
+        let listed = sizes.iter().map(|&(w, h)| (format, discrete_size(w, h)));
+        node.sizes.extend(listed);
+    }
+    node
+}
+
+/// The camera's modes with a run-time ISP: each ISP format at each sensor
+/// size, in ISP mode order.
+fn sensor_modes(formats: &[&str], sizes: &[(u32, u32)]) -> Value {
+    let mut sizes = sizes.to_vec();
+    sizes.sort();
+    let mode = |format: &str, (width, height)| json!({"format": format, "width": width, "height": height, "sensor_mode": true});
+    let modes = formats
+        .iter()
+        .flat_map(|format| sizes.iter().map(|&size| mode(format, size)));
+    Value::from_iter(modes)
+}
+
+/// An ISP node that lists 0x0 sets its sizes at run time: whatever the ISP
+/// lists, at rest or configured for one sensor mode on one node, is not the
+/// camera's modes, and nothing is malformed. One such node is enough, beside
+/// nodes with a real size or a 2.1 table. The camera's modes are the formats
+/// every ISP node lists, at the sensor's discrete sizes over all its codes.
+#[test]
+fn isp_listing_0x0_takes_the_sensor_sizes() {
+    let runtime = |paths: &[&str]| {
+        json!({"state": "available", "device_path": paths[0], "device_paths": paths,
+               "sizing": "runtime"})
+    };
+    let mut configured = runtime_isp(&[(1920, 1080)]);
+    configured
+        .formats
+        .retain(|format| format.1 != fourcc(b"NV24"));
+    let all = ["AR24", "NV12", "NV16", "NV24", "RGB3"];
+    let cases: [(Vec<Video>, &[&str]); 4] = [
+        (vec![isp(runtime_isp(&[(0, 0)]))], &all),
+        (
+            vec![isp(runtime_isp(&[(0, 0)])), isp(configured)],
+            &["AR24", "NV12", "NV16", "RGB3"],
+        ),
+        (vec![isp(runtime_isp(&[(1920, 1080), (0, 0)]))], &all),
+        (
+            vec![isp(real_isp()), isp(runtime_isp(&[(0, 0)]))],
+            &["AR24", "NV12", "RGB3"],
+        ),
+    ];
+    for (nodes, formats) in cases {
+        let paths: Vec<_> = (0..nodes.len()).map(|n| format!("/dev/video{n}")).collect();
+        let paths: Vec<_> = paths.iter().map(String::as_str).collect();
+        let details = imx477(nodes, imx477_timed(imx477_modes));
+        assert_eq!(details["modes"], sensor_modes(formats, &IMX477_SIZES));
+        assert_eq!(details["isp"], runtime(&paths));
+        assert_eq!(details["max_fps"], 66.18);
+    }
+}
+
+/// The sensor's frame intervals become the modes' rates: a size listed under
+/// two codes has the intervals of both once, and a size without intervals has
+/// no rate. Ranges are skipped.
+#[test]
+fn runtime_modes_carry_the_sensor_intervals() {
+    let details = imx477(
+        [isp(runtime_isp(&[(0, 0)]))],
+        imx477_timed(|sensor| {
+            sensor.codes = vec![SRGGB10, SRGGB12];
+            sensor.sizes = vec![
+                (SRGGB10, [2028, 2028, 1520, 1520]),
+                (SRGGB10, [64, 4056, 64, 3040]),
+                (SRGGB12, [2028, 2028, 1520, 1520]),
+                (SRGGB12, [1332, 1332, 990, 990]),
+            ];
+            sensor.intervals = vec![
+                ((SRGGB10, 2028, 1520), [1, 40]),
+                ((SRGGB12, 2028, 1520), [1, 30]),
+                ((SRGGB12, 2028, 1520), [2, 80]),
+            ];
+        }),
+    );
+    let at = |numerator, denominator| json!({"type": "discrete", "numerator": numerator, "denominator": denominator});
+    let mut modes = sensor_modes(
+        &["AR24", "NV12", "NV16", "NV24", "RGB3"],
+        &[(1332, 990), (2028, 1520)],
+    );
+    for mode in modes.as_array_mut().unwrap() {
+        if mode["width"] == 2028 {
+            mode["frame_intervals"] = json!([{"width": 2028, "height": 1520,
+                                              "intervals": [at(1, 40), at(1, 30)]}]);
+        }
+    }
+    assert_eq!(details["modes"], modes);
+}
+
+/// When the sensor's sizes cannot be listed, the camera has no modes and its
+/// `isp` says why; the other checks of the scan are unaffected.
+#[test]
+fn runtime_isp_without_sensor_sizes_leaves_the_camera_without_modes() {
+    let failing = |ioctl, errno| {
+        imx477_timed(move |sensor| {
+            imx477_modes(sensor);
+            sensor.fail = Some((ioctl, errno));
+        })
+    };
+    let malformed = imx477_timed(|sensor| {
+        sensor.codes = vec![SRGGB10];
+        sensor.sizes = vec![(SRGGB10, [0, 0, 1080, 1080])];
+    });
+    let ranges = imx477_timed(|sensor| {
+        sensor.codes = vec![SRGGB10];
+        sensor.sizes = vec![(SRGGB10, [64, 4056, 64, 3040])];
+    });
+    let mut bad_interval = imx477_timed(imx477_modes);
+    if let Ok(sensor) = &mut bad_interval[0].2 {
+        sensor.intervals = vec![((SRGGB10, 4056, 3040), [0, 10])];
+    }
+    let eio = os_message(&io::Error::from_raw_os_error(libc::EIO));
+    let path = "/dev/v4l-subdev2";
+    let cases = [
+        (
+            vec![],
+            "the sensor has no sub-device to list its frame sizes".to_string(),
+        ),
+        (
+            failing("codes", libc::EIO),
+            format!("VIDIOC_SUBDEV_ENUM_MBUS_CODE failed for {path}: {eio}"),
+        ),
+        (
+            failing("sizes", libc::EIO),
+            format!("VIDIOC_SUBDEV_ENUM_FRAME_SIZE failed for {path}: {eio}"),
+        ),
+        (
+            malformed,
+            format!("sensor sub-device {path} returned a malformed frame size"),
+        ),
+        (
+            bad_interval,
+            format!("sensor sub-device {path} returned a malformed frame interval"),
+        ),
+        (
+            ranges,
+            format!("sensor sub-device {path} reported no discrete frame sizes"),
+        ),
+    ];
+    for (subdevs, reason) in cases {
+        let details = imx477([isp(runtime_isp(&[(0, 0)]))], subdevs);
+        let isp = json!({"state": "unavailable", "reason": reason});
+        assert_eq!((&details["modes"], &details["isp"]), (&json!([]), &isp));
+    }
 }
 
 /// Transcribed graph and ISP with the sensor values the DevKit reports: the

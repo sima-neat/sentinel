@@ -28,7 +28,7 @@
 | `camera_name` | 常に | センサーエンティティ名。`CameraInput`に渡します |
 | `media_device` | 常に | `/dev/mediaN`（ルーティング専用。識別には使用しません） |
 | `bus_info` | 報告される場合 | `MEDIA_IOC_DEVICE_INFO`から取得したメディアデバイスのバス。例：`platform:csi2video@1` |
-| `isp` | 常に | `{"state": "available", "device_path", "device_paths"}`、または`{"state": "unavailable", "reason"}`（この場合は`modes: []`） |
+| `isp` | 常に | `{"state": "available", "device_path", "device_paths", "sizing"}`、または`{"state": "unavailable", "reason"}`（この場合は`modes: []`） |
 | `csi_receiver` | リンクされている場合 | センサーのソースパッドのリンク先エンティティ。例：`csidev-40c3000.csi` |
 | `sensor_timing` | 読み取れる場合 | `pixel_rate`（ピクセル/秒）、`hblank_min`、`vblank_min`、`width`、`height`。センサーの`/dev/v4l-subdevN`から読み取ります |
 | `max_fps` | `sensor_timing`がある場合 | `pixel_rate / ((width + hblank_min) * (height + vblank_min))`。小数点以下2桁 |
@@ -43,6 +43,12 @@ ISP出力ノードは、`isp_v4l2-vid-cap-out`という名前で、
 カードが`arm-isp-out`である`video4linux`エントリです。
 複数存在する場合は、すべてに共通するモードのみが報告されます。
 
+`sizing`は、ISPの出力サイズの由来を示します。プラットフォームのバージョンではなく、
+ISPが列挙するサイズで判定します。設定されたセンサーに合わせて実行時にサイズを決めるISP
+（Platform 3.0）は、設定されるまで0x0を列挙します。いずれかのISPノードが0x0のサイズを
+列挙する場合、`sizing`は`runtime`です。それ以外（Platform 2.1.x）では、サイズはドライバーに
+組み込まれたテーブルであり、`sizing`は`fixed`です。
+
 ## モード
 
 モードはISPの出力フォーマットと離散サイズであり、
@@ -51,6 +57,18 @@ ISP出力ノードは、`isp_v4l2-vid-cap-out`という名前で、
 USBカメラと同じ形式の`frame_intervals`を持ちます。
 DevKitのISPは間隔を報告しないため、そのモードにはフレームレートがありません。
 `max_fps`と`sensor_timing`がセンサーの上限を示します。
+
+`sizing: "runtime"`の場合、ISPは現在設定されているサイズ（待機中は0x0）のみを列挙するため、
+それらのサイズは使用しません。モードは、すべてのISPノードが列挙するフォーマットと、
+センサーのサブデバイスがすべてのメディアバスコードについて報告する離散フレームサイズ
+（`VIDIOC_SUBDEV_ENUM_MBUS_CODE`、`VIDIOC_SUBDEV_ENUM_FRAME_SIZE`）の組み合わせです。
+各モードには`format`、`width`、`height`、`sensor_mode: true`があり、センサーがその
+サイズの間隔を報告する場合（`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`）は`frame_intervals`も
+持ちます。範囲で示されるサイズはスキップされます。センサーのサイズを列挙できない場合、
+そのカメラの`isp`は理由とともに利用不可になります。
+
+各モードは`available`と、それがfalseの場合は`reason`も持ち、ボードがそのモード用に設定されているかどうかを示します。
+判定規則は[カタログ](../api.md)にあります。
 
 ## エラー
 
@@ -77,7 +95,8 @@ DevKitから書き写したものです。センサータイミングの値はDe
            {"format": "AR24", "width": 2048, "height": 1080, "isp_output": true}],
  "backend": "mipi", "camera_name": "imx477 5-001a", "media_device": "/dev/media0",
  "bus_info": "platform:csi2video@1",
- "isp": {"state": "available", "device_path": "/dev/video1", "device_paths": ["/dev/video1"]},
+ "isp": {"state": "available", "device_path": "/dev/video1", "device_paths": ["/dev/video1"],
+         "sizing": "fixed"},
  "csi_receiver": "csidev-40c3000.csi",
  "sensor_timing": {"pixel_rate": 840000000, "hblank_min": 9332, "vblank_min": 48,
                    "width": 1920, "height": 1080},

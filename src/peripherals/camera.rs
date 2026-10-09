@@ -48,6 +48,17 @@ pub struct Mode {
     /// MIPI: `true` for an ISP output size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isp_output: Option<bool>,
+    /// MIPI: `true` for a sensor frame size, which the ISP outputs when it
+    /// sets its sizes at run time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor_mode: Option<bool>,
+    /// Whether the board is set up for this mode; see `support`. Set by the
+    /// catalog, not the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
+    /// Why the mode is not available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,9 +171,28 @@ pub enum Isp {
     Available {
         device_path: String,
         device_paths: Vec<String>,
+        /// Where the ISP's output sizes come from; absent from catalogs of
+        /// older Sentinels, which only read fixed tables.
+        #[serde(default)]
+        sizing: IspSizing,
     },
     /// The camera then has no modes.
     Unavailable { reason: String },
+}
+
+/// How the ISP driver gets its output sizes, detected from the sizes its
+/// output nodes list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IspSizing {
+    /// A table built into the driver, listed by `VIDIOC_ENUM_FRAMESIZES`
+    /// (Platform 2.1.x).
+    #[default]
+    Fixed,
+    /// Set at run time from the sensor the ISP is configured for: a node
+    /// lists 0x0 until then, and the listed sizes are not the camera's modes
+    /// (Platform 3.0).
+    Runtime,
 }
 
 /// The sensor's active source-pad format and the controls that bound its

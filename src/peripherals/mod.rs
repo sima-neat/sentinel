@@ -1,7 +1,8 @@
 //! Peripheral inventory. One worker thread runs the built-in providers at
 //! startup, on kernel uevents and on request, and replaces an in-memory
-//! catalog that the API serves. Sentinel reports hardware facts only; whether
-//! an application supports a device is decided by that application.
+//! catalog that the API serves. Sentinel reports hardware facts, and decides
+//! one thing about them: whether each camera mode is available on this board
+//! (`support`).
 
 mod alsa;
 pub mod board;
@@ -9,6 +10,7 @@ pub mod camera;
 pub mod cli;
 pub mod microphone;
 mod mipi;
+mod support;
 mod sysutil;
 mod uevent;
 mod v4l2;

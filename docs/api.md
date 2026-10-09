@@ -85,8 +85,17 @@ result:
 | `devices` | One object per device, tagged by `type`. `id` is stable across replugs into the same port and is never a `/dev/videoN` name. |
 | `errors` | Providers that failed in the latest scan, and fields of the `board` block that could not be read completely (provider `board.<field>`, for example `board.overlays`). A failed provider's devices from its last successful scan stay in `devices`, and a failed `fw_printenv` keeps the last overlay list. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
 
-Sentinel reports hardware facts only. Whether an application supports a
-device or mode is decided by that application.
+Sentinel reports hardware facts and makes one judgement about them: whether
+each camera mode is available on this board. A mode has `available: true` when
+the board's camera overlays support the camera's sensor (the sensor's
+`compatible` in `board.configured_cameras` is listed in
+`board.supported_sensors`), the mode is an ISP output size (`isp_output`) or,
+when the ISP sets its sizes at run time, a sensor size (`sensor_mode`), and its
+format is NV12, the format Neat's `CameraInput` outputs. Every other mode has
+`available: false` and a `reason`; USB cameras are never available. `available`
+means the board is set up for the mode, not that every pipeline streams it.
+Whether an application supports any other device is decided by that
+application.
 
 `POST /v1/peripherals/refresh` waits for a scan that starts after the request
 and returns HTTP 200 with that catalog, the same document as `GET`. Concurrent

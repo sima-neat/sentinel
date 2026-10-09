@@ -18,6 +18,7 @@ returns HTTP 503 as before when discovery is disabled.
 | Field | Present | Meaning |
 | --- | --- | --- |
 | `model` | when the device tree has one | `/sys/firmware/devicetree/base/model`, up to its first NUL and without surrounding whitespace, e.g. `SiMa.ai Modalix SoM 16Gig Board` |
+| `firmware` | when `/etc/buildinfo` has it | `DISTRO_VERSION` from `/etc/buildinfo`, the firmware release, e.g. `2.1.3`. It only explains errors: Sentinel never chooses behaviour by release |
 | `overlays` | once `fw_printenv -n dtbos` has succeeded | The entries of the U-Boot `dtbos` variable that end in `.dtbo`, in their order: every overlay U-Boot applies, not only camera overlays (PCIe, secure-boot and flash overlays use the same variable). Sentinel does not say which entry configures a camera; `supported_sensors` lists the overlays that configure a sensor. When a later run fails, the list of the last successful run is kept and the failure is reported |
 | `configured_cameras` | always | The MIPI CSI-2 sensors on I2C in the live device tree; may be empty |
 | `supported_sensors` | always | The sensors the overlay files under `/boot` configure; may be empty |
@@ -105,6 +106,7 @@ Each error names the field it leaves incomplete: `provider` is
 | `io.open` | `model`, `/sys/bus/i2c/devices`, a device's node, `/boot`, one of its directories, or an overlay file exists but cannot be read |
 | `io.permission_denied` | The same, failing with `EACCES`; or `fw_printenv` exists but cannot be run (`EACCES` or `EPERM`) |
 | `peripherals.discovery_failed` | `fw_printenv` cannot be started for another reason, its output cannot be read, waiting for it fails, it does not finish in time, or it exits unsuccessfully for a reason other than `dtbos` not being set (the reason names the first line it printed to stderr); an overlay file is malformed or larger than 1 MiB; a list is cut at one of the bounds above |
+| `platform.unsupported` | Provider `board.firmware`: `firmware` is older than 2.1.2, the oldest release Sentinel supports for MIPI cameras. That firmware has no SiMa camera media driver, so `camera.mipi` lists no cameras; USB cameras and microphones are still listed |
 
 The problems of each list are reported as one error, with the first
 problem's code and reason and the number of others. For `supported_sensors`,
