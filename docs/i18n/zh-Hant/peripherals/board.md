@@ -18,6 +18,7 @@ API 會如同以往傳回 HTTP 503。
 | 欄位 | 出現時機 | 意義 |
 | --- | --- | --- |
 | `model` | 裝置樹中有此值時 | `/sys/firmware/devicetree/base/model`，取到第一個 NUL 為止並去除前後空白，例如 `SiMa.ai Modalix SoM 16Gig Board` |
+| `firmware` | `/etc/buildinfo` 中有此值時 | `/etc/buildinfo` 的 `DISTRO_VERSION`，即韌體版本，例如 `2.1.3`。僅用於說明錯誤，Sentinel 從不依版本決定行為 |
 | `overlays` | `fw_printenv -n dtbos` 曾經成功後 | U-Boot `dtbos` 變數中以 `.dtbo` 結尾的項目，保持原本順序：U-Boot 套用的每一個 overlay，而不只是攝影機 overlay（PCIe、安全開機與快閃記憶體的 overlay 也使用同一個變數）。Sentinel 不會指出哪個項目設定了攝影機；`supported_sensors` 會列出設定某個感測器的 overlay。若之後的執行失敗，會保留最後一次成功執行的清單，並回報該失敗 |
 | `configured_cameras` | 一律 | 即時裝置樹中位於 I2C 上的 MIPI CSI-2 感測器；可能為空 |
 | `supported_sensors` | 一律 | `/boot` 下的 overlay 檔案所設定的感測器；可能為空 |
@@ -100,6 +101,7 @@ I2C 多工器，或 GMSL 解串器與串列器；它在兩份清單中都會被�
 | `io.open` | `model`、`/sys/bus/i2c/devices`、某個裝置的節點、`/boot`、其中某個目錄，或某個 overlay 檔案存在但無法讀取 |
 | `io.permission_denied` | 同上，但以 `EACCES` 失敗；或 `fw_printenv` 存在但無法執行（`EACCES` 或 `EPERM`） |
 | `peripherals.discovery_failed` | `fw_printenv` 因其他原因無法啟動、無法讀取其輸出、等待它時失敗、未及時完成，或因 `dtbos` 未設定以外的原因而以失敗結束（原因會列出它印到 stderr 的第一行）；overlay 檔案格式錯誤或大於 1 MiB；某份清單在上述上限之一處被截斷 |
+| `platform.unsupported` | 提供者 `board.firmware`：`firmware` 早於 2.1.2，即 Sentinel 支援 MIPI 攝影機的最舊版本。該韌體沒有 SiMa 攝影機媒體驅動程式，因此 `camera.mipi` 不會列出攝影機；USB 攝影機與麥克風仍會列出 |
 
 每份清單的問題彙整為一個錯誤回報，附上第一個問題的代碼與原因，以及其他問題的數量。
 對 `supported_sensors` 而言，`/boot` 或其中某個目錄的清單無法讀取或被截斷，會與被略過的

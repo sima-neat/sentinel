@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use super::board::BoardProbe;
+use super::support;
 use super::uevent::UeventSocket;
 use super::{Catalog, CatalogError, Peripheral, Provider};
 
@@ -238,6 +239,7 @@ fn run(
             errors.extend(board_errors);
             board
         });
+        support::judge(&mut devices, board.as_ref());
         let mut catalog = shared
             .catalog
             .write()

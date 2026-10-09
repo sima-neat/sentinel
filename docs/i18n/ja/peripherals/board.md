@@ -18,6 +18,7 @@ APIはこれまでどおりHTTP 503を返します。
 | フィールド | 出現条件 | 意味 |
 | --- | --- | --- |
 | `model` | デバイスツリーにある場合 | `/sys/firmware/devicetree/base/model`の値。最初のNULまでを取り、前後の空白を除いたものです。例：`SiMa.ai Modalix SoM 16Gig Board` |
+| `firmware` | `/etc/buildinfo`にある場合 | `/etc/buildinfo`の`DISTRO_VERSION`で、ファームウェアのリリース。例：`2.1.3`。エラーの説明にのみ使い、Sentinelがリリースによって動作を変えることはありません |
 | `overlays` | `fw_printenv -n dtbos`が一度成功した後 | U-Bootの`dtbos`変数のエントリのうち`.dtbo`で終わるものを、その順序のまま列挙します。カメラのオーバーレイだけでなく、U-Bootが適用するすべてのオーバーレイが含まれます（PCIe、セキュアブート、フラッシュのオーバーレイも同じ変数を使用します）。どのエントリがカメラを構成するかをSentinelは示しません。センサーを構成するオーバーレイは`supported_sensors`に列挙されます。後の実行が失敗した場合は、最後に成功した実行のリストが保持され、失敗が報告されます |
 | `configured_cameras` | 常に | ライブのデバイスツリーにおける、I2C上のMIPI CSI-2センサー。空の場合もあります |
 | `supported_sensors` | 常に | `/boot`配下のオーバーレイファイルが構成するセンサー。空の場合もあります |
@@ -101,6 +102,7 @@ I2Cマルチプレクサや、GMSLのデシリアライザーとシリアライ�
 | `io.open` | `model`、`/sys/bus/i2c/devices`、デバイスのノード、`/boot`、その中のいずれかのディレクトリ、またはオーバーレイファイルが存在するものの、読み取れない |
 | `io.permission_denied` | 同上で、`EACCES`で失敗した場合。または`fw_printenv`が存在するものの、実行できない（`EACCES`または`EPERM`） |
 | `peripherals.discovery_failed` | `fw_printenv`がそれ以外の理由で起動できない、その出力を読み取れない、終了の待機に失敗した、時間内に終了しなかった、または`dtbos`が設定されていないこと以外の理由で失敗終了した（理由には標準エラー出力に出力された最初の行が示されます）。オーバーレイファイルの形式が不正であるか、1 MiBを超えている。リストが前述の上限のいずれかで打ち切られた |
+| `platform.unsupported` | プロバイダー`board.firmware`：`firmware`が、SentinelがMIPIカメラをサポートする最も古いリリースである2.1.2より古い場合。そのファームウェアにはSiMaのカメラ用メディアドライバーがないため、`camera.mipi`はカメラを列挙しません。USBカメラとマイクは引き続き列挙されます |
 
 各リストの問題は1件のエラーにまとめて報告され、最初の問題のコードと理由、
 およびそれ以外の件数が示されます。`supported_sensors`では、`/boot`またはその中のディレクトリの

@@ -46,8 +46,8 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 | `frame_intervals` | 一律 | 針對每個探測的尺寸（`width`、`height`），列出裝置宣告的所有間隔：`{"type": "discrete", "numerator", "denominator"}` 或 `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 尺寸範圍會以其最小與最大尺寸進行探測。
-沒有影格間隔的尺寸不構成模式。Sentinel 不判斷模式是否受支援；
-由使用攝影機的應用程式做此判斷。
+沒有影格間隔的尺寸不構成模式。每個模式也都帶有 `available: false` 與 `reason`：
+USB 攝影機在板上沒有攝影機覆蓋層（請參閱[目錄](../api.md)）。
 
 ## 限制與錯誤
 

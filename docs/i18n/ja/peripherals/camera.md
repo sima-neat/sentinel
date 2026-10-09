@@ -46,8 +46,8 @@
 | `frame_intervals` | 常に | プローブした各サイズ（`width`、`height`）について、デバイスが通知するすべての間隔：`{"type": "discrete", "numerator", "denominator"}`または`{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 サイズ範囲は、その最小サイズと最大サイズでプローブされます。
-フレーム間隔のないサイズにはモードがありません。Sentinelはモードがサポートされているかどうかを示しません。
-それはカメラを使用するアプリケーションが判断します。
+フレーム間隔のないサイズにはモードがありません。各モードは`available: false`と`reason`も持ちます。
+USBカメラにはボード上のカメラオーバーレイがないためです（[カタログ](../api.md)を参照）。
 
 ## 制限とエラー
 

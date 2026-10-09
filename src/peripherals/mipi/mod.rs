@@ -7,7 +7,10 @@
 //! The ISP is not in that graph: its modes come from the V4L2 nodes with sysfs
 //! name `isp_v4l2-vid-cap-out` and card `arm-isp-out` (enumeration ioctls only;
 //! several nodes report the modes they share). A missing or unreadable ISP
-//! leaves the cameras with `modes: []`.
+//! leaves the cameras with `modes: []`. An ISP whose driver sets its sizes at
+//! run time (it lists 0x0 until it is configured, as on Platform 3.0) gives
+//! only formats: each camera's modes are then those formats at the discrete
+//! frame sizes of its sensor's sub-device.
 //!
 //! The same topology read names the CSI-2 receiver the sensor's source pad
 //! links to and the sensor's `/dev/v4l-subdevN`, whose active format and
@@ -19,7 +22,7 @@ mod ioctl;
 mod tests;
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -27,7 +30,8 @@ use std::ops::ControlFlow::{self, Continue};
 use std::path::{Path, PathBuf};
 
 use super::camera::{
-    Camera, Fraction, Interval, Isp, MipiCamera, Mode, SensorTiming, SizeIntervals, Source,
+    Camera, Fraction, Interval, Isp, IspSizing, MipiCamera, Mode, SensorTiming, SizeIntervals,
+    Source,
 };
 use super::sysutil::{
     bounded_string, disappeared, errno_of, io_error, os_message, read_text_file, trim_c_space,
@@ -38,7 +42,7 @@ use super::videodev2::{
     effective_capabilities, enumerate, fourcc_string, Capability, EnumerationError, FmtDesc,
     FrmIvalEnum, FrmSizeEnum, MAX_DEVICE_ENUMERATIONS, MAX_ENUMERATION_ENTRIES,
     V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_CAPTURE,
-    V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+    V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_FRMSIZE_TYPE_DISCRETE,
 };
 use super::{Availability, AvailabilityState};
 use super::{Peripheral, Provider, ProviderError};
@@ -111,20 +115,29 @@ impl Provider for MipiProvider {
             );
             return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
         }
-        let (isp, modes) = match probe_isp(&self.sys_root, &self.dev_root, backend) {
-            Ok((paths, modes)) => {
-                let isp = Isp::Available {
-                    device_path: paths[0].clone(),
-                    device_paths: paths,
-                };
-                (isp, modes.iter().map(IspMode::to_mode).collect())
-            }
-            Err(reason) => (Isp::Unavailable { reason }, Vec::new()),
-        };
+        let probe = probe_isp(&self.sys_root, &self.dev_root, backend);
         let cameras = sensors.into_iter().map(|sensor| {
             let timing = sensor
                 .subdev
                 .and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
+            let (isp, modes) = match &probe {
+                Ok(probe) if probe.sizing == IspSizing::Runtime => {
+                    match self.sensor_sizes(sensor.subdev) {
+                        Ok(sizes) => (probe.isp(), runtime_modes(&probe.formats, &sizes)),
+                        Err(reason) => (Isp::Unavailable { reason }, Vec::new()),
+                    }
+                }
+                Ok(probe) => (
+                    probe.isp(),
+                    probe.modes.iter().map(IspMode::to_mode).collect(),
+                ),
+                Err(reason) => (
+                    Isp::Unavailable {
+                        reason: reason.clone(),
+                    },
+                    Vec::new(),
+                ),
+            };
             let model = sensor.name.split(' ').next().unwrap_or_default();
             Peripheral::Camera(Camera {
                 id: format!("camera:{}", sensor.name),
@@ -135,11 +148,11 @@ impl Provider for MipiProvider {
                     subdevices: None,
                     subdevices_available: None,
                 },
-                modes: modes.clone(),
+                modes,
                 source: Source::Mipi(MipiCamera {
                     media_device: sensor.media_device,
                     bus_info: (!sensor.bus_info.is_empty()).then_some(sensor.bus_info),
-                    isp: isp.clone(),
+                    isp,
                     csi_receiver: sensor.csi_receiver,
                     max_fps: timing.as_ref().map(max_fps),
                     sensor_timing: timing,
@@ -199,18 +212,102 @@ fn subdev_devnode(graph: &Graph, entity: u32) -> Option<(u32, u32)> {
         .map(MediaV2Interface::devnode)
 }
 
+/// Each discrete sensor frame size, with the frame intervals the sensor
+/// reports for it.
+type SensorSizes = BTreeMap<(u32, u32), Vec<Interval>>;
+
 impl MipiProvider {
+    /// The `/dev/v4l-subdevN` of the sub-device `devnode`, as
+    /// `/sys/dev/char/<major>:<minor>` names it.
+    fn subdev_path(&self, (major, minor): (u32, u32)) -> Option<PathBuf> {
+        let class = self.sys_root.join(format!("dev/char/{major}:{minor}"));
+        let name = fs::read_link(class).ok()?.file_name()?.to_owned();
+        let subdev = name.to_string_lossy().starts_with("v4l-subdev");
+        subdev.then(|| self.dev_root.join(name))
+    }
+
+    /// The discrete frame sizes of the sensor's source pad over all its
+    /// media-bus codes, each with the frame intervals the sensor reports for
+    /// it (none when its driver lists none). Stepwise and continuous sizes are
+    /// skipped. Fails with the reason when the sizes cannot be listed.
+    fn sensor_sizes(&self, subdev: Option<((u32, u32), u32)>) -> Result<SensorSizes, String> {
+        let found = subdev.and_then(|(devnode, pad)| Some((self.subdev_path(devnode)?, pad)));
+        let (path, pad) = found.ok_or("the sensor has no sub-device to list its frame sizes")?;
+        let node = self.backend.open_subdev(&path);
+        let mut node = node.map_err(|error| describe("could not open", &path, &error))?;
+        let (mut budget, device) = (MAX_DEVICE_ENUMERATIONS, "sensor sub-device");
+        let which = V4L2_SUBDEV_FORMAT_ACTIVE;
+        let ioctl = ("VIDIOC_SUBDEV_ENUM_MBUS_CODE", "media bus code");
+        let query = |index| {
+            let mut value = SubdevMbusCodeEnum {
+                pad,
+                index,
+                which,
+                ..SubdevMbusCodeEnum::default()
+            };
+            node.enum_mbus_code(&mut value).map(|()| value.code)
+        };
+        let codes = node_list(device, &mut budget, &path, ioctl, query, |code| {
+            Some(Continue(code))
+        })?;
+        let mut sizes = SensorSizes::new();
+        for code in codes {
+            let ioctl = ("VIDIOC_SUBDEV_ENUM_FRAME_SIZE", "frame size");
+            let query = |index| {
+                let mut value = SubdevFrameSizeEnum {
+                    index,
+                    pad,
+                    code,
+                    which,
+                    ..SubdevFrameSizeEnum::default()
+                };
+                node.enum_mbus_size(&mut value).map(|()| value)
+            };
+            let listed = node_list(device, &mut budget, &path, ioctl, query, decode_mbus_size)?;
+            for (width, height) in listed.into_iter().flatten() {
+                let ioctl = ("VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL", "frame interval");
+                let query = |index| {
+                    let mut value = SubdevFrameIntervalEnum {
+                        index,
+                        pad,
+                        code,
+                        width,
+                        height,
+                        which,
+                        ..SubdevFrameIntervalEnum::default()
+                    };
+                    match node.enum_mbus_interval(&mut value) {
+                        // A driver without the ioctl reports no intervals.
+                        Err(error) if errno_of(&error) == libc::ENOTTY => {
+                            Err(io::Error::from_raw_os_error(libc::EINVAL))
+                        }
+                        result => result.map(|()| value.interval),
+                    }
+                };
+                let decode = decode_mbus_interval;
+                let intervals = node_list(device, &mut budget, &path, ioctl, query, decode)?;
+                sizes.entry((width, height)).or_default().extend(intervals);
+            }
+        }
+        for intervals in sizes.values_mut() {
+            intervals.sort_by(interval_order);
+            intervals.dedup_by(|left, right| same_interval(left, right));
+        }
+        if sizes.is_empty() {
+            let path = path.display();
+            return Err(format!(
+                "sensor sub-device {path} reported no discrete frame sizes"
+            ));
+        }
+        Ok(sizes)
+    }
+
     /// The timing of the sensor whose sub-device is `devnode`, read from
     /// `/dev/v4l-subdevN` (named by `/sys/dev/char/<major>:<minor>`): the
     /// active format of `pad`, the current pixel rate, and the minimum
     /// horizontal and vertical blanking. `None` when any part is missing.
-    fn sensor_timing(&self, (major, minor): (u32, u32), pad: u32) -> Option<SensorTiming> {
-        let class = self.sys_root.join(format!("dev/char/{major}:{minor}"));
-        let name = fs::read_link(class).ok()?.file_name()?.to_owned();
-        if !name.to_string_lossy().starts_with("v4l-subdev") {
-            return None;
-        }
-        let mut node = self.backend.open_subdev(&self.dev_root.join(name)).ok()?;
+    fn sensor_timing(&self, devnode: (u32, u32), pad: u32) -> Option<SensorTiming> {
+        let mut node = self.backend.open_subdev(&self.subdev_path(devnode)?).ok()?;
         let mut format = SubdevFormat {
             which: V4L2_SUBDEV_FORMAT_ACTIVE,
             pad,
@@ -350,23 +447,105 @@ impl IspMode {
                 .into_iter()
                 .collect(),
             isp_output: Some(true),
+            sensor_mode: None,
+            available: None,
+            reason: None,
         }
     }
 }
 
+/// A camera's modes when the ISP sets its sizes at run time: each ISP format
+/// at each of the sensor's sizes, with the sensor's frame intervals.
+fn runtime_modes(formats: &BTreeSet<String>, sizes: &SensorSizes) -> Vec<Mode> {
+    let mode =
+        |format: &String, (&(width, height), intervals): (&(u32, u32), &Vec<Interval>)| Mode {
+            format: format.clone(),
+            format_description: None,
+            width: Some(width),
+            height: Some(height),
+            size_range: None,
+            frame_intervals: (!intervals.is_empty())
+                .then(|| SizeIntervals {
+                    width,
+                    height,
+                    intervals: intervals.clone(),
+                })
+                .into_iter()
+                .collect(),
+            isp_output: None,
+            sensor_mode: Some(true),
+            available: None,
+            reason: None,
+        };
+    let modes = formats
+        .iter()
+        .flat_map(|format| sizes.iter().map(move |size| mode(format, size)));
+    modes.collect()
+}
+
+/// A discrete sensor frame size, or `None` for a range.
+type SensorSize = Option<(u32, u32)>;
+
+/// A sensor frame size: `Some` when discrete, `None` for a range, which is
+/// skipped; malformed when zero or inverted.
+fn decode_mbus_size(value: SubdevFrameSizeEnum) -> Option<ControlFlow<SensorSize, SensorSize>> {
+    let (width, height) = (value.min_width, value.min_height);
+    let valid = width != 0 && height != 0;
+    let valid = valid && value.max_width >= width && value.max_height >= height;
+    let discrete = value.max_width == width && value.max_height == height;
+    valid.then_some(Continue(discrete.then_some((width, height))))
+}
+
+/// A sensor frame interval, seconds per frame; malformed when zero.
+fn decode_mbus_interval(
+    [numerator, denominator]: [u32; 2],
+) -> Option<ControlFlow<Interval, Interval>> {
+    let valid = numerator != 0 && denominator != 0;
+    valid.then_some(Continue(Interval::Discrete(Fraction {
+        numerator,
+        denominator,
+    })))
+}
+
+/// What the ISP output nodes report: their paths and sizing, and the modes
+/// they share (fixed sizing) or the formats they share (run-time sizing).
+struct IspProbe {
+    paths: Vec<String>,
+    sizing: IspSizing,
+    modes: BTreeSet<IspMode>,
+    formats: BTreeSet<String>,
+}
+
+impl IspProbe {
+    fn isp(&self) -> Isp {
+        Isp::Available {
+            device_path: self.paths[0].clone(),
+            device_paths: self.paths.clone(),
+            sizing: self.sizing,
+        }
+    }
+}
+
+/// One ISP output node: its sizing, formats and, with a fixed table, modes.
+struct IspNode {
+    sizing: IspSizing,
+    formats: BTreeSet<String>,
+    modes: BTreeSet<IspMode>,
+}
+
 /// Every `/sys/class/video4linux` entry named like the ISP output, in sorted
-/// order. Nodes with another card or no discrete size are skipped, the first
-/// failing node makes the ISP unavailable, and several nodes contribute only
-/// the formats and sizes they all share, with the frame intervals they all
-/// report. Returns the nodes' device paths and the modes.
-fn probe_isp(
-    sys_root: &Path,
-    dev_root: &Path,
-    backend: &dyn Backend,
-) -> Result<(Vec<String>, BTreeSet<IspMode>), String> {
+/// order. Nodes with another card, or with a fixed table and no discrete size,
+/// are skipped, and the first failing node makes the ISP unavailable. One node
+/// with run-time sizing makes the ISP's sizing run-time: a node the ISP is
+/// configured for lists a real size, the others 0x0. With fixed tables,
+/// several nodes contribute only the formats and sizes they all share, with
+/// the frame intervals they all report; with run-time sizing, the ISP gives
+/// the formats every node lists.
+fn probe_isp(sys_root: &Path, dev_root: &Path, backend: &dyn Backend) -> Result<IspProbe, String> {
     let class = sys_root.join("class/video4linux");
     let names = sorted_names(&class).map_err(|error| describe("could not read", &class, &error))?;
     let (mut paths, mut common) = (Vec::new(), None::<BTreeSet<IspMode>>);
+    let (mut sizing, mut formats) = (None, None::<BTreeSet<String>>);
     for name in names {
         let entry = class.join(&name);
         let sysfs_name = entry.join("name");
@@ -376,15 +555,27 @@ fn probe_isp(
             continue;
         }
         let path = dev_root.join(&name);
-        let modes = match isp_modes(backend, &path) {
-            Ok(modes) => modes,
+        let node = match isp_node(backend, &path) {
+            Ok(Some(node)) => node,
+            Ok(None) => continue,
             Err(_) if vanished(&entry) => continue,
             Err(error) => return Err(error),
         };
-        if modes.is_empty() {
+        if node.sizing == IspSizing::Fixed && node.modes.is_empty() {
             continue;
         }
+        if sizing != Some(IspSizing::Runtime) {
+            sizing = Some(node.sizing);
+        }
         paths.push(path.to_string_lossy().into_owned());
+        formats = Some(match formats {
+            Some(shared) => &shared & &node.formats,
+            None => node.formats,
+        });
+        if node.sizing == IspSizing::Runtime {
+            continue;
+        }
+        let modes = node.modes;
         common = Some(match common {
             Some(shared) => shared
                 .into_iter()
@@ -406,14 +597,44 @@ fn probe_isp(
             None => modes,
         });
     }
-    match common {
-        None => Err("no Modalix ISP output node was found".to_string()),
-        Some(modes) if modes.is_empty() => {
-            Err("Modalix ISP output nodes reported no common discrete sizes".to_string())
+    let (modes, formats) = (common.unwrap_or_default(), formats.unwrap_or_default());
+    let reason = match sizing {
+        None => "no Modalix ISP output node was found",
+        Some(IspSizing::Runtime) if formats.is_empty() => {
+            "Modalix ISP output nodes reported no common formats"
         }
-        Some(modes) => Ok((paths, modes)),
-    }
+        Some(IspSizing::Fixed) if modes.is_empty() => {
+            "Modalix ISP output nodes reported no common discrete sizes"
+        }
+        Some(sizing) => {
+            return Ok(IspProbe {
+                paths,
+                sizing,
+                modes,
+                formats,
+            })
+        }
+    };
+    Err(reason.to_string())
 }
+
+/// One ISP frame size: `Some` when discrete, `None` for a range. A discrete
+/// 0x0 is what an ISP that sets its sizes at run time lists until it is
+/// configured; any other zero side is malformed, as [`decode_size`] reads it.
+fn decode_isp_size(value: FrmSizeEnum) -> Option<ControlFlow<IspSize, IspSize>> {
+    if value.kind == V4L2_FRMSIZE_TYPE_DISCRETE && value.data[..2] == [0, 0] {
+        return Some(Continue(Some((0, 0))));
+    }
+    let discrete =
+        |(width, height, range): (u32, u32, Option<_>)| range.is_none().then_some((width, height));
+    Some(match decode_size(value)? {
+        Continue(size) => Continue(discrete(size)),
+        ControlFlow::Break(size) => ControlFlow::Break(discrete(size)),
+    })
+}
+
+/// A discrete ISP frame size, or `None` for a range.
+type IspSize = Option<(u32, u32)>;
 
 /// Whether two intervals are the same periods, whatever their fractions'
 /// terms (`1/30` and `2/60` are one interval).
@@ -449,9 +670,10 @@ fn same_interval(left: &Interval, right: &Interval) -> bool {
     }
 }
 
-/// [`enumerate`] one list of the ISP node at `path`, with its failure as the
-/// reason the ISP is unavailable.
-fn isp_list<T, D>(
+/// [`enumerate`] one list of the `device` node at `path`, with its failure as
+/// the reason the camera's modes are unavailable.
+fn node_list<T, D>(
+    device: &str,
     budget: &mut u32,
     path: &Path,
     (ioctl, list): (&str, &str),
@@ -460,23 +682,25 @@ fn isp_list<T, D>(
 ) -> Result<Vec<D>, String> {
     enumerate(budget, list, query, decode).map_err(|error| match error {
         EnumerationError::Malformed(what) => {
-            format!("ISP node {} returned a malformed {what}", path.display())
+            format!("{device} {} returned a malformed {what}", path.display())
         }
         EnumerationError::Failed(error) => describe(&format!("{ioctl} failed for"), path, &error),
     })
 }
 
-/// The modes of one candidate ISP node, opened read-only; empty when its card
-/// is not the ISP output's. Each discrete size carries the frame intervals the
-/// ISP reports for it, if any.
-fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, String> {
+/// One candidate ISP node, opened read-only; `None` when its card is not the
+/// ISP output's. A node that lists a 0x0 size sets its sizes at run time and
+/// gives only its formats: the sizes it reports are only those it is
+/// configured for. Each discrete size of a fixed table carries the frame
+/// intervals the ISP reports for it, if any.
+fn isp_node(backend: &dyn Backend, path: &Path) -> Result<Option<IspNode>, String> {
     let node = backend.open_video(path);
     let mut node = node.map_err(|error| describe("could not open", path, &error))?;
     let mut capability = Capability::default();
     let queried = node.query_capability(&mut capability);
     queried.map_err(|error| describe("VIDIOC_QUERYCAP failed for", path, &error))?;
     if bounded_string(&capability.card) != ISP_CARD_NAME {
-        return Ok(BTreeSet::new());
+        return Ok(None);
     }
     // The formats of every advertised capture API, each enumerated once:
     // sizes and intervals are keyed by pixel format alone.
@@ -502,12 +726,16 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
             };
             node.enum_format(&mut value).map(|()| value.pixelformat)
         };
-        let listed = isp_list(&mut budget, path, ioctl, query, |format| {
+        let listed = node_list("ISP node", &mut budget, path, ioctl, query, |format| {
             Some(Continue(format))
         })?;
         formats.extend(listed);
     }
-    let mut modes = BTreeSet::new();
+    let names = formats
+        .iter()
+        .map(|&format| fourcc_string(format))
+        .collect();
+    let (mut modes, mut unset) = (BTreeSet::new(), false);
     for pixel_format in formats {
         let ioctl = ("VIDIOC_ENUM_FRAMESIZES", "frame size");
         let query = |index| {
@@ -518,9 +746,9 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
             };
             node.enum_frame_size(&mut value).map(|()| value)
         };
-        let sizes = isp_list(&mut budget, path, ioctl, query, decode_size)?;
-        let discrete = sizes.into_iter().filter(|size| size.2.is_none());
-        let sizes: BTreeSet<_> = discrete.map(|(width, height, _)| (width, height)).collect();
+        let sizes = node_list("ISP node", &mut budget, path, ioctl, query, decode_isp_size)?;
+        let mut sizes: BTreeSet<_> = sizes.into_iter().flatten().collect();
+        unset |= sizes.remove(&(0, 0));
         for (width, height) in sizes {
             let ioctl = ("VIDIOC_ENUM_FRAMEINTERVALS", "frame interval");
             let query = |index| {
@@ -539,7 +767,8 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
                     result => result.map(|()| value),
                 }
             };
-            let mut intervals = isp_list(&mut budget, path, ioctl, query, decode_interval)?;
+            let mut intervals =
+                node_list("ISP node", &mut budget, path, ioctl, query, decode_interval)?;
             intervals.sort_by(interval_order);
             intervals.dedup_by(|left, right| same_interval(left, right));
             modes.insert(IspMode {
@@ -550,5 +779,13 @@ fn isp_modes(backend: &dyn Backend, path: &Path) -> Result<BTreeSet<IspMode>, St
             });
         }
     }
-    Ok(modes)
+    let (sizing, modes) = match unset {
+        true => (IspSizing::Runtime, BTreeSet::new()),
+        false => (IspSizing::Fixed, modes),
+    };
+    Ok(Some(IspNode {
+        sizing,
+        formats: names,
+        modes,
+    }))
 }

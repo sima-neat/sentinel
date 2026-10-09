@@ -84,8 +84,14 @@ HTTP 409를 반환합니다. ID 비교와 중지는 동일한 실행 저장소
 | `devices` | 장치당 하나의 객체이며 `type`으로 구분됩니다. `id`는 같은 포트에 다시 연결해도 유지되며 `/dev/videoN` 이름이 되는 일은 없습니다. |
 | `errors` | 최근 스캔에서 실패한 프로바이더, 그리고 `board` 블록 중 완전히 읽을 수 없었던 필드(프로바이더 `board.<field>`, 예: `board.overlays`). 실패한 프로바이더가 마지막으로 성공한 스캔에서 찾은 장치는 `devices`에 그대로 남으며, 실패한 `fw_printenv`는 마지막 오버레이 목록을 유지합니다. `hotplug.unavailable`은 커널 uevent를 수신할 수 없어 새로 고침 시에만 재스캔이 이루어진다는 의미입니다. |
 
-Sentinel은 하드웨어 사실만 보고합니다. 애플리케이션이
-장치나 모드를 지원하는지는 해당 애플리케이션이 결정합니다.
+Sentinel은 하드웨어 사실을 보고하며, 이에 대해 한 가지만 판단합니다. 각 카메라 모드를 이 보드에서
+사용할 수 있는지입니다. 보드의 카메라 오버레이가 카메라 센서를 지원하고(`board.configured_cameras`에
+있는 센서의 `compatible`이 `board.supported_sensors`에 포함됨), 모드가 ISP 출력 크기(`isp_output`)이거나
+ISP가 런타임에 크기를 정하는 경우 센서 크기(`sensor_mode`)이며, 형식이 Neat의 `CameraInput`이 출력하는
+NV12이면 모드는 `available: true`입니다. 그 밖의 모드는 `available: false`와 `reason`을 가지며, USB
+카메라는 사용할 수 없습니다. `available`은 보드가 해당 모드에 맞게 설정되었다는 뜻이지, 모든 파이프라인이
+이를 스트리밍한다는 뜻은 아닙니다. 그 밖의 장치를 애플리케이션이 지원하는지는 해당 애플리케이션이
+결정합니다.
 
 `POST /v1/peripherals/refresh`는 요청 이후에 시작되는 스캔을 기다린 뒤
 해당 카탈로그와 함께 HTTP 200을 반환하며, 이는 `GET`과 동일한 문서입니다. 동시에 들어온

@@ -18,6 +18,7 @@
 | 필드 | 포함 조건 | 의미 |
 | --- | --- | --- |
 | `model` | 디바이스 트리에 모델이 있는 경우 | `/sys/firmware/devicetree/base/model`의 값으로, 첫 NUL 문자까지이며 앞뒤 공백은 제외합니다. 예: `SiMa.ai Modalix SoM 16Gig Board` |
+| `firmware` | `/etc/buildinfo`에 있는 경우 | `/etc/buildinfo`의 `DISTRO_VERSION`으로, 펌웨어 릴리스입니다(예: `2.1.3`). 오류를 설명하는 데만 쓰이며, Sentinel은 릴리스에 따라 동작을 바꾸지 않습니다 |
 | `overlays` | `fw_printenv -n dtbos`가 한 번 성공한 이후 | U-Boot `dtbos` 변수의 항목 중 `.dtbo`로 끝나는 항목을 순서대로 나열합니다. 카메라 오버레이뿐 아니라 U-Boot가 적용하는 모든 오버레이입니다(PCIe, 보안 부팅 및 플래시 오버레이도 같은 변수를 사용함). Sentinel은 어떤 항목이 카메라를 구성하는지 알려 주지 않습니다. 센서를 구성하는 오버레이는 `supported_sensors`에 나열됩니다. 이후 실행이 실패하면 마지막으로 성공한 실행의 목록이 유지되고 실패가 보고됩니다 |
 | `configured_cameras` | 항상 | 라이브 디바이스 트리에서 I2C에 있는 MIPI CSI-2 센서. 비어 있을 수 있음 |
 | `supported_sensors` | 항상 | `/boot` 아래의 오버레이 파일이 구성하는 센서. 비어 있을 수 있음 |
@@ -100,6 +101,7 @@ inode가 바뀔 때만 다시 파싱됩니다. 읽지 못한 파일은
 | `io.open` | `model`, `/sys/bus/i2c/devices`, 장치의 노드, `/boot`, 그 디렉터리 중 하나, 또는 오버레이 파일이 존재하지만 읽을 수 없음 |
 | `io.permission_denied` | 위와 같으나 `EACCES`로 실패함. 또는 `fw_printenv`가 존재하지만 실행할 수 없음(`EACCES` 또는 `EPERM`) |
 | `peripherals.discovery_failed` | `fw_printenv`를 다른 이유로 시작할 수 없거나, 출력을 읽을 수 없거나, 종료 대기에 실패했거나, 제시간에 끝나지 않았거나, `dtbos`가 설정되지 않은 것 이외의 이유로 실패 종료함(이유에는 stderr에 출력한 첫 줄이 표시됨). 오버레이 파일의 형식이 잘못되었거나 1 MiB보다 큼. 목록이 위의 한도 중 하나에서 잘림 |
+| `platform.unsupported` | 프로바이더 `board.firmware`: `firmware`가 Sentinel이 MIPI 카메라를 지원하는 가장 오래된 릴리스인 2.1.2보다 오래된 경우입니다. 해당 펌웨어에는 SiMa 카메라 미디어 드라이버가 없으므로 `camera.mipi`는 카메라를 나열하지 않으며, USB 카메라와 마이크는 계속 나열됩니다 |
 
 각 목록의 문제는 하나의 오류로 보고되며, 첫 번째 문제의 코드와 이유, 그리고 나머지 문제의
 개수가 함께 표시됩니다. `supported_sensors`의 경우 `/boot` 또는 그 디렉터리 중 하나의 목록을
