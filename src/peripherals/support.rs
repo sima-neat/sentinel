@@ -8,7 +8,7 @@
 
 use super::board::Board;
 use super::camera::{Camera, Mode, Source};
-use super::Peripheral;
+use super::{CatalogError, Peripheral};
 
 /// The default of `CameraInputOptions.format` in Neat Core
 /// (`include/nodes/io/CameraInput.h`, unchanged since v0.4.0).
@@ -21,21 +21,33 @@ const FORMAT_REASON: &str = "Neat's CameraInput outputs NV12 only.";
 /// Sets a mode's `available` verdict when query-only discovery can decide it,
 /// and clears any stale verdict when it cannot. `board` is the block read in
 /// the same scan as `devices`.
-pub fn judge(devices: &mut [Peripheral], board: Option<&Board>) {
+pub fn judge(devices: &mut [Peripheral], board: Option<&Board>, errors: &[CatalogError]) {
+    let field_complete = |field| {
+        let provider = format!("board.{field}");
+        !errors.iter().any(|error| error.provider == provider)
+    };
+    let configured_complete = field_complete("configured_cameras");
+    let supported_complete = field_complete("supported_sensors");
     for device in devices {
         let Peripheral::Camera(camera) = device else {
             continue;
         };
-        let camera_reason = camera_reason(camera, board);
+        let camera_verdict = camera_verdict(camera, board, configured_complete, supported_complete);
         for mode in &mut camera.modes {
-            match camera_reason.as_deref() {
-                Some(reason) => set_verdict(mode, Some(false), Some(reason)),
-                None => match mode_verdict(mode) {
+            match &camera_verdict {
+                CameraVerdict::Unavailable(reason) => set_verdict(mode, Some(false), Some(reason)),
+                CameraVerdict::Supported => match mode_verdict(mode) {
                     ModeVerdict::Available => set_verdict(mode, Some(true), None),
                     ModeVerdict::Unavailable(reason) => {
                         set_verdict(mode, Some(false), Some(reason))
                     }
                     ModeVerdict::Unknown => set_verdict(mode, None, None),
+                },
+                CameraVerdict::Unknown => match mode_verdict(mode) {
+                    ModeVerdict::Unavailable(reason) => {
+                        set_verdict(mode, Some(false), Some(reason))
+                    }
+                    ModeVerdict::Available | ModeVerdict::Unknown => set_verdict(mode, None, None),
                 },
             }
         }
@@ -47,16 +59,29 @@ fn set_verdict(mode: &mut Mode, available: Option<bool>, reason: Option<&str>) {
     mode.reason = reason.map(str::to_string);
 }
 
-/// Why none of the camera's modes is available; `None` when the board's
-/// overlays support its sensor. The device tree names a camera's sensor by
-/// its `compatible` string, which the board block links to the camera by id.
-fn camera_reason(camera: &Camera, board: Option<&Board>) -> Option<String> {
+enum CameraVerdict {
+    Supported,
+    Unavailable(String),
+    /// A board field required to prove absence was incomplete. Facts already
+    /// present can still prove support; missing facts cannot prove rejection.
+    Unknown,
+}
+
+/// Whether the board's overlays support the camera's sensor. The device tree
+/// names a sensor by its `compatible` string, which the board block links to
+/// the camera by id.
+fn camera_verdict(
+    camera: &Camera,
+    board: Option<&Board>,
+    configured_complete: bool,
+    supported_complete: bool,
+) -> CameraVerdict {
     let mipi = match camera.source {
-        Source::V4l2(_) => return Some(USB_REASON.to_string()),
+        Source::V4l2(_) => return CameraVerdict::Unavailable(USB_REASON.to_string()),
         Source::Mipi(ref mipi) => mipi,
     };
     let Some(board) = board else {
-        return Some(NO_BOARD_REASON.to_string());
+        return CameraVerdict::Unavailable(NO_BOARD_REASON.to_string());
     };
     let configured = board.configured_cameras.iter();
     let compatible = configured
@@ -65,14 +90,19 @@ fn camera_reason(camera: &Camera, board: Option<&Board>) -> Option<String> {
         .next();
     let sensors = &board.supported_sensors;
     if compatible.is_some_and(|compatible| sensors.iter().any(|s| s.compatible == compatible)) {
-        return None;
+        return CameraVerdict::Supported;
+    }
+    match compatible {
+        None if !configured_complete => return CameraVerdict::Unknown,
+        Some(_) if !supported_complete => return CameraVerdict::Unknown,
+        _ => {}
     }
     let name = match (compatible, camera.model.as_deref()) {
         (Some(compatible), _) => sensor_name(compatible),
         (None, Some(model)) if !model.is_empty() => model.to_uppercase(),
         (None, _) => mipi.camera_name.clone(),
     };
-    Some(format!("{name} is not in this board's camera overlays."))
+    CameraVerdict::Unavailable(format!("{name} is not in this board's camera overlays."))
 }
 
 enum ModeVerdict {
@@ -141,7 +171,7 @@ mod tests {
     #[test]
     fn modes_of_a_supported_sensor_are_available_in_nv12() {
         let (mut devices, board) = example();
-        judge(&mut devices, Some(&board));
+        judge(&mut devices, Some(&board), &[]);
         for (id, mode, available, reason) in verdicts(&devices) {
             let expected = match () {
                 _ if id.starts_with("camera:v4l2:") => Some(USB_REASON),
@@ -168,7 +198,7 @@ mod tests {
         let (devices, board) = example();
         let mipi_reasons = |board: Option<&Board>| {
             let mut devices = devices.clone();
-            judge(&mut devices, board);
+            judge(&mut devices, board, &[]);
             let reasons = verdicts(&devices).into_iter();
             let reasons = reasons.filter(|(id, ..)| !id.starts_with("camera:v4l2:"));
             reasons
@@ -192,6 +222,53 @@ mod tests {
         }];
         assert_eq!(mipi_reasons(Some(&unlinked)), all(not_in));
         assert_eq!(mipi_reasons(None), all(NO_BOARD_REASON));
+    }
+
+    /// A partial board list can prove a match from facts it did read, but an
+    /// absent match cannot prove rejection. Mode-local format failures remain
+    /// decisive while otherwise usable modes have stale verdicts cleared.
+    #[test]
+    fn incomplete_board_fields_do_not_prove_a_camera_is_unsupported() {
+        let (devices, board) = example();
+        let error = |field: &str| CatalogError {
+            provider: format!("board.{field}"),
+            code: "io.discovery_failed".into(),
+            reason: "synthetic partial board scan".into(),
+        };
+        let check_unknown = |board: &Board, error: CatalogError| {
+            let mut devices = devices.clone();
+            judge(&mut devices, Some(board), &[error]);
+            for (id, mode, available, reason) in verdicts(&devices) {
+                if id.starts_with("camera:v4l2:") {
+                    continue;
+                }
+                let expected = match mode.starts_with("NV12 ") {
+                    true => (None, None),
+                    false => (Some(false), Some(FORMAT_REASON)),
+                };
+                assert_eq!((available, reason.as_deref()), expected, "{id} {mode}");
+            }
+        };
+
+        let mut no_configured_camera = board.clone();
+        no_configured_camera.configured_cameras.clear();
+        check_unknown(&no_configured_camera, error("configured_cameras"));
+
+        let mut no_supported_sensor = board.clone();
+        no_supported_sensor.supported_sensors.clear();
+        check_unknown(&no_supported_sensor, error("supported_sensors"));
+
+        // A matching pair is positive evidence even if another entry was
+        // skipped from either list.
+        let mut matched = devices.clone();
+        let errors = [error("configured_cameras"), error("supported_sensors")];
+        judge(&mut matched, Some(&board), &errors);
+        let mipi = verdicts(&matched)
+            .into_iter()
+            .filter(|(id, ..)| !id.starts_with("camera:v4l2:"));
+        assert!(mipi
+            .filter(|(_, mode, ..)| mode.starts_with("NV12 "))
+            .all(|(_, _, available, reason)| available == Some(true) && reason.is_none()));
     }
 
     /// An ISP output size can be available. A run-time sensor size remains
@@ -228,7 +305,11 @@ mod tests {
     fn captured_runtime_sensor_sizes_do_not_get_positive_verdicts() {
         let text = include_str!("fixtures/imx477-platform-3.0-nv12.json");
         let mut catalog: super::super::Catalog = serde_json::from_str(text).unwrap();
-        judge(&mut catalog.devices, catalog.board.as_ref());
+        judge(
+            &mut catalog.devices,
+            catalog.board.as_ref(),
+            &catalog.errors,
+        );
 
         let Peripheral::Camera(camera) = &catalog.devices[0] else {
             panic!("capture's first device is its camera");

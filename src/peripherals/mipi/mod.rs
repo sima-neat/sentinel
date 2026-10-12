@@ -53,6 +53,9 @@ pub const PROVIDER_NAME: &str = "camera.mipi";
 const SIMA_MEDIA_DRIVER: &str = "simaai-v4l2-vid";
 const ISP_SYSFS_NAME: &str = "isp_v4l2-vid-cap-out";
 const ISP_CARD_NAME: &str = "arm-isp-out";
+/// A run-time ISP's format × sensor-size expansion must remain a bounded
+/// catalog just like each ioctl enumeration that feeds it.
+const MAX_RUNTIME_MODES: usize = MAX_ENUMERATION_ENTRIES as usize;
 
 const AVAILABILITY_REASON: &str = "The media controller does not expose a reliable read-only \
 ownership state; discovery does not acquire, configure, or stream from the camera.";
@@ -122,8 +125,11 @@ impl Provider for MipiProvider {
                 .and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
             let (isp, modes) = match &probe {
                 Ok(probe) if probe.sizing == IspSizing::Runtime => {
-                    match self.sensor_sizes(sensor.subdev) {
-                        Ok(sizes) => (probe.isp(), runtime_modes(&probe.formats, &sizes)),
+                    match self
+                        .sensor_sizes(sensor.subdev)
+                        .and_then(|sizes| runtime_modes(&probe.formats, &sizes))
+                    {
+                        Ok(modes) => (probe.isp(), modes),
                         Err(reason) => (Isp::Unavailable { reason }, Vec::new()),
                     }
                 }
@@ -456,7 +462,21 @@ impl IspMode {
 
 /// A camera's modes when the ISP sets its sizes at run time: each ISP format
 /// at each of the sensor's sizes, with the sensor's frame intervals.
-fn runtime_modes(formats: &BTreeSet<String>, sizes: &SensorSizes) -> Vec<Mode> {
+fn runtime_modes(formats: &BTreeSet<String>, sizes: &SensorSizes) -> Result<Vec<Mode>, String> {
+    let Some(count) = formats.len().checked_mul(sizes.len()) else {
+        return Err(format!(
+            "run-time ISP mode count overflowed ({} formats x {} sensor sizes)",
+            formats.len(),
+            sizes.len()
+        ));
+    };
+    if count > MAX_RUNTIME_MODES {
+        return Err(format!(
+            "run-time ISP reported {} formats x {} sensor sizes, more than the {MAX_RUNTIME_MODES}-mode catalog limit",
+            formats.len(),
+            sizes.len()
+        ));
+    }
     let mode =
         |format: &String, (&(width, height), intervals): (&(u32, u32), &Vec<Interval>)| Mode {
             format: format.clone(),
@@ -480,7 +500,7 @@ fn runtime_modes(formats: &BTreeSet<String>, sizes: &SensorSizes) -> Vec<Mode> {
     let modes = formats
         .iter()
         .flat_map(|format| sizes.iter().map(move |size| mode(format, size)));
-    modes.collect()
+    Ok(modes.collect())
 }
 
 /// A discrete sensor frame size, or `None` for a range.

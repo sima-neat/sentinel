@@ -67,6 +67,8 @@ sub-device reports over all its media-bus codes
 `frame_intervals` when the sensor reports intervals for the size
 (`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`). Ranges are skipped. When the sensor's
 sizes cannot be listed, `isp` is unavailable for that camera, with the reason.
+Sentinel publishes at most 1,024 format-size pairs per camera; a larger product
+makes `isp` unavailable instead of allocating an unbounded catalog.
 
 Every fixed-ISP mode also has `available` and, when it is false, `reason`:
 whether the board is set up for that exact output. A non-NV12 sensor mode is

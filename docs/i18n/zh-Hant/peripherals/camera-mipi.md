@@ -63,6 +63,8 @@ DevKit 的 ISP 不會回報任何間隔，因此其模式沒有影格率；`max_
 每個模式都有 `format`、`width`、`height` 與 `sensor_mode: true`；若感測器回報該尺寸的
 影格間隔（`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`），也會帶有 `frame_intervals`。以範圍表示的
 尺寸會略過。若無法列出感測器的尺寸，該攝影機的 `isp` 為不可用，並附上原因。
+Sentinel 每台攝影機最多發布 1,024 個格式與尺寸配對；若乘積更大，`isp` 會變為不可用，
+而不會配置無界限的目錄。
 
 固定 ISP 的每個模式也都帶有 `available`，為 false 時另有 `reason`，表示板子是否已為該
 確切輸出完成設定。非 NV12 感測器模式同樣已知不可用。NV12 `sensor_mode` 不會帶有判斷，

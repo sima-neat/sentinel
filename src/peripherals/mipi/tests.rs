@@ -753,6 +753,32 @@ fn sensor_modes(formats: &[&str], sizes: &[(u32, u32)]) -> Value {
     Value::from_iter(modes)
 }
 
+/// Synthetic boundary coverage: each input enumeration is bounded, and so is
+/// their derived Cartesian product. The check runs before any `Mode` is built.
+#[test]
+fn runtime_mode_product_is_bounded() {
+    let formats = |count| {
+        (0..count)
+            .map(|index| format!("F{index:03}"))
+            .collect::<BTreeSet<_>>()
+    };
+    let sizes = (1..=32)
+        .map(|width| ((width, 1), Vec::new()))
+        .collect::<SensorSizes>();
+
+    assert_eq!(
+        runtime_modes(&formats(32), &sizes).unwrap().len(),
+        MAX_RUNTIME_MODES
+    );
+    let Err(reason) = runtime_modes(&formats(33), &sizes) else {
+        panic!("a product above the catalog limit was accepted");
+    };
+    assert_eq!(
+        reason,
+        "run-time ISP reported 33 formats x 32 sensor sizes, more than the 1024-mode catalog limit"
+    );
+}
+
 /// An ISP node that lists 0x0 sets its sizes at run time: whatever the ISP
 /// lists, at rest or configured for one sensor mode on one node, is not the
 /// camera's modes, and nothing is malformed. One such node is enough, beside

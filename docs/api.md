@@ -93,6 +93,9 @@ support the camera's sensor (the sensor's `compatible` in
 advertises its exact output size (`isp_output`), and its format is NV12, the
 format Neat's `CameraInput` outputs. A mode known not to meet those conditions
 has `available: false` and a `reason`; USB cameras are never available. When the
+board field needed to establish sensor support is incomplete, facts it did
+return can prove support, but a missing match cannot prove rejection; an
+otherwise viable mode has no verdict. When the
 ISP sets sizes at run time, a `sensor_mode` is still a useful candidate, but
 libcamera may adjust it while configuring the camera. Sentinel does not
 configure or stream from cameras during discovery, so an NV12 sensor mode has

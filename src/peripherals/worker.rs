@@ -239,7 +239,7 @@ fn run(
             errors.extend(board_errors);
             board
         });
-        support::judge(&mut devices, board.as_ref());
+        support::judge(&mut devices, board.as_ref(), &errors);
         let mut catalog = shared
             .catalog
             .write()
