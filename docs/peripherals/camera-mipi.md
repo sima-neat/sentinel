@@ -68,8 +68,13 @@ sub-device reports over all its media-bus codes
 (`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`). Ranges are skipped. When the sensor's
 sizes cannot be listed, `isp` is unavailable for that camera, with the reason.
 
-Every mode also has `available` and, when it is false, `reason`: whether the
-board is set up for it. The rule is in [the catalog](../api.md).
+Every fixed-ISP mode also has `available` and, when it is false, `reason`:
+whether the board is set up for that exact output. A non-NV12 sensor mode is
+likewise known to be unavailable. An NV12 `sensor_mode` has no verdict because
+the sensor's listed size is only a candidate: libcamera may adjust it when it
+configures the run-time ISP, and Sentinel's read-only discovery deliberately
+does not configure or stream from the camera. The complete rule is in [the
+catalog](../api.md).
 
 ## Errors
 

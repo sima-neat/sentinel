@@ -64,8 +64,10 @@ DevKit 的 ISP 不會回報任何間隔，因此其模式沒有影格率；`max_
 影格間隔（`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`），也會帶有 `frame_intervals`。以範圍表示的
 尺寸會略過。若無法列出感測器的尺寸，該攝影機的 `isp` 為不可用，並附上原因。
 
-每個模式也都帶有 `available`，為 false 時另有 `reason`，表示板子是否已為該模式完成設定。
-判斷規則請參閱[目錄](../api.md)。
+固定 ISP 的每個模式也都帶有 `available`，為 false 時另有 `reason`，表示板子是否已為該
+確切輸出完成設定。非 NV12 感測器模式同樣已知不可用。NV12 `sensor_mode` 不會帶有判斷，
+因為感測器列出的尺寸只是一個候選值：libcamera 可能在設定執行階段 ISP 時調整它，而 Sentinel
+的唯讀探索刻意不會設定攝影機或從中串流。完整規則請參閱[目錄](../api.md)。
 
 ## 錯誤
 

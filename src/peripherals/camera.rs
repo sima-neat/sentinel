@@ -52,8 +52,9 @@ pub struct Mode {
     /// sets its sizes at run time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensor_mode: Option<bool>,
-    /// Whether the board is set up for this mode; see `support`. Set by the
-    /// catalog, not the provider.
+    /// Whether the board is set up for this exact output mode; see `support`.
+    /// Absent when query-only discovery cannot decide. Set by the catalog, not
+    /// the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub available: Option<bool>,
     /// Why the mode is not available.

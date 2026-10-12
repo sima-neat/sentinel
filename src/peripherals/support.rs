@@ -1,8 +1,10 @@
 //! Whether each camera mode is available on this board: the one judgement
 //! Sentinel makes about devices, so every client shows the same answer. A mode
 //! is available when the board's camera overlays support the camera's sensor,
-//! the ISP outputs the mode's size, and its format is the one Neat's
-//! `CameraInput` outputs. Every other mode carries the reason it is not.
+//! the ISP advertises the exact output size, and its format is the one Neat's
+//! `CameraInput` outputs. A run-time ISP exposes sensor sizes, but query-only
+//! discovery cannot prove that libcamera will preserve one exactly, so those
+//! NV12 modes carry no verdict. Every mode known not to work carries the reason.
 
 use super::board::Board;
 use super::camera::{Camera, Mode, Source};
@@ -16,8 +18,9 @@ const NO_BOARD_REASON: &str = "This board's camera overlays could not be read.";
 const NOT_ISP_SIZE_REASON: &str = "The ISP cannot output this size.";
 const FORMAT_REASON: &str = "Neat's CameraInput outputs NV12 only.";
 
-/// Sets `available`, and `reason` when it is false, on every camera mode.
-/// `board` is the block read in the same scan as `devices`.
+/// Sets a mode's `available` verdict when query-only discovery can decide it,
+/// and clears any stale verdict when it cannot. `board` is the block read in
+/// the same scan as `devices`.
 pub fn judge(devices: &mut [Peripheral], board: Option<&Board>) {
     for device in devices {
         let Peripheral::Camera(camera) = device else {
@@ -25,11 +28,23 @@ pub fn judge(devices: &mut [Peripheral], board: Option<&Board>) {
         };
         let camera_reason = camera_reason(camera, board);
         for mode in &mut camera.modes {
-            let reason = camera_reason.clone().or_else(|| mode_reason(mode));
-            mode.available = Some(reason.is_none());
-            mode.reason = reason;
+            match camera_reason.as_deref() {
+                Some(reason) => set_verdict(mode, Some(false), Some(reason)),
+                None => match mode_verdict(mode) {
+                    ModeVerdict::Available => set_verdict(mode, Some(true), None),
+                    ModeVerdict::Unavailable(reason) => {
+                        set_verdict(mode, Some(false), Some(reason))
+                    }
+                    ModeVerdict::Unknown => set_verdict(mode, None, None),
+                },
+            }
         }
     }
+}
+
+fn set_verdict(mode: &mut Mode, available: Option<bool>, reason: Option<&str>) {
+    mode.available = available;
+    mode.reason = reason.map(str::to_string);
 }
 
 /// Why none of the camera's modes is available; `None` when the board's
@@ -60,15 +75,26 @@ fn camera_reason(camera: &Camera, board: Option<&Board>) -> Option<String> {
     Some(format!("{name} is not in this board's camera overlays."))
 }
 
-/// Why one mode of a camera the overlays support is not available.
-fn mode_reason(mode: &Mode) -> Option<String> {
-    let size = mode.isp_output == Some(true) || mode.sensor_mode == Some(true);
-    let reason = match () {
-        _ if !size => NOT_ISP_SIZE_REASON,
-        _ if mode.format != CAMERAINPUT_FORMAT => FORMAT_REASON,
-        _ => return None,
-    };
-    Some(reason.to_string())
+enum ModeVerdict {
+    Available,
+    Unavailable(&'static str),
+    /// The sensor lists this size, but the run-time ISP and libcamera may
+    /// adjust it. Sentinel does not configure the camera to find out.
+    Unknown,
+}
+
+/// The verdict for one mode of a camera whose overlays support its sensor.
+fn mode_verdict(mode: &Mode) -> ModeVerdict {
+    if mode.isp_output != Some(true) && mode.sensor_mode != Some(true) {
+        return ModeVerdict::Unavailable(NOT_ISP_SIZE_REASON);
+    }
+    if mode.format != CAMERAINPUT_FORMAT {
+        return ModeVerdict::Unavailable(FORMAT_REASON);
+    }
+    match mode.isp_output {
+        Some(true) => ModeVerdict::Available,
+        _ => ModeVerdict::Unknown,
+    }
 }
 
 /// A sensor's name from its device-tree `compatible` string: `sony,imx477` is
@@ -168,17 +194,62 @@ mod tests {
         assert_eq!(mipi_reasons(None), all(NO_BOARD_REASON));
     }
 
-    /// A mode that is neither an ISP output size nor a sensor size is not
-    /// available; a sensor size (Platform 3.0) is.
+    /// An ISP output size can be available. A run-time sensor size remains
+    /// unjudged because libcamera may adjust it when the camera is configured.
     #[test]
-    fn only_isp_or_sensor_sizes_are_available() {
+    fn only_exact_isp_output_sizes_are_available() {
         let mode = |value| serde_json::from_value::<Mode>(value).unwrap();
         let other = mode(json!({"format": "NV12", "width": 640, "height": 480}));
-        assert_eq!(mode_reason(&other).as_deref(), Some(NOT_ISP_SIZE_REASON));
+        assert!(matches!(
+            mode_verdict(&other),
+            ModeVerdict::Unavailable(NOT_ISP_SIZE_REASON)
+        ));
+        let isp = json!({"format": "NV12", "width": 1920, "height": 1080, "isp_output": true});
+        assert!(matches!(mode_verdict(&mode(isp)), ModeVerdict::Available));
         let sensor = json!({"format": "NV12", "width": 2028, "height": 1520, "sensor_mode": true});
-        assert_eq!(mode_reason(&mode(sensor)), None);
+        assert!(matches!(mode_verdict(&mode(sensor)), ModeVerdict::Unknown));
+        let sensor_rgb =
+            json!({"format": "RGB3", "width": 2028, "height": 1520, "sensor_mode": true});
+        assert!(matches!(
+            mode_verdict(&mode(sensor_rgb)),
+            ModeVerdict::Unavailable(FORMAT_REASON)
+        ));
         assert_eq!(sensor_name("sony,imx477"), "IMX477");
         assert_eq!(sensor_name("imx477"), "IMX477");
         assert_eq!(sensor_name("sony,"), "SONY,");
+    }
+
+    /// Reduced from the 3.0.0 B1859 IMX477 catalog captured on 2026-10-08.
+    /// Strict libcamera capture preserved nine sizes but adjusted both
+    /// 4056-wide requests to 4032. Query-only discovery must not claim any of
+    /// the run-time sizes is exact, and in particular must clear the capture's
+    /// former positive verdicts for the two disproven sizes.
+    #[test]
+    fn captured_runtime_sensor_sizes_do_not_get_positive_verdicts() {
+        let text = include_str!("fixtures/imx477-platform-3.0-nv12.json");
+        let mut catalog: super::super::Catalog = serde_json::from_str(text).unwrap();
+        judge(&mut catalog.devices, catalog.board.as_ref());
+
+        let Peripheral::Camera(camera) = &catalog.devices[0] else {
+            panic!("capture's first device is its camera");
+        };
+        assert_eq!(camera.modes.len(), 11);
+        assert!(camera
+            .modes
+            .iter()
+            .all(|mode| mode.available.is_none() && mode.reason.is_none()));
+        let disproven: Vec<_> = camera
+            .modes
+            .iter()
+            .filter(|mode| mode.width == Some(4056))
+            .map(|mode| (mode.width, mode.height, mode.available))
+            .collect();
+        assert_eq!(
+            disproven,
+            [
+                (Some(4056), Some(2160), None),
+                (Some(4056), Some(3040), None)
+            ]
+        );
     }
 }
