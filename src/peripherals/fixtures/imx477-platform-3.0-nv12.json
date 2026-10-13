@@ -1,0 +1,62 @@
+{
+  "revision": 2142058373902518,
+  "observed_at": "2026-10-08T23:05:10.100007991Z",
+  "board": {
+    "model": "SiMa.ai Modalix SoM 16Gig Board",
+    "firmware": "3.0.0",
+    "overlays": ["modalix-som-waveshare-ARDU-IMX477-1CAM.dtbo"],
+    "configured_cameras": [{
+      "compatible": "sony,imx477",
+      "dt_node": "/i2cmux@0/i2c@0/imx477@1a",
+      "i2c_device": "5-001a",
+      "data_lanes": 2,
+      "camera_id": "camera:imx477 5-001a"
+    }],
+    "supported_sensors": [{
+      "compatible": "sony,imx477",
+      "overlays": ["modalix-som-waveshare-ARDU-IMX477-1CAM.dtbo"]
+    }]
+  },
+  "devices": [{
+    "type": "camera",
+    "id": "camera:imx477 5-001a",
+    "model": "imx477",
+    "availability": {
+      "state": "unknown",
+      "reason": "The media controller does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."
+    },
+    "modes": [
+      {"format": "NV12", "width": 1280, "height": 990, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 1332, "height": 990, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 1920, "height": 1080, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 2028, "height": 1080, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 2028, "height": 1520, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 2048, "height": 1080, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 3840, "height": 2160, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 3968, "height": 3040, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 4032, "height": 3040, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 4056, "height": 2160, "sensor_mode": true, "available": true},
+      {"format": "NV12", "width": 4056, "height": 3040, "sensor_mode": true, "available": true}
+    ],
+    "backend": "mipi",
+    "camera_name": "imx477 5-001a",
+    "media_device": "/dev/media0",
+    "bus_info": "platform:csi2video@1",
+    "isp": {
+      "state": "available",
+      "device_path": "/dev/video0out",
+      "device_paths": ["/dev/video0out"],
+      "sizing": "runtime"
+    },
+    "csi_receiver": "csidev-40c3000.csi",
+    "sensor_timing": {
+      "pixel_rate": 840000000,
+      "hblank_min": 4012,
+      "vblank_min": 48,
+      "width": 1920,
+      "height": 1080
+    },
+    "max_fps": 125.54
+  }],
+  "errors": []
+}

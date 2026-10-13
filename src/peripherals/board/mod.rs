@@ -62,6 +62,10 @@ pub struct Board {
     /// The device tree's `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The firmware release, `DISTRO_VERSION` in `/etc/buildinfo`, e.g.
+    /// `2.1.3`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
     /// The `.dtbo` entries of the U-Boot `dtbos` variable, in order: every
     /// overlay U-Boot applies, whatever it configures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +105,8 @@ pub struct SupportedSensor {
 pub struct BoardProbe {
     sys_root: PathBuf,
     boot_root: PathBuf,
+    /// `buildinfo` in the `etc` directory beside the boot directory.
+    buildinfo: PathBuf,
     /// The program and arguments that print the overlay list.
     overlay_command: Vec<String>,
     timeout: Duration,
@@ -131,11 +137,14 @@ impl BoardProbe {
         Self::with_roots("/sys", "/boot")
     }
 
-    /// Read a sysfs tree and a boot directory rooted elsewhere.
+    /// Read a sysfs tree and a boot directory rooted elsewhere, and the
+    /// `etc/buildinfo` beside that boot directory.
     pub fn with_roots(sys_root: impl Into<PathBuf>, boot_root: impl Into<PathBuf>) -> Self {
+        let boot_root = boot_root.into();
         Self {
             sys_root: sys_root.into(),
-            boot_root: boot_root.into(),
+            buildinfo: boot_root.with_file_name("etc").join("buildinfo"),
+            boot_root,
             overlay_command: ["fw_printenv", "-n", "dtbos"].map(String::from).to_vec(),
             timeout: FW_PRINTENV_TIMEOUT,
             last_overlay_list: None,
@@ -160,6 +169,16 @@ impl BoardProbe {
             report("model", error);
             None
         });
+        let firmware = read_firmware(&self.buildinfo).unwrap_or_else(|error| {
+            report("firmware", error);
+            None
+        });
+        if let Some(reason) = firmware.as_deref().and_then(unsupported_firmware) {
+            report(
+                "firmware",
+                ProviderError::new(CODE_PLATFORM_UNSUPPORTED, reason),
+            );
+        }
         // A failed run (a timeout, e.g. while fw_setenv holds the lock)
         // keeps the last list, so the field does not flicker.
         let overlays = match overlay_list(&self.overlay_command, self.timeout, &self.unreaped) {
@@ -183,6 +202,7 @@ impl BoardProbe {
         }
         let board = Board {
             model,
+            firmware,
             overlays,
             configured_cameras,
             supported_sensors,
@@ -270,6 +290,58 @@ impl Skipped {
 }
 
 /// The device tree's `model`, NUL-terminated; `None` without a device tree.
+/// The oldest firmware release Sentinel supports for MIPI cameras. Older
+/// releases (2.0) have no SiMa camera media driver.
+const OLDEST_SUPPORTED_FIRMWARE: [u32; 3] = [2, 1, 2];
+const CODE_PLATFORM_UNSUPPORTED: &str = "platform.unsupported";
+
+/// `/etc/buildinfo` is a few hundred bytes.
+const MAX_BUILDINFO_BYTES: u64 = 4096;
+
+/// `DISTRO_VERSION` from `buildinfo`; `None` when the file is missing or does
+/// not name a release. A file that exists but cannot be read is an error, so
+/// a missing unsupported-platform explanation is not silent.
+fn read_firmware(buildinfo: &Path) -> Result<Option<String>, ProviderError> {
+    let bytes = match dt::read_bounded(buildinfo, MAX_BUILDINFO_BYTES + 1) {
+        Ok(bytes) => bytes,
+        Err(error) if disappeared(errno_of(&error)) || errno_of(&error) == libc::ENOTDIR => {
+            return Ok(None)
+        }
+        Err(error) => return Err(io_error("failed to read", buildinfo, &error, false)),
+    };
+    if bytes.len() as u64 > MAX_BUILDINFO_BYTES {
+        let reason = format!(
+            "{} is larger than {MAX_BUILDINFO_BYTES} bytes",
+            buildinfo.display()
+        );
+        return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let value = text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "DISTRO_VERSION").then(|| value.trim().to_string())
+    });
+    Ok(value.filter(|value| !value.is_empty()))
+}
+
+/// Why MIPI cameras are missing on `firmware`, when it is older than
+/// [`OLDEST_SUPPORTED_FIRMWARE`]; `None` for a newer or unparsable release.
+fn unsupported_firmware(firmware: &str) -> Option<String> {
+    let mut parts = firmware.split('.').map(|part| {
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().ok()
+    });
+    let release: Vec<u32> = parts.by_ref().take(3).collect::<Option<_>>()?;
+    let release: Vec<u32> = release.into_iter().chain([0, 0]).take(3).collect();
+    (release.as_slice() < OLDEST_SUPPORTED_FIRMWARE.as_slice()).then(|| {
+        format!(
+            "Firmware {firmware} is older than 2.1.2, the oldest release Sentinel supports for \
+             MIPI cameras, so none are listed; USB cameras and microphones still are. Update the \
+             board's firmware to 2.1.2 or newer."
+        )
+    })
+}
+
 fn read_model(base: &Path) -> Result<Option<String>, ProviderError> {
     let path = base.join("model");
     match dt::read_bounded(&path, dt::MAX_PROPERTY_BYTES) {
@@ -476,9 +548,20 @@ fn configured_cameras(
             return (Vec::new(), Some(error));
         }
     };
-    // Without a live device tree no device has a node in it.
-    let Ok(base) = fs::canonicalize(base) else {
-        return (Vec::new(), None);
+    // Without a live device tree no device has a node in it. One that exists
+    // but cannot be resolved is an error, so an empty list is not mistaken
+    // for a complete one.
+    let base = match fs::canonicalize(base) {
+        Ok(base) => base,
+        Err(error) if disappeared(errno_of(&error)) || errno_of(&error) == libc::ENOTDIR => {
+            return (Vec::new(), None)
+        }
+        Err(error) => {
+            return (
+                Vec::new(),
+                Some(io_error("failed to resolve", base, &error, false)),
+            )
+        }
     };
     let mut skipped = Skipped::default();
     if more {

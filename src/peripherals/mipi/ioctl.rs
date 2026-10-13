@@ -1,6 +1,8 @@
 //! The read-only ioctls of MIPI discovery: `MEDIA_IOC_DEVICE_INFO` and
 //! `MEDIA_IOC_G_TOPOLOGY` on media devices, and `VIDIOC_SUBDEV_G_FMT`,
-//! `VIDIOC_QUERY_EXT_CTRL` and `VIDIOC_G_EXT_CTRLS` on the sensor sub-device.
+//! `VIDIOC_SUBDEV_ENUM_MBUS_CODE`, `VIDIOC_SUBDEV_ENUM_FRAME_SIZE`,
+//! `VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`, `VIDIOC_QUERY_EXT_CTRL` and
+//! `VIDIOC_G_EXT_CTRLS` on the sensor sub-device.
 //! Nothing here can set up links, set a format or control, or stream. The
 //! structures mirror `<linux/media.h>`, `<linux/v4l2-subdev.h>` and
 //! `<linux/videodev2.h>` byte for byte; the V4L2 node queries are the shared
@@ -192,6 +194,51 @@ pub struct QueryExtCtrl {
     pub reserved: [u32; 32],
 }
 
+/// `struct v4l2_subdev_mbus_code_enum`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SubdevMbusCodeEnum {
+    pub pad: u32,
+    pub index: u32,
+    pub code: u32,
+    pub which: u32,
+    pub flags: u32,
+    pub stream: u32,
+    pub reserved: [u32; 6],
+}
+
+/// `struct v4l2_subdev_frame_size_enum`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SubdevFrameSizeEnum {
+    pub index: u32,
+    pub pad: u32,
+    pub code: u32,
+    pub min_width: u32,
+    pub max_width: u32,
+    pub min_height: u32,
+    pub max_height: u32,
+    pub which: u32,
+    pub stream: u32,
+    pub reserved: [u32; 7],
+}
+
+/// `struct v4l2_subdev_frame_interval_enum`; `interval` is a
+/// `struct v4l2_fract`, seconds per frame.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SubdevFrameIntervalEnum {
+    pub index: u32,
+    pub pad: u32,
+    pub code: u32,
+    pub width: u32,
+    pub height: u32,
+    pub interval: [u32; 2],
+    pub which: u32,
+    pub stream: u32,
+    pub reserved: [u32; 7],
+}
+
 /// `struct v4l2_ext_control` (declared `packed`); `value` is the `value64`
 /// member of its union.
 #[repr(C, packed)]
@@ -218,7 +265,11 @@ struct ExtControls {
 const IOWR: u32 = IOC_READ | IOC_WRITE;
 const MEDIA_IOC_DEVICE_INFO: u32 = ioc(IOWR, b'|', 0x00, size_of::<MediaDeviceInfo>());
 const MEDIA_IOC_G_TOPOLOGY: u32 = ioc(IOWR, b'|', 0x04, size_of::<MediaV2Topology>());
+const VIDIOC_SUBDEV_ENUM_MBUS_CODE: u32 = ioc(IOWR, b'V', 2, size_of::<SubdevMbusCodeEnum>());
 const VIDIOC_SUBDEV_G_FMT: u32 = ioc(IOWR, b'V', 4, size_of::<SubdevFormat>());
+const VIDIOC_SUBDEV_ENUM_FRAME_SIZE: u32 = ioc(IOWR, b'V', 74, size_of::<SubdevFrameSizeEnum>());
+const VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL: u32 =
+    ioc(IOWR, b'V', 75, size_of::<SubdevFrameIntervalEnum>());
 const VIDIOC_G_EXT_CTRLS: u32 = ioc(IOWR, b'V', 71, size_of::<ExtControls>());
 const VIDIOC_QUERY_EXT_CTRL: u32 = ioc(IOWR, b'V', 103, size_of::<QueryExtCtrl>());
 
@@ -237,6 +288,17 @@ const _: () = assert!(
         && size_of::<MediaV2Link>() == 40
 );
 const _: () = assert!(size_of::<SubdevFormat>() == 88 && size_of::<MbusFrameFmt>() == 48);
+const _: () = assert!(
+    size_of::<SubdevMbusCodeEnum>() == 48
+        && size_of::<SubdevFrameSizeEnum>() == 64
+        && size_of::<SubdevFrameIntervalEnum>() == 64
+        && offset_of!(SubdevFrameIntervalEnum, which) == 28
+);
+const _: () = assert!(
+    VIDIOC_SUBDEV_ENUM_MBUS_CODE == 0xc030_5602
+        && VIDIOC_SUBDEV_ENUM_FRAME_SIZE == 0xc040_564a
+        && VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL == 0xc040_564b
+);
 const _: () = assert!(size_of::<QueryExtCtrl>() == 232 && offset_of!(QueryExtCtrl, minimum) == 40);
 const _: () = assert!(
     size_of::<ExtControls>() == 32
@@ -269,6 +331,12 @@ pub trait MediaNode {
 pub trait SubdevNode {
     /// `VIDIOC_SUBDEV_G_FMT`.
     fn format(&mut self, value: &mut SubdevFormat) -> io::Result<()>;
+    /// `VIDIOC_SUBDEV_ENUM_MBUS_CODE`.
+    fn enum_mbus_code(&mut self, value: &mut SubdevMbusCodeEnum) -> io::Result<()>;
+    /// `VIDIOC_SUBDEV_ENUM_FRAME_SIZE`.
+    fn enum_mbus_size(&mut self, value: &mut SubdevFrameSizeEnum) -> io::Result<()>;
+    /// `VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`.
+    fn enum_mbus_interval(&mut self, value: &mut SubdevFrameIntervalEnum) -> io::Result<()>;
     /// `VIDIOC_QUERY_EXT_CTRL` of `value.id`.
     fn query_control(&mut self, value: &mut QueryExtCtrl) -> io::Result<()>;
     /// The current value of one 64-bit control (`VIDIOC_G_EXT_CTRLS`).
@@ -338,6 +406,24 @@ impl SubdevNode for SystemNode {
     fn format(&mut self, value: &mut SubdevFormat) -> io::Result<()> {
         // SAFETY: VIDIOC_SUBDEV_G_FMT encodes `struct v4l2_subdev_format`.
         unsafe { self.ioctl(VIDIOC_SUBDEV_G_FMT, value) }
+    }
+
+    fn enum_mbus_code(&mut self, value: &mut SubdevMbusCodeEnum) -> io::Result<()> {
+        // SAFETY: VIDIOC_SUBDEV_ENUM_MBUS_CODE encodes
+        // `struct v4l2_subdev_mbus_code_enum`.
+        unsafe { self.ioctl(VIDIOC_SUBDEV_ENUM_MBUS_CODE, value) }
+    }
+
+    fn enum_mbus_size(&mut self, value: &mut SubdevFrameSizeEnum) -> io::Result<()> {
+        // SAFETY: VIDIOC_SUBDEV_ENUM_FRAME_SIZE encodes
+        // `struct v4l2_subdev_frame_size_enum`.
+        unsafe { self.ioctl(VIDIOC_SUBDEV_ENUM_FRAME_SIZE, value) }
+    }
+
+    fn enum_mbus_interval(&mut self, value: &mut SubdevFrameIntervalEnum) -> io::Result<()> {
+        // SAFETY: VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL encodes
+        // `struct v4l2_subdev_frame_interval_enum`.
+        unsafe { self.ioctl(VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL, value) }
     }
 
     fn query_control(&mut self, value: &mut QueryExtCtrl) -> io::Result<()> {

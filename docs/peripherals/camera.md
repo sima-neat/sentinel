@@ -46,8 +46,8 @@ single- and multi-planar listings of a format are merged.
 | `frame_intervals` | always | Per probed size (`width`, `height`), every interval the device advertises: `{"type": "discrete", "numerator", "denominator"}` or `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 A size range is probed at its minimum and maximum size. A size without frame
-intervals has no mode. Sentinel does not say whether a mode is supported;
-the application that uses the camera decides that.
+intervals has no mode. Every mode also has `available: false` and a `reason`:
+USB cameras have no camera overlay on the board (see [the catalog](../api.md)).
 
 ## Limits and errors
 

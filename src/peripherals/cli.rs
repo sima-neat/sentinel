@@ -199,6 +199,7 @@ mod tests {
             observed_at: Some(Utc::now()),
             board: Some(Board {
                 model: Some("SiMa.ai Modalix SoM 16Gig Board".into()),
+                firmware: Some("2.1.3".into()),
                 overlays: Some(vec!["a.dtbo".into(), "b.dtbo".into()]),
                 configured_cameras: vec![
                     camera("5-001a", Some("camera:imx477 5-001a")),
@@ -226,6 +227,7 @@ mod tests {
 
         let empty = Board {
             model: None,
+            firmware: None,
             overlays: None,
             configured_cameras: Vec::new(),
             supported_sensors: Vec::new(),

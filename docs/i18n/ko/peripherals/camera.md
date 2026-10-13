@@ -46,8 +46,8 @@
 | `frame_intervals` | 항상 | 프로브한 크기(`width`, `height`)마다 장치가 알리는 모든 간격: `{"type": "discrete", "numerator", "denominator"}` 또는 `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 크기 범위는 최소 크기와 최대 크기에서 프로브합니다. 프레임
-간격이 없는 크기에는 모드가 없습니다. Sentinel은 모드의 지원 여부를 판단하지 않습니다.
-이는 카메라를 사용하는 애플리케이션이 결정합니다.
+간격이 없는 크기에는 모드가 없습니다. 각 모드에는 `available: false`와 `reason`도 있습니다.
+USB 카메라에는 보드의 카메라 오버레이가 없기 때문입니다([카탈로그](../api.md) 참조).
 
 ## 제한 및 오류
 

@@ -84,8 +84,18 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 | `devices` | 每個裝置一個物件，以 `type` 標記類型。`id` 在重新插拔至同一連接埠後保持不變，且絕不會是 `/dev/videoN` 名稱。 |
 | `errors` | 在最近一次掃描中失敗的提供者，以及 `board` 區塊中無法完整讀取的欄位（提供者 `board.<field>`，例如 `board.overlays`）。失敗的提供者在上次成功掃描中找到的裝置會保留在 `devices` 中，而失敗的 `fw_printenv` 會保留最後的 overlay 清單。`hotplug.unavailable` 表示無法接收核心 uevent，因此只有在重新整理時才會重新掃描。 |
 
-Sentinel 只回報硬體事實。應用程式是否支援某個
-裝置或模式，由該應用程式決定。
+Sentinel 回報硬體事實，並在唯讀介面足以判斷時只做一項判斷：每個攝影機模式在此板上
+是否可用。當板子的攝影機覆蓋層支援攝影機的感測器（`board.configured_cameras` 中該
+感測器的 `compatible` 列於 `board.supported_sensors`）、ISP 輸出其確切尺寸，
+且格式為 Neat 的 `CameraInput` 輸出的 NV12 時，模式為 `available: true`。
+ISP 會以確切尺寸輸出它列出的模式（`isp_output`），或在執行階段決定尺寸時，
+輸出它原封不動作為 RAW 輸入的感測器模式（`isp_input`）。已知不符合這些條件的模式為 `available: false` 並附上 `reason`；
+USB 攝影機一律不可用。若判定感測器支援所需的板子欄位不完整，已讀取的事實仍可證明支援，
+但找不到相符項目不能證明不支援；其他條件皆符合的模式不會帶有判斷。
+其他 NV12 `sensor_mode` 若沒有任何至少同樣大的 `isp_input` 模式，就為不可用，
+因為 libcamera 會改變其尺寸；若有這樣的模式，則不會帶有判斷：libcamera 可能將較大的模式
+裁切成該尺寸，而 Sentinel 不設定攝影機就無法確認這一點，且探索絕不會設定攝影機或從中串流。
+應用程式是否支援未判定的模式或其他裝置，由該應用程式決定。
 
 `POST /v1/peripherals/refresh` 會等待一次在該請求之後開始的掃描，
 並以 HTTP 200 傳回該目錄，與 `GET` 的文件相同。

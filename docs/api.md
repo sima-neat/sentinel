@@ -85,8 +85,25 @@ result:
 | `devices` | One object per device, tagged by `type`. `id` is stable across replugs into the same port and is never a `/dev/videoN` name. |
 | `errors` | Providers that failed in the latest scan, and fields of the `board` block that could not be read completely (provider `board.<field>`, for example `board.overlays`). A failed provider's devices from its last successful scan stay in `devices`, and a failed `fw_printenv` keeps the last overlay list. `hotplug.unavailable` means kernel uevents cannot be received, so rescans happen only on refresh. |
 
-Sentinel reports hardware facts only. Whether an application supports a
-device or mode is decided by that application.
+Sentinel reports hardware facts and makes one judgement about them when its
+read-only interfaces can decide it: whether each camera mode is available on
+this board. A mode has `available: true` when the board's camera overlays
+support the camera's sensor (the sensor's `compatible` in
+`board.configured_cameras` is listed in `board.supported_sensors`), the ISP
+outputs its exact size, and its format is NV12, the format Neat's
+`CameraInput` outputs. The ISP outputs the exact size of a mode it lists
+(`isp_output`), or, when it sets sizes at run time, of a sensor mode it takes
+as RAW input unchanged (`isp_input`). A mode known not to meet those conditions
+has `available: false` and a `reason`; USB cameras are never available. When the
+board field needed to establish sensor support is incomplete, facts it did
+return can prove support, but a missing match cannot prove rejection; an
+otherwise viable mode has no verdict. Another NV12
+`sensor_mode` is unavailable when no `isp_input` mode is at least as large,
+because libcamera would change its size, and has no verdict when one is: libcamera
+may crop the larger mode to it, which Sentinel cannot confirm without
+configuring the camera, and discovery never configures or streams from cameras.
+Whether an application supports an unjudged mode or any other device is
+decided by that application.
 
 `POST /v1/peripherals/refresh` waits for a scan that starts after the request
 and returns HTTP 200 with that catalog, the same document as `GET`. Concurrent
