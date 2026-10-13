@@ -169,7 +169,10 @@ impl BoardProbe {
             report("model", error);
             None
         });
-        let firmware = read_firmware(&self.buildinfo);
+        let firmware = read_firmware(&self.buildinfo).unwrap_or_else(|error| {
+            report("firmware", error);
+            None
+        });
         if let Some(reason) = firmware.as_deref().and_then(unsupported_firmware) {
             report(
                 "firmware",
@@ -292,16 +295,33 @@ impl Skipped {
 const OLDEST_SUPPORTED_FIRMWARE: [u32; 3] = [2, 1, 2];
 const CODE_PLATFORM_UNSUPPORTED: &str = "platform.unsupported";
 
-/// `DISTRO_VERSION` from `buildinfo`; `None` when it cannot be read. It only
-/// explains missing cameras, so it is never an error of its own.
-fn read_firmware(buildinfo: &Path) -> Option<String> {
-    let bytes = dt::read_bounded(buildinfo, 4096).ok()?;
+/// `/etc/buildinfo` is a few hundred bytes.
+const MAX_BUILDINFO_BYTES: u64 = 4096;
+
+/// `DISTRO_VERSION` from `buildinfo`; `None` when the file is missing or does
+/// not name a release. A file that exists but cannot be read is an error, so
+/// a missing unsupported-platform explanation is not silent.
+fn read_firmware(buildinfo: &Path) -> Result<Option<String>, ProviderError> {
+    let bytes = match dt::read_bounded(buildinfo, MAX_BUILDINFO_BYTES + 1) {
+        Ok(bytes) => bytes,
+        Err(error) if disappeared(errno_of(&error)) || errno_of(&error) == libc::ENOTDIR => {
+            return Ok(None)
+        }
+        Err(error) => return Err(io_error("failed to read", buildinfo, &error, false)),
+    };
+    if bytes.len() as u64 > MAX_BUILDINFO_BYTES {
+        let reason = format!(
+            "{} is larger than {MAX_BUILDINFO_BYTES} bytes",
+            buildinfo.display()
+        );
+        return Err(ProviderError::new(CODE_DISCOVERY_FAILED, reason));
+    }
     let text = String::from_utf8_lossy(&bytes);
     let value = text.lines().find_map(|line| {
         let (key, value) = line.split_once('=')?;
         (key.trim() == "DISTRO_VERSION").then(|| value.trim().to_string())
     });
-    value.filter(|value| !value.is_empty())
+    Ok(value.filter(|value| !value.is_empty()))
 }
 
 /// Why MIPI cameras are missing on `firmware`, when it is older than

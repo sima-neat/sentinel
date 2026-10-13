@@ -167,6 +167,7 @@ pub(crate) fn mipi_camera(name: &str) -> Peripheral {
             isp: Isp::Unavailable {
                 reason: "test".into(),
             },
+            modes_error: None,
             csi_receiver: None,
             sensor_timing: None,
             max_fps: None,
@@ -325,6 +326,39 @@ fn firmware_older_than_2_1_2_says_why_mipi_cameras_are_missing() {
         let (board, errors) = scan(&mut probe, &[]);
         assert_eq!(board.get("firmware").and_then(|v| v.as_str()), firmware);
         assert_eq!(errors, expected, "{firmware:?}");
+    }
+}
+
+/// A `buildinfo` that exists but cannot be read is an error, not a missing
+/// release that would hide the unsupported-platform explanation.
+#[test]
+fn an_unreadable_buildinfo_is_reported() {
+    // `None` makes `buildinfo` a directory, which cannot be read even as root.
+    let oversized = format!("DISTRO_VERSION = 2.0.0\n{}", "#".repeat(4096));
+    let cases = [
+        (
+            Some(oversized),
+            "peripherals.discovery_failed",
+            "is larger than 4096 bytes",
+        ),
+        (None, "io.open", "failed to read"),
+    ];
+    for (file, code, reason) in cases {
+        let root = TempDir::new();
+        devkit(root.path());
+        fs::create_dir_all(root.path().join("etc")).unwrap();
+        let path = root.path().join("etc/buildinfo");
+        match file {
+            Some(file) => fs::write(path, file).unwrap(),
+            None => fs::create_dir(path).unwrap(),
+        }
+        let mut probe = probe(root.path(), &format!("echo '{OVERLAY}'"));
+        let (board, errors) = scan(&mut probe, &[]);
+        assert!(board.get("firmware").is_none());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].provider, "board.firmware");
+        assert_eq!(errors[0].code, code);
+        assert!(errors[0].reason.contains(reason), "{}", errors[0].reason);
     }
 }
 

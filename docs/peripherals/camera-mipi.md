@@ -29,6 +29,7 @@ error that names both media devices instead.
 | `media_device` | always | `/dev/mediaN` (routing only; not identity) |
 | `bus_info` | when reported | The media device bus from `MEDIA_IOC_DEVICE_INFO`, e.g. `platform:csi2video@1` |
 | `isp` | always | `{"state": "available", "device_path", "device_paths", "sizing"}`, or `{"state": "unavailable", "reason"}` with `modes: []` |
+| `modes_error` | when `isp` is available but the modes cannot be listed | Why `modes` is `[]`: the sensor's sizes could not be listed, or there are too many |
 | `csi_receiver` | when linked | The entity the sensor's source pad links to, e.g. `csidev-40c3000.csi` |
 | `sensor_timing` | when readable | `pixel_rate` (pixels/s), `hblank_min`, `vblank_min`, `width`, `height`, read from the sensor's `/dev/v4l-subdevN` |
 | `max_fps` | with `sensor_timing` | `pixel_rate / ((width + hblank_min) * (height + vblank_min))`, to two decimals |
@@ -63,20 +64,33 @@ configured for (0x0 at rest), so those sizes are not used. The modes are then
 the formats every ISP node lists, at each discrete frame size the sensor's
 sub-device reports over all its media-bus codes
 (`VIDIOC_SUBDEV_ENUM_MBUS_CODE`, `VIDIOC_SUBDEV_ENUM_FRAME_SIZE`). Each has
-`format`, `width`, `height` and `sensor_mode: true`, and carries
+`format`, `width`, `height`, `sensor_mode: true` and `isp_input`, and carries
 `frame_intervals` when the sensor reports intervals for the size
 (`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`). Ranges are skipped. When the sensor's
-sizes cannot be listed, `isp` is unavailable for that camera, with the reason.
-Sentinel publishes at most 1,024 format-size pairs per camera; a larger product
-makes `isp` unavailable instead of allocating an unbounded catalog.
+sizes cannot be listed, the camera has `modes: []` and `modes_error` says why;
+`isp` still reports the ISP. Sentinel publishes at most 1,024 format-size
+pairs per camera; a larger product is reported the same way instead of
+allocating an unbounded catalog.
+
+`isp_input` is `true` when the sensor lists the size under a 12-bit Bayer
+media-bus code (`MEDIA_BUS_FMT_S{BGGR,GBRG,GRBG,RGGB}12_1X12`), its width is a
+multiple of 64, its height is even, and it is at most 4096x3072. SiMa's
+libcamera handler configures the sensor in 12-bit RAW, the ISP's RAW DMA needs
+a 32-byte line stride (a 12-bit line of a multiple of 64 pixels), and the ISP
+has no scaler, so it outputs such a mode at its own size. libcamera narrows a
+size that does not meet these limits (the IMX477's 4056x3040 streams at
+4032x3040 on Platform 3.0).
 
 Every fixed-ISP mode also has `available` and, when it is false, `reason`:
 whether the board is set up for that exact output. A non-NV12 sensor mode is
-likewise known to be unavailable. An NV12 `sensor_mode` has no verdict because
-the sensor's listed size is only a candidate: libcamera may adjust it when it
-configures the run-time ISP, and Sentinel's read-only discovery deliberately
-does not configure or stream from the camera. The complete rule is in [the
-catalog](../api.md).
+likewise known to be unavailable. An NV12 `sensor_mode` with `isp_input: true`
+is available. Another is unavailable when no `isp_input` mode is at least as
+large, and has no verdict when one is: libcamera may crop that larger mode to
+it, which Sentinel's read-only discovery cannot confirm without configuring or
+streaming from the camera. On the IMX477 on Platform 3.0 this makes 1280x990,
+1920x1080, 2048x1080, 3840x2160, 3968x3040 and 4032x3040 available, the two
+4056-wide sizes unavailable, and 1332x990, 2028x1080 and 2028x1520 unjudged.
+The complete rule is in [the catalog](../api.md).
 
 ## Errors
 
@@ -87,7 +101,8 @@ catalog](../api.md).
 | `peripherals.discovery_failed` | An unnamed sensor entity, or two sensors with the same name (their ids would collide) |
 
 A device that disappears mid-scan is skipped. ISP failures never fail the scan;
-they make `isp` unavailable with the reason.
+they make `isp` unavailable with the reason. A sensor whose sizes cannot be
+listed has `modes_error` instead.
 
 ## Example
 

@@ -742,11 +742,11 @@ fn runtime_isp(sizes: &[(u32, u32)]) -> FakeVideoNode {
 }
 
 /// The camera's modes with a run-time ISP: each ISP format at each sensor
-/// size, in ISP mode order.
-fn sensor_modes(formats: &[&str], sizes: &[(u32, u32)]) -> Value {
+/// size, in ISP mode order. The sizes in `inputs` are ISP inputs.
+fn sensor_modes(formats: &[&str], sizes: &[(u32, u32)], inputs: &[(u32, u32)]) -> Value {
     let mut sizes = sizes.to_vec();
     sizes.sort();
-    let mode = |format: &str, (width, height)| json!({"format": format, "width": width, "height": height, "sensor_mode": true});
+    let mode = |format: &str, (width, height)| json!({"format": format, "width": width, "height": height, "sensor_mode": true, "isp_input": inputs.contains(&(width, height))});
     let modes = formats
         .iter()
         .flat_map(|format| sizes.iter().map(|&size| mode(format, size)));
@@ -767,10 +767,12 @@ fn runtime_mode_product_is_bounded() {
         .collect::<SensorSizes>();
 
     assert_eq!(
-        runtime_modes(&formats(32), &sizes).unwrap().len(),
+        runtime_modes(&formats(32), &sizes, &BTreeSet::new())
+            .unwrap()
+            .len(),
         MAX_RUNTIME_MODES
     );
-    let Err(reason) = runtime_modes(&formats(33), &sizes) else {
+    let Err(reason) = runtime_modes(&formats(33), &sizes, &BTreeSet::new()) else {
         panic!("a product above the catalog limit was accepted");
     };
     assert_eq!(
@@ -811,7 +813,11 @@ fn isp_listing_0x0_takes_the_sensor_sizes() {
         let paths: Vec<_> = (0..nodes.len()).map(|n| format!("/dev/video{n}")).collect();
         let paths: Vec<_> = paths.iter().map(String::as_str).collect();
         let details = imx477(nodes, imx477_timed(imx477_modes));
-        assert_eq!(details["modes"], sensor_modes(formats, &IMX477_SIZES));
+        let inputs = [(4032, 3040), (2048, 1080), (1920, 1080)];
+        assert_eq!(
+            details["modes"],
+            sensor_modes(formats, &IMX477_SIZES, &inputs)
+        );
         assert_eq!(details["isp"], runtime(&paths));
         assert_eq!(details["max_fps"], 66.18);
     }
@@ -843,6 +849,7 @@ fn runtime_modes_carry_the_sensor_intervals() {
     let mut modes = sensor_modes(
         &["AR24", "NV12", "NV16", "NV24", "RGB3"],
         &[(1332, 990), (2028, 1520)],
+        &[],
     );
     for mode in modes.as_array_mut().unwrap() {
         if mode["width"] == 2028 {
@@ -853,8 +860,43 @@ fn runtime_modes_carry_the_sensor_intervals() {
     assert_eq!(details["modes"], modes);
 }
 
-/// When the sensor's sizes cannot be listed, the camera has no modes and its
-/// `isp` says why; the other checks of the scan are unaffected.
+/// Synthetic: a sensor size is an ISP input only when it is listed under a
+/// 12-bit Bayer code and is within the ISP's RAW input limits: a width that
+/// is a multiple of 64, an even height, at most 4096x3072.
+#[test]
+fn runtime_isp_inputs_are_aligned_12_bit_sizes() {
+    let details = imx477(
+        [isp(runtime_isp(&[(0, 0)]))],
+        imx477_timed(|sensor| {
+            sensor.codes = vec![SRGGB10, SRGGB12];
+            sensor.sizes = vec![
+                (SRGGB10, [1920, 1920, 1080, 1080]),
+                (SRGGB12, [1280, 1280, 990, 990]),
+                (SRGGB12, [1344, 1344, 991, 991]),
+                (SRGGB12, [4056, 4056, 3040, 3040]),
+                (SRGGB12, [4160, 4160, 3072, 3072]),
+                (SRGGB12, [4096, 4096, 3136, 3136]),
+            ];
+        }),
+    );
+    let sizes = [
+        (1280, 990),
+        (1344, 991),
+        (1920, 1080),
+        (4056, 3040),
+        (4096, 3136),
+        (4160, 3072),
+    ];
+    let formats = ["AR24", "NV12", "NV16", "NV24", "RGB3"];
+    assert_eq!(
+        details["modes"],
+        sensor_modes(&formats, &sizes, &[(1280, 990)])
+    );
+}
+
+/// When the sensor's sizes cannot be listed, the camera has no modes and
+/// `modes_error` says why; `isp` keeps what its probe found, and the other
+/// checks of the scan are unaffected.
 #[test]
 fn runtime_isp_without_sensor_sizes_leaves_the_camera_without_modes() {
     let failing = |ioctl, errno| {
@@ -905,8 +947,10 @@ fn runtime_isp_without_sensor_sizes_leaves_the_camera_without_modes() {
     ];
     for (subdevs, reason) in cases {
         let details = imx477([isp(runtime_isp(&[(0, 0)]))], subdevs);
-        let isp = json!({"state": "unavailable", "reason": reason});
-        assert_eq!((&details["modes"], &details["isp"]), (&json!([]), &isp));
+        assert_eq!(details["modes"], json!([]));
+        assert_eq!(details["modes_error"], json!(reason));
+        assert_eq!(details["isp"]["state"], "available");
+        assert_eq!(details["isp"]["sizing"], "runtime");
     }
 }
 

@@ -123,25 +123,29 @@ impl Provider for MipiProvider {
             let timing = sensor
                 .subdev
                 .and_then(|(devnode, pad)| self.sensor_timing(devnode, pad));
-            let (isp, modes) = match &probe {
+            // A sensor whose sizes cannot be listed leaves the ISP available:
+            // only this camera's modes are missing, and `modes_error` says why.
+            let (isp, modes, modes_error) = match &probe {
                 Ok(probe) if probe.sizing == IspSizing::Runtime => {
                     match self
                         .sensor_sizes(sensor.subdev)
-                        .and_then(|sizes| runtime_modes(&probe.formats, &sizes))
+                        .and_then(|(sizes, raw12)| runtime_modes(&probe.formats, &sizes, &raw12))
                     {
-                        Ok(modes) => (probe.isp(), modes),
-                        Err(reason) => (Isp::Unavailable { reason }, Vec::new()),
+                        Ok(modes) => (probe.isp(), modes, None),
+                        Err(reason) => (probe.isp(), Vec::new(), Some(reason)),
                     }
                 }
                 Ok(probe) => (
                     probe.isp(),
                     probe.modes.iter().map(IspMode::to_mode).collect(),
+                    None,
                 ),
                 Err(reason) => (
                     Isp::Unavailable {
                         reason: reason.clone(),
                     },
                     Vec::new(),
+                    None,
                 ),
             };
             let model = sensor.name.split(' ').next().unwrap_or_default();
@@ -159,6 +163,7 @@ impl Provider for MipiProvider {
                     media_device: sensor.media_device,
                     bus_info: (!sensor.bus_info.is_empty()).then_some(sensor.bus_info),
                     isp,
+                    modes_error,
                     csi_receiver: sensor.csi_receiver,
                     max_fps: timing.as_ref().map(max_fps),
                     sensor_timing: timing,
@@ -222,6 +227,24 @@ fn subdev_devnode(graph: &Graph, entity: u32) -> Option<(u32, u32)> {
 /// reports for it.
 type SensorSizes = BTreeMap<(u32, u32), Vec<Interval>>;
 
+/// The 12-bit Bayer media-bus codes (`MEDIA_BUS_FMT_S{BGGR,GBRG,GRBG,RGGB}12_1X12`):
+/// SiMa's libcamera `modalix` handler configures the sensor in one of them.
+const RAW12_CODES: [u32; 4] = [0x3008, 0x3010, 0x3011, 0x3012];
+/// The Modalix ISP's RAW input limits (`/dev/video0raw` on Platform 3.0):
+/// its DMA needs a 32-byte line stride, so a 12-bit line is a multiple of 64
+/// pixels; a frame has an even height and is at most 4096x3072. The ISP has no
+/// scaler, so it outputs a sensor mode within these limits at its own size.
+const ISP_RAW12_WIDTH_ALIGN: u32 = 64;
+const ISP_RAW_MAX: (u32, u32) = (4096, 3072);
+
+/// Whether the ISP takes a 12-bit sensor mode of this size unchanged.
+fn isp_takes_raw12((width, height): (u32, u32)) -> bool {
+    width % ISP_RAW12_WIDTH_ALIGN == 0
+        && height % 2 == 0
+        && width <= ISP_RAW_MAX.0
+        && height <= ISP_RAW_MAX.1
+}
+
 impl MipiProvider {
     /// The `/dev/v4l-subdevN` of the sub-device `devnode`, as
     /// `/sys/dev/char/<major>:<minor>` names it.
@@ -235,8 +258,12 @@ impl MipiProvider {
     /// The discrete frame sizes of the sensor's source pad over all its
     /// media-bus codes, each with the frame intervals the sensor reports for
     /// it (none when its driver lists none). Stepwise and continuous sizes are
-    /// skipped. Fails with the reason when the sizes cannot be listed.
-    fn sensor_sizes(&self, subdev: Option<((u32, u32), u32)>) -> Result<SensorSizes, String> {
+    /// skipped. Also the sizes listed under a 12-bit Bayer code. Fails with
+    /// the reason when the sizes cannot be listed.
+    fn sensor_sizes(
+        &self,
+        subdev: Option<((u32, u32), u32)>,
+    ) -> Result<(SensorSizes, BTreeSet<(u32, u32)>), String> {
         let found = subdev.and_then(|(devnode, pad)| Some((self.subdev_path(devnode)?, pad)));
         let (path, pad) = found.ok_or("the sensor has no sub-device to list its frame sizes")?;
         let node = self.backend.open_subdev(&path);
@@ -257,6 +284,7 @@ impl MipiProvider {
             Some(Continue(code))
         })?;
         let mut sizes = SensorSizes::new();
+        let mut raw12 = BTreeSet::new();
         for code in codes {
             let ioctl = ("VIDIOC_SUBDEV_ENUM_FRAME_SIZE", "frame size");
             let query = |index| {
@@ -293,6 +321,9 @@ impl MipiProvider {
                 let decode = decode_mbus_interval;
                 let intervals = node_list(device, &mut budget, &path, ioctl, query, decode)?;
                 sizes.entry((width, height)).or_default().extend(intervals);
+                if RAW12_CODES.contains(&code) {
+                    raw12.insert((width, height));
+                }
             }
         }
         for intervals in sizes.values_mut() {
@@ -305,7 +336,7 @@ impl MipiProvider {
                 "sensor sub-device {path} reported no discrete frame sizes"
             ));
         }
-        Ok(sizes)
+        Ok((sizes, raw12))
     }
 
     /// The timing of the sensor whose sub-device is `devnode`, read from
@@ -454,6 +485,7 @@ impl IspMode {
                 .collect(),
             isp_output: Some(true),
             sensor_mode: None,
+            isp_input: None,
             available: None,
             reason: None,
         }
@@ -461,8 +493,14 @@ impl IspMode {
 }
 
 /// A camera's modes when the ISP sets its sizes at run time: each ISP format
-/// at each of the sensor's sizes, with the sensor's frame intervals.
-fn runtime_modes(formats: &BTreeSet<String>, sizes: &SensorSizes) -> Result<Vec<Mode>, String> {
+/// at each of the sensor's sizes, with the sensor's frame intervals. A size
+/// in `raw12` (listed under a 12-bit Bayer code) within the ISP's RAW input
+/// limits is an `isp_input`.
+fn runtime_modes(
+    formats: &BTreeSet<String>,
+    sizes: &SensorSizes,
+    raw12: &BTreeSet<(u32, u32)>,
+) -> Result<Vec<Mode>, String> {
     let Some(count) = formats.len().checked_mul(sizes.len()) else {
         return Err(format!(
             "run-time ISP mode count overflowed ({} formats x {} sensor sizes)",
@@ -494,6 +532,7 @@ fn runtime_modes(formats: &BTreeSet<String>, sizes: &SensorSizes) -> Result<Vec<
                 .collect(),
             isp_output: None,
             sensor_mode: Some(true),
+            isp_input: Some(raw12.contains(&(width, height)) && isp_takes_raw12((width, height))),
             available: None,
             reason: None,
         };

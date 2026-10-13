@@ -86,14 +86,15 @@ curl --unix-socket /run/simaai-sentinel/api.sock \
 
 Sentinel 回報硬體事實，並在唯讀介面足以判斷時只做一項判斷：每個攝影機模式在此板上
 是否可用。當板子的攝影機覆蓋層支援攝影機的感測器（`board.configured_cameras` 中該
-感測器的 `compatible` 列於 `board.supported_sensors`）、ISP 回報其確切輸出尺寸
-（`isp_output`），且格式為 Neat 的 `CameraInput` 輸出的 NV12 時，模式為
-`available: true`。已知不符合這些條件的模式為 `available: false` 並附上 `reason`；
+感測器的 `compatible` 列於 `board.supported_sensors`）、ISP 輸出其確切尺寸，
+且格式為 Neat 的 `CameraInput` 輸出的 NV12 時，模式為 `available: true`。
+ISP 會以確切尺寸輸出它列出的模式（`isp_output`），或在執行階段決定尺寸時，
+輸出它原封不動作為 RAW 輸入的感測器模式（`isp_input`）。已知不符合這些條件的模式為 `available: false` 並附上 `reason`；
 USB 攝影機一律不可用。若判定感測器支援所需的板子欄位不完整，已讀取的事實仍可證明支援，
 但找不到相符項目不能證明不支援；其他條件皆符合的模式不會帶有判斷。
-當 ISP 在執行階段決定尺寸時，`sensor_mode` 仍是有用的候選項，
-但 libcamera 可能在設定攝影機時調整其尺寸。Sentinel 在探索期間不會設定攝影機或從中
-串流，因此 NV12 感測器模式不會提供 `available` 欄位，而不會給出未經驗證的肯定判斷。
+其他 NV12 `sensor_mode` 若沒有任何至少同樣大的 `isp_input` 模式，就為不可用，
+因為 libcamera 會改變其尺寸；若有這樣的模式，則不會帶有判斷：libcamera 可能將較大的模式
+裁切成該尺寸，而 Sentinel 不設定攝影機就無法確認這一點，且探索絕不會設定攝影機或從中串流。
 應用程式是否支援未判定的模式或其他裝置，由該應用程式決定。
 
 `POST /v1/peripherals/refresh` 會等待一次在該請求之後開始的掃描，

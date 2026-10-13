@@ -29,6 +29,7 @@
 | `media_device` | 常に | `/dev/mediaN`（ルーティング専用。識別には使用しません） |
 | `bus_info` | 報告される場合 | `MEDIA_IOC_DEVICE_INFO`から取得したメディアデバイスのバス。例：`platform:csi2video@1` |
 | `isp` | 常に | `{"state": "available", "device_path", "device_paths", "sizing"}`、または`{"state": "unavailable", "reason"}`（この場合は`modes: []`） |
+| `modes_error` | `isp`が利用可能だがモードを列挙できない場合 | `modes`が`[]`である理由：センサーのサイズを列挙できなかった、または数が多すぎる |
 | `csi_receiver` | リンクされている場合 | センサーのソースパッドのリンク先エンティティ。例：`csidev-40c3000.csi` |
 | `sensor_timing` | 読み取れる場合 | `pixel_rate`（ピクセル/秒）、`hblank_min`、`vblank_min`、`width`、`height`。センサーの`/dev/v4l-subdevN`から読み取ります |
 | `max_fps` | `sensor_timing`がある場合 | `pixel_rate / ((width + hblank_min) * (height + vblank_min))`。小数点以下2桁 |
@@ -62,18 +63,29 @@ DevKitのISPは間隔を報告しないため、そのモードにはフレー�
 それらのサイズは使用しません。モードは、すべてのISPノードが列挙するフォーマットと、
 センサーのサブデバイスがすべてのメディアバスコードについて報告する離散フレームサイズ
 （`VIDIOC_SUBDEV_ENUM_MBUS_CODE`、`VIDIOC_SUBDEV_ENUM_FRAME_SIZE`）の組み合わせです。
-各モードには`format`、`width`、`height`、`sensor_mode: true`があり、センサーがその
+各モードには`format`、`width`、`height`、`sensor_mode: true`、`isp_input`があり、センサーがその
 サイズの間隔を報告する場合（`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`）は`frame_intervals`も
 持ちます。範囲で示されるサイズはスキップされます。センサーのサイズを列挙できない場合、
-そのカメラの`isp`は理由とともに利用不可になります。
+そのカメラは`modes: []`となり、`modes_error`がその理由を示します。`isp`は引き続きISPを報告します。
 Sentinelがカメラごとに公開するフォーマットとサイズの組み合わせは最大1,024個です。それを超える場合は、
-無制限のカタログを割り当てる代わりに`isp`が利用不可になります。
+無制限のカタログを割り当てる代わりに同じ方法で報告されます。
+
+`isp_input`は、センサーがそのサイズを12ビットBayerのメディアバスコード
+（`MEDIA_BUS_FMT_S{BGGR,GBRG,GRBG,RGGB}12_1X12`）で列挙し、幅が64の倍数、高さが偶数で、
+4096x3072以下である場合に`true`になります。SiMaのlibcameraハンドラーはセンサーを12ビットRAWで設定し、
+ISPのRAW DMAは32バイトのラインストライド（64ピクセルの倍数の12ビットライン）を必要とし、
+ISPにはスケーラーがないため、ISPはそのようなモードをそのサイズのまま出力します。これらの制限を満たさない
+サイズはlibcameraが縮小します（IMX477の4056x3040は、Platform 3.0では4032x3040でストリーミングされます）。
 
 固定ISPの各モードは`available`と、それがfalseの場合は`reason`も持ち、ボードがその正確な
 出力用に設定されているかどうかを示します。NV12以外のセンサーモードも利用不可と判断できます。
-NV12の`sensor_mode`には判定がありません。センサーが列挙するサイズは候補にすぎず、libcameraが
-実行時ISPを設定するときに調整する可能性があり、Sentinelの読み取り専用検出はカメラを意図的に設定したり
-ストリーミングしたりしないためです。完全な規則は[カタログ](../api.md)にあります。
+`isp_input: true`を持つNV12の`sensor_mode`は利用可能です。
+それ以外のものは、それ以上の大きさの`isp_input`モードがない場合は利用不可となり、ある場合は判定が付きません。
+libcameraがその大きいモードをこのサイズに切り抜く可能性がありますが、Sentinelの読み取り専用検出は
+カメラを設定したりストリーミングしたりせずにそれを確認できないためです。Platform 3.0上のIMX477では、
+これにより1280x990、1920x1080、2048x1080、3840x2160、3968x3040、4032x3040が利用可能、
+幅4056の2つのサイズが利用不可、1332x990、2028x1080、2028x1520が未判定になります。
+完全な規則は[カタログ](../api.md)にあります。
 
 ## エラー
 
@@ -84,7 +96,8 @@ NV12の`sensor_mode`には判定がありません。センサーが列挙する
 | `peripherals.discovery_failed` | 名前のないセンサーエンティティ、または同じ名前を持つ2つのセンサー（idが衝突するため） |
 
 スキャン中に消えたデバイスはスキップされます。ISPの失敗によってスキャンが失敗することはなく、
-理由とともに`isp`が利用不可になります。
+理由とともに`isp`が利用不可になります。サイズを列挙できないセンサーには、
+代わりに`modes_error`が付きます。
 
 ## 例
 

@@ -90,18 +90,20 @@ read-only interfaces can decide it: whether each camera mode is available on
 this board. A mode has `available: true` when the board's camera overlays
 support the camera's sensor (the sensor's `compatible` in
 `board.configured_cameras` is listed in `board.supported_sensors`), the ISP
-advertises its exact output size (`isp_output`), and its format is NV12, the
-format Neat's `CameraInput` outputs. A mode known not to meet those conditions
+outputs its exact size, and its format is NV12, the format Neat's
+`CameraInput` outputs. The ISP outputs the exact size of a mode it lists
+(`isp_output`), or, when it sets sizes at run time, of a sensor mode it takes
+as RAW input unchanged (`isp_input`). A mode known not to meet those conditions
 has `available: false` and a `reason`; USB cameras are never available. When the
 board field needed to establish sensor support is incomplete, facts it did
 return can prove support, but a missing match cannot prove rejection; an
-otherwise viable mode has no verdict. When the
-ISP sets sizes at run time, a `sensor_mode` is still a useful candidate, but
-libcamera may adjust it while configuring the camera. Sentinel does not
-configure or stream from cameras during discovery, so an NV12 sensor mode has
-no `available` field rather than an unverified positive verdict. Whether an
-application supports an unjudged mode or any other device is decided by that
-application.
+otherwise viable mode has no verdict. Another NV12
+`sensor_mode` is unavailable when no `isp_input` mode is at least as large,
+because libcamera would change its size, and has no verdict when one is: libcamera
+may crop the larger mode to it, which Sentinel cannot confirm without
+configuring the camera, and discovery never configures or streams from cameras.
+Whether an application supports an unjudged mode or any other device is
+decided by that application.
 
 `POST /v1/peripherals/refresh` waits for a scan that starts after the request
 and returns HTTP 200 with that catalog, the same document as `GET`. Concurrent

@@ -52,6 +52,12 @@ pub struct Mode {
     /// sets its sizes at run time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensor_mode: Option<bool>,
+    /// MIPI, for a `sensor_mode`: `true` when the sensor offers the size as
+    /// 12-bit Bayer RAW within the ISP's RAW input limits (a width that is a
+    /// multiple of 64, an even height, at most 4096x3072), so the ISP outputs
+    /// it at that size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isp_input: Option<bool>,
     /// Whether the board is set up for this exact output mode; see `support`.
     /// Absent when query-only discovery cannot decide. Set by the catalog, not
     /// the provider.
@@ -155,6 +161,11 @@ pub struct MipiCamera {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_info: Option<String>,
     pub isp: Isp,
+    /// Why the camera has no modes although `isp` is available: its sensor's
+    /// frame sizes could not be listed, or they give too many modes. Absent
+    /// when its modes were found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modes_error: Option<String>,
     /// The CSI-2 receiver entity the sensor's source pad links to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub csi_receiver: Option<String>,

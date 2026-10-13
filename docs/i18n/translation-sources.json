@@ -1,6 +1,6 @@
 {
   "ja": {
-    "docs/api.md": "9077e896b98a513ff7457ae034d26a9b8b761069a445bce5ab3ddfbb039bf67c",
+    "docs/api.md": "070c9d6d4094a08e4fc93b18eadf4ed4d41270181626ee8e0a79fdac733c83da",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "f47858a87c06c388f6ce7fb414400f108dbd71f9fe99c4535cbe3bbf1dff4e0b",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -8,8 +8,8 @@
     "docs/panels/system.md": "5326393ff3491a5be4b57c4ae1c1f523c8032319aa3087c62644bc8c9fbbfb89",
     "docs/panels/thermal.md": "17b7ba3946c2dd8bd5c2bb3e34e6b7b7c4a9f2375f777ca8f14fb022651880e6",
     "docs/peripherals/adding-a-device-type.md": "4f3250fac721ea47fb47cfd62ec48e65f874a5fe04ab5bf6398dfbac3701b4da",
-    "docs/peripherals/board.md": "8f3e2306b5ec713cbe029de24dc4c26403a3750be64bb674e9ed782d313fa5b2",
-    "docs/peripherals/camera-mipi.md": "07925a75529655eb6449ab5e96b5bd6b63d1a7446ca7d325965522c54bea3e77",
+    "docs/peripherals/board.md": "09460b3effc5a08d2960afe67767f13aac64fbf9556b75bac50b8a88b0e68dc8",
+    "docs/peripherals/camera-mipi.md": "efab5ccaa559311cf02453611b4767ce95cee4631e148835f26432d9390c866e",
     "docs/peripherals/camera.md": "702883ad069452d729f8cbc8ffb63cf8ee6f8b19c3e0c647cfa4f477740d5f41",
     "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",
@@ -17,7 +17,7 @@
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "ko": {
-    "docs/api.md": "9077e896b98a513ff7457ae034d26a9b8b761069a445bce5ab3ddfbb039bf67c",
+    "docs/api.md": "070c9d6d4094a08e4fc93b18eadf4ed4d41270181626ee8e0a79fdac733c83da",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "f47858a87c06c388f6ce7fb414400f108dbd71f9fe99c4535cbe3bbf1dff4e0b",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -25,8 +25,8 @@
     "docs/panels/system.md": "5326393ff3491a5be4b57c4ae1c1f523c8032319aa3087c62644bc8c9fbbfb89",
     "docs/panels/thermal.md": "17b7ba3946c2dd8bd5c2bb3e34e6b7b7c4a9f2375f777ca8f14fb022651880e6",
     "docs/peripherals/adding-a-device-type.md": "4f3250fac721ea47fb47cfd62ec48e65f874a5fe04ab5bf6398dfbac3701b4da",
-    "docs/peripherals/board.md": "8f3e2306b5ec713cbe029de24dc4c26403a3750be64bb674e9ed782d313fa5b2",
-    "docs/peripherals/camera-mipi.md": "07925a75529655eb6449ab5e96b5bd6b63d1a7446ca7d325965522c54bea3e77",
+    "docs/peripherals/board.md": "09460b3effc5a08d2960afe67767f13aac64fbf9556b75bac50b8a88b0e68dc8",
+    "docs/peripherals/camera-mipi.md": "efab5ccaa559311cf02453611b4767ce95cee4631e148835f26432d9390c866e",
     "docs/peripherals/camera.md": "702883ad069452d729f8cbc8ffb63cf8ee6f8b19c3e0c647cfa4f477740d5f41",
     "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",
@@ -34,7 +34,7 @@
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "uk": {
-    "docs/api.md": "9077e896b98a513ff7457ae034d26a9b8b761069a445bce5ab3ddfbb039bf67c",
+    "docs/api.md": "070c9d6d4094a08e4fc93b18eadf4ed4d41270181626ee8e0a79fdac733c83da",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "f47858a87c06c388f6ce7fb414400f108dbd71f9fe99c4535cbe3bbf1dff4e0b",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -42,8 +42,8 @@
     "docs/panels/system.md": "5326393ff3491a5be4b57c4ae1c1f523c8032319aa3087c62644bc8c9fbbfb89",
     "docs/panels/thermal.md": "17b7ba3946c2dd8bd5c2bb3e34e6b7b7c4a9f2375f777ca8f14fb022651880e6",
     "docs/peripherals/adding-a-device-type.md": "4f3250fac721ea47fb47cfd62ec48e65f874a5fe04ab5bf6398dfbac3701b4da",
-    "docs/peripherals/board.md": "8f3e2306b5ec713cbe029de24dc4c26403a3750be64bb674e9ed782d313fa5b2",
-    "docs/peripherals/camera-mipi.md": "07925a75529655eb6449ab5e96b5bd6b63d1a7446ca7d325965522c54bea3e77",
+    "docs/peripherals/board.md": "09460b3effc5a08d2960afe67767f13aac64fbf9556b75bac50b8a88b0e68dc8",
+    "docs/peripherals/camera-mipi.md": "efab5ccaa559311cf02453611b4767ce95cee4631e148835f26432d9390c866e",
     "docs/peripherals/camera.md": "702883ad069452d729f8cbc8ffb63cf8ee6f8b19c3e0c647cfa4f477740d5f41",
     "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",
@@ -51,7 +51,7 @@
     "docs/run-comparison.md": "2d09e1c65932d7b8db9b9bba0d1d472cfafd61fcd9fbc42b9016893be3a630e9"
   },
   "zh-Hant": {
-    "docs/api.md": "9077e896b98a513ff7457ae034d26a9b8b761069a445bce5ab3ddfbb039bf67c",
+    "docs/api.md": "070c9d6d4094a08e4fc93b18eadf4ed4d41270181626ee8e0a79fdac733c83da",
     "docs/measurement-model.md": "8e0791a97e8a5b661a64c05f892851f6ed0d0b6c498ef490905cf4946e236d09",
     "docs/panels/overview.md": "f47858a87c06c388f6ce7fb414400f108dbd71f9fe99c4535cbe3bbf1dff4e0b",
     "docs/panels/power.md": "a8fb235d5b7342b6e4e5ce5b1fe51948b006374c812c51184758fdf4feade2fd",
@@ -59,8 +59,8 @@
     "docs/panels/system.md": "5326393ff3491a5be4b57c4ae1c1f523c8032319aa3087c62644bc8c9fbbfb89",
     "docs/panels/thermal.md": "17b7ba3946c2dd8bd5c2bb3e34e6b7b7c4a9f2375f777ca8f14fb022651880e6",
     "docs/peripherals/adding-a-device-type.md": "4f3250fac721ea47fb47cfd62ec48e65f874a5fe04ab5bf6398dfbac3701b4da",
-    "docs/peripherals/board.md": "8f3e2306b5ec713cbe029de24dc4c26403a3750be64bb674e9ed782d313fa5b2",
-    "docs/peripherals/camera-mipi.md": "07925a75529655eb6449ab5e96b5bd6b63d1a7446ca7d325965522c54bea3e77",
+    "docs/peripherals/board.md": "09460b3effc5a08d2960afe67767f13aac64fbf9556b75bac50b8a88b0e68dc8",
+    "docs/peripherals/camera-mipi.md": "efab5ccaa559311cf02453611b4767ce95cee4631e148835f26432d9390c866e",
     "docs/peripherals/camera.md": "702883ad069452d729f8cbc8ffb63cf8ee6f8b19c3e0c647cfa4f477740d5f41",
     "docs/peripherals/microphone.md": "95f2a77b05e1c3b3c9714318c048da0eba5ff21f6d907ba4a6b238190cd940a4",
     "docs/README.md": "4a54fb5b42335d593660b4838e44262e74972c2c086211e75a1e40a6b99637ab",

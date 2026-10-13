@@ -98,14 +98,15 @@ At most 64 KiB of its output and 4 KiB of its error output are read.
 ## Errors
 
 Each error names the field it leaves incomplete: `provider` is
-`board.model`, `board.overlays`, `board.configured_cameras` or
-`board.supported_sensors`. The rest of the block is still published.
+`board.model`, `board.firmware`, `board.overlays`, `board.configured_cameras`
+or `board.supported_sensors`. The rest of the block is still published.
 
 | Code | When |
 | --- | --- |
 | `io.open` | `model`, `/sys/bus/i2c/devices`, a device's node, `/boot`, one of its directories, or an overlay file exists but cannot be read |
 | `io.permission_denied` | The same, failing with `EACCES`; or `fw_printenv` exists but cannot be run (`EACCES` or `EPERM`) |
 | `peripherals.discovery_failed` | `fw_printenv` cannot be started for another reason, its output cannot be read, waiting for it fails, it does not finish in time, or it exits unsuccessfully for a reason other than `dtbos` not being set (the reason names the first line it printed to stderr); an overlay file is malformed or larger than 1 MiB; a list is cut at one of the bounds above |
+| `io.open`, `io.permission_denied`, `peripherals.discovery_failed` | Provider `board.firmware`: `/etc/buildinfo` exists but cannot be read, or is larger than 4096 bytes. `firmware` is then absent. A missing file, or one without `DISTRO_VERSION`, is not an error |
 | `platform.unsupported` | Provider `board.firmware`: `firmware` is older than 2.1.2, the oldest release Sentinel supports for MIPI cameras. That firmware has no SiMa camera media driver, so `camera.mipi` lists no cameras; USB cameras and microphones are still listed |
 
 The problems of each list are reported as one error, with the first

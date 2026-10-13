@@ -29,6 +29,7 @@ libcamera 使用相同的名稱，因此這也是 `CameraInput` 接受的名稱�
 | `media_device` | 一律 | `/dev/mediaN`（僅用於路由；不作為識別） |
 | `bus_info` | 有回報時 | 來自 `MEDIA_IOC_DEVICE_INFO` 的媒體裝置匯流排，例如 `platform:csi2video@1` |
 | `isp` | 一律 | `{"state": "available", "device_path", "device_paths", "sizing"}`，或 `{"state": "unavailable", "reason"}` 並搭配 `modes: []` |
+| `modes_error` | `isp` 可用但無法列出模式時 | 說明 `modes` 為何是 `[]`：無法列出感測器的尺寸，或尺寸過多 |
 | `csi_receiver` | 已連結時 | 感測器來源 pad 所連結的實體，例如 `csidev-40c3000.csi` |
 | `sensor_timing` | 可讀取時 | `pixel_rate`（像素/秒）、`hblank_min`、`vblank_min`、`width`、`height`，讀取自感測器的 `/dev/v4l-subdevN` |
 | `max_fps` | 有 `sensor_timing` 時 | `pixel_rate / ((width + hblank_min) * (height + vblank_min))`，取到小數點後兩位 |
@@ -60,16 +61,26 @@ DevKit 的 ISP 不會回報任何間隔，因此其模式沒有影格率；`max_
 當 `sizing: "runtime"` 時，ISP 只會列出目前設定的尺寸（閒置時為 0x0），因此不會採用
 這些尺寸。此時的模式，是所有 ISP 節點都列出的格式，搭配感測器子裝置在所有媒體匯流排代碼下
 回報的每個離散影格尺寸（`VIDIOC_SUBDEV_ENUM_MBUS_CODE`、`VIDIOC_SUBDEV_ENUM_FRAME_SIZE`）。
-每個模式都有 `format`、`width`、`height` 與 `sensor_mode: true`；若感測器回報該尺寸的
+每個模式都有 `format`、`width`、`height`、`sensor_mode: true` 與 `isp_input`；若感測器回報該尺寸的
 影格間隔（`VIDIOC_SUBDEV_ENUM_FRAME_INTERVAL`），也會帶有 `frame_intervals`。以範圍表示的
-尺寸會略過。若無法列出感測器的尺寸，該攝影機的 `isp` 為不可用，並附上原因。
-Sentinel 每台攝影機最多發布 1,024 個格式與尺寸配對；若乘積更大，`isp` 會變為不可用，
-而不會配置無界限的目錄。
+尺寸會略過。若無法列出感測器的尺寸，該攝影機為 `modes: []`，並由 `modes_error` 說明原因；
+`isp` 仍會回報 ISP。Sentinel 每台攝影機最多發布 1,024 個格式與尺寸配對；若乘積更大，
+會以相同方式回報，而不會配置無界限的目錄。
+
+當感測器以 12 位元 Bayer 媒體匯流排代碼
+（`MEDIA_BUS_FMT_S{BGGR,GBRG,GRBG,RGGB}12_1X12`）列出該尺寸、寬度為 64 的倍數、高度為偶數，
+且不超過 4096x3072 時，`isp_input` 為 `true`。SiMa 的 libcamera 處理常式會以 12 位元 RAW
+設定感測器，ISP 的 RAW DMA 需要 32 位元組的行跨距（即寬度為 64 像素倍數的 12 位元行），
+且 ISP 沒有縮放器，因此會以模式本身的尺寸輸出這類模式。不符合這些限制的尺寸會被 libcamera
+縮小（IMX477 的 4056x3040 在 Platform 3.0 上會以 4032x3040 串流）。
 
 固定 ISP 的每個模式也都帶有 `available`，為 false 時另有 `reason`，表示板子是否已為該
-確切輸出完成設定。非 NV12 感測器模式同樣已知不可用。NV12 `sensor_mode` 不會帶有判斷，
-因為感測器列出的尺寸只是一個候選值：libcamera 可能在設定執行階段 ISP 時調整它，而 Sentinel
-的唯讀探索刻意不會設定攝影機或從中串流。完整規則請參閱[目錄](../api.md)。
+確切輸出完成設定。非 NV12 感測器模式同樣已知不可用。`isp_input: true` 的 NV12 `sensor_mode`
+為可用。其他模式若沒有任何至少同樣大的 `isp_input` 模式，就為不可用；若有這樣的模式，
+則不會帶有判斷：libcamera 可能將該較大的模式裁切成此尺寸，而 Sentinel 的唯讀探索若不設定攝影機
+或從中串流，就無法確認這一點。在 Platform 3.0 上的 IMX477，這會使 1280x990、1920x1080、
+2048x1080、3840x2160、3968x3040 與 4032x3040 為可用，兩個寬 4056 的尺寸為不可用，而
+1332x990、2028x1080 與 2028x1520 則未判定。完整規則請參閱[目錄](../api.md)。
 
 ## 錯誤
 
@@ -80,7 +91,7 @@ Sentinel 每台攝影機最多發布 1,024 個格式與尺寸配對；若乘積�
 | `peripherals.discovery_failed` | 未命名的感測器實體，或兩個名稱相同的感測器（其 id 會衝突） |
 
 掃描途中消失的裝置會被略過。ISP 失敗絕不會使掃描失敗；
-而是會使 `isp` 變為無法使用，並附上原因。
+而是會使 `isp` 變為無法使用，並附上原因。無法列出尺寸的感測器則改為帶有 `modes_error`。
 
 ## 範例
 

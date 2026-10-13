@@ -94,14 +94,15 @@ I2Cマルチプレクサや、GMSLのデシリアライザーとシリアライ�
 ## エラー
 
 各エラーは、それによって不完全になったフィールドを示します。`provider`は
-`board.model`、`board.overlays`、`board.configured_cameras`、または
-`board.supported_sensors`です。ブロックの残りの部分は引き続き公開されます。
+`board.model`、`board.firmware`、`board.overlays`、`board.configured_cameras`、
+または`board.supported_sensors`です。ブロックの残りの部分は引き続き公開されます。
 
 | コード | 発生条件 |
 | --- | --- |
 | `io.open` | `model`、`/sys/bus/i2c/devices`、デバイスのノード、`/boot`、その中のいずれかのディレクトリ、またはオーバーレイファイルが存在するものの、読み取れない |
 | `io.permission_denied` | 同上で、`EACCES`で失敗した場合。または`fw_printenv`が存在するものの、実行できない（`EACCES`または`EPERM`） |
 | `peripherals.discovery_failed` | `fw_printenv`がそれ以外の理由で起動できない、その出力を読み取れない、終了の待機に失敗した、時間内に終了しなかった、または`dtbos`が設定されていないこと以外の理由で失敗終了した（理由には標準エラー出力に出力された最初の行が示されます）。オーバーレイファイルの形式が不正であるか、1 MiBを超えている。リストが前述の上限のいずれかで打ち切られた |
+| `io.open`、`io.permission_denied`、`peripherals.discovery_failed` | プロバイダー`board.firmware`：`/etc/buildinfo`が存在するものの読み取れない、または4096バイトを超えている。この場合`firmware`は含まれません。ファイルがない場合や、`DISTRO_VERSION`を含まない場合はエラーではありません |
 | `platform.unsupported` | プロバイダー`board.firmware`：`firmware`が、SentinelがMIPIカメラをサポートする最も古いリリースである2.1.2より古い場合。そのファームウェアにはSiMaのカメラ用メディアドライバーがないため、`camera.mipi`はカメラを列挙しません。USBカメラとマイクは引き続き列挙されます |
 
 各リストの問題は1件のエラーにまとめて報告され、最初の問題のコードと理由、
