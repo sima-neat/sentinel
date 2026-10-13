@@ -385,6 +385,31 @@ fn an_of_node_that_cannot_be_resolved_is_reported() {
     );
 }
 
+/// A live device tree that exists but cannot be resolved is an error, so the
+/// empty list does not read as "no configured camera" (which would make every
+/// MIPI mode unavailable).
+#[test]
+fn an_unresolvable_device_tree_is_reported() {
+    let root = TempDir::new();
+    devkit(root.path());
+    let base = root.path().join("sys/firmware/devicetree/base");
+    fs::remove_dir_all(&base).unwrap();
+    symlink(&base, &base).unwrap();
+    let mut probe = probe(root.path(), "true");
+    let (board, errors) = scan(&mut probe, &[mipi_camera("imx477 5-001a")]);
+    assert_eq!(board["configured_cameras"], json!([]));
+    let configured: Vec<_> = errors
+        .iter()
+        .filter(|error| error.provider == "board.configured_cameras")
+        .collect();
+    assert_eq!(configured.len(), 1, "{errors:?}");
+    assert!(
+        configured[0].reason.contains("failed to resolve"),
+        "{}",
+        configured[0].reason
+    );
+}
+
 #[test]
 fn a_configured_camera_without_a_catalog_camera_has_no_camera_id() {
     let root = TempDir::new();

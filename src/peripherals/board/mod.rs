@@ -548,9 +548,20 @@ fn configured_cameras(
             return (Vec::new(), Some(error));
         }
     };
-    // Without a live device tree no device has a node in it.
-    let Ok(base) = fs::canonicalize(base) else {
-        return (Vec::new(), None);
+    // Without a live device tree no device has a node in it. One that exists
+    // but cannot be resolved is an error, so an empty list is not mistaken
+    // for a complete one.
+    let base = match fs::canonicalize(base) {
+        Ok(base) => base,
+        Err(error) if disappeared(errno_of(&error)) || errno_of(&error) == libc::ENOTDIR => {
+            return (Vec::new(), None)
+        }
+        Err(error) => {
+            return (
+                Vec::new(),
+                Some(io_error("failed to resolve", base, &error, false)),
+            )
+        }
     };
     let mut skipped = Skipped::default();
     if more {
