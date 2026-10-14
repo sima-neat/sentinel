@@ -33,6 +33,41 @@ jobs:
     with:
       vulcan_env: ${{ vars.VULCAN_ENV || 'production' }}
 
+  docs-translations:
+    name: Check documentation translations
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install sima-cli
+        run: |
+          set -euo pipefail
+          curl -fsSL https://artifacts.neat.sima.ai/sima-cli/linux-mac.sh | bash
+          echo "${HOME}/.sima-cli/.venv/bin" >> "${GITHUB_PATH}"
+
+      - name: Install sima-i18n
+        env:
+          SIMA_CLI_CHECK_FOR_UPDATE: "0"
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/sima-i18n"
+          mkdir -p "${dir}"
+          # The install downloads the package, then tries a global npm install; install it locally instead.
+          sima-cli neat install i18n -d "${dir}" < /dev/null || true
+          package="$(ls "${dir}"/sima-neat-i18n-*.tgz | head -n 1)"
+          npm install --prefix "${dir}/tool" "${package}"
+          echo "${dir}/tool/node_modules/.bin" >> "${GITHUB_PATH}"
+
+      - name: Check translations
+        # Fails when a translation is missing, stale, or no longer matches its English structure.
+        run: sima-i18n check --require-complete
+
   package:
     name: Package Sentinel
     runs-on: ubuntu-24.04-arm
