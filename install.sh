@@ -22,33 +22,40 @@ if [[ ! -f "${SERVICE_SRC}" ]]; then
   exit 1
 fi
 
-SUDO=""
-if [[ "${EUID}" -ne 0 ]]; then
-  if command -v sudo >/dev/null 2>&1; then
-    SUDO="sudo"
-  else
-    echo "Root privileges are required to install Sentinel service files." >&2
-    exit 1
-  fi
+if [[ "${EUID}" -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
+  echo "Root privileges are required to install Sentinel service files." >&2
+  exit 1
 fi
 
-echo "Installing SiMa.ai Sentinel system service..."
-${SUDO} install -m 0755 -d /usr/local/bin
-${SUDO} install -m 0755 "${BINARY_SRC}" /usr/local/bin/simaai-sentinel
+# Without a terminal sudo cannot prompt, so unattended installs pass the
+# password in SUDO_PASSWORD.
+as_root() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+  elif [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    sudo -S -p '' "$@" <<<"${SUDO_PASSWORD}"
+  else
+    sudo "$@"
+  fi
+}
 
-${SUDO} install -m 0755 -d /run/simaai-sentinel
-${SUDO} install -m 0755 -d /var/log/simaai-sentinel
-${SUDO} install -m 0775 -d /var/lib/simaai-sentinel /var/lib/simaai-sentinel/runs
+echo "Installing SiMa.ai Sentinel system service..."
+as_root install -m 0755 -d /usr/local/bin
+as_root install -m 0755 "${BINARY_SRC}" /usr/local/bin/simaai-sentinel
+
+as_root install -m 0755 -d /run/simaai-sentinel
+as_root install -m 0755 -d /var/log/simaai-sentinel
+as_root install -m 0775 -d /var/lib/simaai-sentinel /var/lib/simaai-sentinel/runs
 DATA_GROUP="${SIMA_SENTINEL_DATA_GROUP:-sima}"
 if ! getent group "${DATA_GROUP}" >/dev/null 2>&1; then
   DATA_GROUP="${SUDO_USER:-root}"
 fi
-${SUDO} chown "root:${DATA_GROUP}" /var/lib/simaai-sentinel /var/lib/simaai-sentinel/runs
-${SUDO} install -m 0644 "${SERVICE_SRC}" "/etc/systemd/system/${SERVICE_NAME}"
+as_root chown "root:${DATA_GROUP}" /var/lib/simaai-sentinel /var/lib/simaai-sentinel/runs
+as_root install -m 0644 "${SERVICE_SRC}" "/etc/systemd/system/${SERVICE_NAME}"
 
-${SUDO} systemctl daemon-reload
-${SUDO} systemctl enable "${SERVICE_NAME}"
-${SUDO} systemctl restart "${SERVICE_NAME}"
+as_root systemctl daemon-reload
+as_root systemctl enable "${SERVICE_NAME}"
+as_root systemctl restart "${SERVICE_NAME}"
 
 # Keep agent-directory ownership and playbook registry management in sima-cli.
 # This command intentionally runs as the invoking user, not through sudo.

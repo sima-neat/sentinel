@@ -27,6 +27,14 @@ temperature controller; Sentinel never accesses it through `/dev/mem`. The packa
 installs a prebuilt aarch64 binary and does not require a Rust toolchain on the
 DevKit.
 
+The installer uses `sudo` to install the service files. Without a terminal,
+for example in a script that runs over `ssh`, sudo cannot ask for the
+password, so pass it in `SUDO_PASSWORD`:
+
+```bash
+SUDO_PASSWORD='<password>' sima-cli neat install sentinel
+```
+
 ## Usage
 
 ```bash
