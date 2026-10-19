@@ -44,7 +44,7 @@ used_pct   = used_bytes / MemTotal × 100
 
 ## MLAメモリ
 
-Platform 3.0 では、`/dev/dma_heap/simaai,dms` が存在すると DMA-BUF テレメトリが選択されます。Sentinel は `/sys/kernel/debug/dma_buf/bufinfo` を読み取り、`mla` または `simaai,dms` がエクスポートしたオブジェクトと MLA デバイスにアタッチされたオブジェクトの和集合を inode で重複排除して集計します。各 DMA-BUF オブジェクトは最大 1 回だけ数えられます。
+Platform 3.0 では、`/dev/dma_heap/simaai,dms` が存在すると DMA-BUF テレメトリが選択されます。Sentinel は `/sys/kernel/debug/dma_buf/bufinfo` を読み取り、MLA ヒープ（`mla` または `simaai,dms`）がエクスポートしたオブジェクトを合計し、各 DMA-BUF inode を 1 回だけ数えます。他のヒープのバッファは、MLA がアタッチされていても MLA メモリではありません。
 
 このヒープが存在しない以前のリリースでは、Sentinel は `/dev/simaai-mem` を読み取り、`Total allocated size:` に続く 16 進数のバイト数を解析して MiB に変換します。
 

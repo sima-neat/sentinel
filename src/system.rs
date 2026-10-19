@@ -16,6 +16,12 @@ enum MlaMemorySource {
     Legacy,
 }
 
+/// DMA-BUF bytes from one bufinfo snapshot, each buffer counted once per total.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DmaBufTotals {
+    mla_bytes: u64,
+}
+
 #[derive(Debug)]
 struct DmaBufObject<'a> {
     size_bytes: u64,
@@ -82,7 +88,7 @@ pub fn system_metric_definitions() -> Vec<MetricDefinition> {
             "MLAMB",
             "MLA",
             "MB",
-            "MLA DMA-BUF allocation on Platform 3.0, with legacy allocator fallback on older releases.",
+            "DMA-BUF memory allocated from the MLA heaps (simaai,dms, mla) on Platform 3.0, each buffer counted once, with legacy allocator fallback on older releases.",
             None,
             None,
         ),
@@ -284,7 +290,7 @@ impl SystemCollector {
         let mut values = BTreeMap::new();
         values.extend(self.sample_cpu());
         values.extend(sample_memory());
-        values.insert("mla_mem_allocated_mb".into(), read_mla_memory_mb());
+        values.extend(sample_dma_buf_memory());
         values.extend(self.sample_disks(dt));
         values.extend(self.sample_network(dt));
         if self
@@ -626,8 +632,22 @@ fn parse_meminfo(raw: &str) -> BTreeMap<String, u64> {
         .collect()
 }
 
-fn read_mla_memory_mb() -> f64 {
-    read_mla_memory_bytes()
+fn sample_dma_buf_memory() -> BTreeMap<String, f64> {
+    let mla_bytes = match detect_mla_memory_source(|path| Path::new(path).exists()) {
+        Some(MlaMemorySource::DmaBuf) => fs::read_to_string(DMA_BUFINFO_PATH)
+            .ok()
+            .and_then(|raw| parse_dma_buf_totals(&raw))
+            .map(|totals| totals.mla_bytes),
+        Some(MlaMemorySource::Legacy) => fs::read_to_string(LEGACY_MLA_MEMORY_PATH)
+            .ok()
+            .and_then(|raw| parse_legacy_mla_memory_bytes(&raw)),
+        None => None,
+    };
+    BTreeMap::from([("mla_mem_allocated_mb".to_string(), bytes_to_mb(mla_bytes))])
+}
+
+fn bytes_to_mb(bytes: Option<u64>) -> f64 {
+    bytes
         .map(|bytes| bytes as f64 / 1024.0 / 1024.0)
         .unwrap_or(f64::NAN)
 }
@@ -640,17 +660,6 @@ fn detect_mla_memory_source(mut path_exists: impl FnMut(&str) -> bool) -> Option
         return Some(MlaMemorySource::Legacy);
     }
     None
-}
-
-fn read_mla_memory_bytes() -> Option<u64> {
-    match detect_mla_memory_source(|path| Path::new(path).exists())? {
-        MlaMemorySource::DmaBuf => fs::read_to_string(DMA_BUFINFO_PATH)
-            .ok()
-            .and_then(|raw| parse_dma_buf_mla_bytes(&raw)),
-        MlaMemorySource::Legacy => fs::read_to_string(LEGACY_MLA_MEMORY_PATH)
-            .ok()
-            .and_then(|raw| parse_legacy_mla_memory_bytes(&raw)),
-    }
 }
 
 fn parse_legacy_mla_memory_bytes(raw: &str) -> Option<u64> {
@@ -741,19 +750,29 @@ fn parse_dma_buf_objects(raw: &str) -> Option<Vec<DmaBufObject<'_>>> {
     Some(objects)
 }
 
-fn parse_dma_buf_mla_bytes(raw: &str) -> Option<u64> {
-    let mut matched_by_inode = BTreeMap::new();
-    for object in parse_dma_buf_objects(raw)? {
-        let exporter = object.exporter.to_ascii_lowercase();
-        let exported_for_mla = exporter == "mla" || exporter == "simaai,dms";
-        let attached_to_mla = object.attached_devices.iter().any(|device| {
-            let device = device.trim().to_ascii_lowercase();
-            device == "mla" || device.ends_with(".mla")
-        });
-        if !exported_for_mla && !attached_to_mla {
-            continue;
-        }
+fn parse_dma_buf_totals(raw: &str) -> Option<DmaBufTotals> {
+    let objects = parse_dma_buf_objects(raw)?;
+    // MLA memory is what the MLA heaps hold. Buffers from other heaps are not
+    // counted even when the MLA is attached to them, such as inputs another
+    // engine writes into the shared pool for the MLA to read.
+    Some(DmaBufTotals {
+        mla_bytes: sum_unique_dma_bufs(&objects, from_mla_heap)?,
+    })
+}
 
+fn from_mla_heap(object: &DmaBufObject<'_>) -> bool {
+    let exporter = object.exporter.to_ascii_lowercase();
+    exporter == "mla" || exporter == "simaai,dms"
+}
+
+/// Sums matching objects once per inode. A device attaches to a buffer once per
+/// client, so one buffer can list the same device several times.
+fn sum_unique_dma_bufs(
+    objects: &[DmaBufObject<'_>],
+    matches: impl Fn(&DmaBufObject<'_>) -> bool,
+) -> Option<u64> {
+    let mut matched_by_inode = BTreeMap::new();
+    for object in objects.iter().filter(|object| matches(object)) {
         if let Some(previous_size) = matched_by_inode.insert(object.inode, object.size_bytes) {
             if previous_size != object.size_bytes {
                 return None;
@@ -942,9 +961,96 @@ impl MountCheck for Path {
 mod tests {
     use super::{
         detect_mla_memory_source, network_utilization_percent, parse_default_route_interface,
-        parse_dma_buf_mla_bytes, parse_dma_buf_objects, parse_legacy_mla_memory_bytes,
-        parse_meminfo, MlaMemorySource, LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
+        parse_dma_buf_objects, parse_dma_buf_totals, parse_legacy_mla_memory_bytes, parse_meminfo,
+        DmaBufTotals, MlaMemorySource, LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
     };
+
+    /// Real bufinfo from a Modalix DevKit (eLxr 3.0.0 B1859) while YOLO26 ran at 1080p
+    /// with EV74 preprocessing. Tests check relationships in it, not captured totals.
+    const PLATFORM_3_YOLO_1080P_BUFINFO: &str =
+        include_str!("fixtures/dma-buf-platform-3.0-yolo26-1080p.bufinfo");
+
+    fn parse_dma_buf_mla_bytes(raw: &str) -> Option<u64> {
+        parse_dma_buf_totals(raw).map(|totals| totals.mla_bytes)
+    }
+
+    /// One buffer row in a synthetic bufinfo snapshot.
+    struct Buf {
+        size: u64,
+        exporter: &'static str,
+        inode: u64,
+        name: &'static str,
+        devices: &'static [&'static str],
+    }
+
+    /// Renders buffers in the kernel's bufinfo layout, including the summary line, so
+    /// each test's expected total is the sum of the buffers it lists.
+    fn bufinfo(bufs: &[Buf]) -> String {
+        let mut out =
+            String::from("Dma-buf Objects:\nsize\tflags\tmode\tcount\texp_name\tino\tname\n");
+        for buf in bufs {
+            out += &format!(
+                "{:08}\t00000002\t02080007\t00000002\t{}\t{:08}\t{}\n\tAttached Devices:\n",
+                buf.size, buf.exporter, buf.inode, buf.name
+            );
+            for device in buf.devices {
+                out += &format!("\t{device}\n");
+            }
+            out += &format!("Total {} devices attached\n\n", buf.devices.len());
+        }
+        let bytes: u64 = bufs.iter().map(|buf| buf.size).sum();
+        out + &format!("Total {} objects, {bytes} bytes\n", bufs.len())
+    }
+
+    /// Writes each attachment line of one device `copies` times. Only lines inside an
+    /// "Attached Devices:" block change, so object rows and their names are untouched.
+    fn edit_device_lines(raw: &str, suffix: &str, copies: usize) -> String {
+        let mut out = String::new();
+        let mut in_devices = false;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            let is_device = in_devices
+                && (trimmed == suffix.trim_start_matches('.') || trimmed.ends_with(suffix));
+            if trimmed == "Attached Devices:" {
+                in_devices = true;
+            } else if trimmed.starts_with("Total ") {
+                in_devices = false;
+            }
+            for _ in 0..if is_device { copies } else { 1 } {
+                out += line;
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Lists every attachment of the named device twice, as a second client would.
+    fn repeat_device_lines(raw: &str, suffix: &str) -> String {
+        edit_device_lines(raw, suffix, 2)
+    }
+
+    /// Removes every attachment of the named device.
+    fn drop_device_lines(raw: &str, suffix: &str) -> String {
+        edit_device_lines(raw, suffix, 0)
+    }
+
+    #[test]
+    fn device_line_helpers_leave_object_rows_alone() {
+        let snapshot = bufinfo(&[Buf {
+            size: 4096,
+            exporter: "linux,cma",
+            inode: 1,
+            name: "weights.mla",
+            devices: &["5000000.mla"],
+        }]);
+
+        let repeated = repeat_device_lines(&snapshot, ".mla");
+        let dropped = drop_device_lines(&snapshot, ".mla");
+        assert_eq!(repeated.matches("weights.mla").count(), 1);
+        assert_eq!(repeated.matches("\t5000000.mla").count(), 2);
+        assert_eq!(dropped.matches("weights.mla").count(), 1);
+        assert_eq!(dropped.matches("\t5000000.mla").count(), 0);
+    }
 
     const DMA_BUF_FIXTURE: &str = "\
 Dma-buf Objects:
@@ -1000,14 +1106,12 @@ Total 4 objects, 14163968 bytes
     }
 
     #[test]
-    fn dma_buf_mla_accounting_uses_inode_union() {
-        assert_eq!(
-            parse_dma_buf_mla_bytes(DMA_BUF_FIXTURE),
-            Some(2_097_152 + 1_048_576)
-        );
+    fn dma_buf_mla_accounting_counts_only_the_mla_heaps() {
+        // The 1 MiB linux,cma buffer attached to the MLA is not MLA-heap memory.
+        assert_eq!(parse_dma_buf_mla_bytes(DMA_BUF_FIXTURE), Some(2_097_152));
         assert_eq!(
             parse_dma_buf_mla_bytes(&DMA_BUF_FIXTURE.replace("simaai,dms", "mla")),
-            Some(2_097_152 + 1_048_576)
+            Some(2_097_152)
         );
     }
 
@@ -1052,6 +1156,120 @@ Total 4 objects, 14163968 bytes
         );
 
         assert_eq!(parse_dma_buf_mla_bytes(&conflicting), None);
+    }
+
+    #[test]
+    fn mla_total_counts_only_buffers_from_the_mla_heaps() {
+        const WEIGHTS: u64 = 8 << 20;
+        const SCRATCH: u64 = 64 << 10;
+        const HANDOFF: u64 = 4 << 20;
+        let snapshot = bufinfo(&[
+            Buf {
+                size: WEIGHTS,
+                exporter: "simaai,dms",
+                inode: 1,
+                name: "<none>",
+                devices: &["5000000.mla"],
+            },
+            Buf {
+                size: SCRATCH,
+                exporter: "mla",
+                inode: 2,
+                name: "<none>",
+                devices: &[],
+            },
+            // A shared-pool buffer another engine wrote and the MLA reads: not MLA memory.
+            Buf {
+                size: HANDOFF,
+                exporter: "linux,cma",
+                inode: 3,
+                name: "<none>",
+                devices: &["cvu", "5000000.mla", "5000000.mla"],
+            },
+            Buf {
+                size: 1 << 20,
+                exporter: "linux,cma",
+                inode: 4,
+                name: "<none>",
+                devices: &[],
+            },
+        ]);
+
+        assert_eq!(
+            parse_dma_buf_totals(&snapshot),
+            Some(DmaBufTotals {
+                mla_bytes: WEIGHTS + SCRATCH
+            })
+        );
+    }
+
+    #[test]
+    fn dma_buf_totals_count_a_buffer_listed_in_two_rows_once() {
+        const WEIGHTS: u64 = 8 << 20;
+        let row = || Buf {
+            size: WEIGHTS,
+            exporter: "simaai,dms",
+            inode: 7,
+            name: "<none>",
+            devices: &["5000000.mla"],
+        };
+        let snapshot = bufinfo(&[row(), row()]);
+
+        assert_eq!(parse_dma_buf_mla_bytes(&snapshot), Some(WEIGHTS));
+    }
+
+    #[test]
+    fn mla_total_ignores_tags_and_lookalike_heap_names() {
+        let snapshot = bufinfo(&[
+            // Tagged for the MLA, but from the shared pool: not MLA-heap memory.
+            Buf {
+                size: 4096,
+                exporter: "linux,cma",
+                inode: 1,
+                name: "<none>",
+                devices: &["5000000.mla"],
+            },
+            Buf {
+                size: 8192,
+                exporter: "simaai,dmsx",
+                inode: 2,
+                name: "<none>",
+                devices: &[],
+            },
+            Buf {
+                size: 16384,
+                exporter: "mla2",
+                inode: 3,
+                name: "<none>",
+                devices: &[],
+            },
+        ]);
+
+        assert_eq!(parse_dma_buf_mla_bytes(&snapshot), Some(0));
+    }
+
+    #[test]
+    fn mla_total_on_a_real_capture_is_the_sum_of_its_mla_heap_buffers() {
+        let raw = PLATFORM_3_YOLO_1080P_BUFINFO;
+        let mla = parse_dma_buf_mla_bytes(raw).unwrap();
+        let heap_buffers: u64 = parse_dma_buf_objects(raw)
+            .unwrap()
+            .iter()
+            .filter(|object| matches!(object.exporter, "mla" | "simaai,dms"))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert!(mla > 0);
+        assert_eq!(mla, heap_buffers);
+
+        // Tags do not move memory in or out of the MLA total.
+        assert_eq!(
+            parse_dma_buf_mla_bytes(&repeat_device_lines(raw, ".mla")),
+            Some(mla)
+        );
+        assert_eq!(
+            parse_dma_buf_mla_bytes(&drop_device_lines(raw, ".mla")),
+            Some(mla)
+        );
     }
 
     #[test]

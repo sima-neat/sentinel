@@ -44,7 +44,7 @@ used_pct   = used_bytes / MemTotal × 100
 
 ## MLA 메모리
 
-Platform 3.0에서는 `/dev/dma_heap/simaai,dms`가 존재하면 DMA-BUF 텔레메트리를 선택합니다. Sentinel은 `/sys/kernel/debug/dma_buf/bufinfo`를 읽고 `mla` 또는 `simaai,dms`가 내보낸 객체와 MLA 장치에 연결된 객체의 합집합을 inode 기준으로 중복 제거하여 계산합니다. 각 DMA-BUF 객체는 최대 한 번만 계산됩니다.
+Platform 3.0에서는 `/dev/dma_heap/simaai,dms`가 존재하면 DMA-BUF 텔레메트리를 선택합니다. Sentinel은 `/sys/kernel/debug/dma_buf/bufinfo`를 읽고 MLA 힙(`mla` 또는 `simaai,dms`)이 내보낸 객체를 합산하며, 각 DMA-BUF inode는 한 번만 셉니다. 다른 힙의 버퍼는 MLA가 연결되어 있어도 MLA 메모리가 아닙니다.
 
 이 힙이 없는 이전 릴리스에서는 Sentinel이 `/dev/simaai-mem`을 읽고 `Total allocated size:` 뒤의 16진수 바이트 수를 파싱하여 MiB로 변환합니다.
 
