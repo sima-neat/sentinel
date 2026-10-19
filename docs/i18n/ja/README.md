@@ -12,7 +12,7 @@ Sentinelは、バックグラウンドデーモンでModalix DevKitのテレメ�
 | 概要 | [概要パネル](panels/overview.md) | 熱、電力、CPU、メモリ、MLAメモリ、ストレージ、およびネットワークの主要な状態。 |
 | サーマル | [サーマルパネル](panels/thermal.md) | ダイ上のRTSN/PVTサイトと、ボードレベルのハードウェアモニターの測定値。 |
 | 電源 | [電源パネル](panels/power.md) | PMBusのレール電力、合計値、セッションの平均値/ピーク値、およびコレクターの状態。 |
-| システム | [システムパネル](panels/system.md) | 全体/コアごとのCPU、ロードアベレージ、Linuxメモリ、MLA割り当て、EV74 CMAメモリ、およびプロセス。 |
+| システム | [システムパネル](panels/system.md) | 全体/コアごとのCPU、ロードアベレージ、Linuxメモリ、MLA と EV74 のメモリ、CMA 使用量、およびプロセス。 |
 | ストレージ/ネットワーク | [ストレージとネットワークパネル](panels/storage-network.md) | eMMC/NVMeの容量とI/O、およびネットワーク全体のトラフィック。 |
 
 ## レポートと収集動作

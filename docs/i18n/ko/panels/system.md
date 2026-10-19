@@ -1,6 +1,6 @@
 # 시스템 패널
 
-시스템 패널은 Linux CPU 카운터, 시스템 부하 평균, 메모리 사용량, SiMa MLA 메모리 텔레메트리, EV74 연속 메모리 풀, 주기적인 프로세스 스냅샷을 통합합니다.
+시스템 패널은 Linux CPU 카운터, 시스템 부하 평균, 메모리 사용량, SiMa MLA 및 EV74 메모리 텔레메트리, 연속 메모리(CMA) 사용량, 주기적인 프로세스 스냅샷을 통합합니다.
 
 ## CPU 필드
 
@@ -57,19 +57,43 @@ Platform 3.0에서는 `/dev/dma_heap/simaai,dms`가 존재하면 DMA-BUF 텔레�
 
 선택된 인터페이스를 읽을 수 없거나 텍스트 형식을 인식할 수 없는 경우, 값은 0이 아닌 ‘사용 불가능’으로 표시됩니다. DMA-BUF 텔레메트리를 선택한 후에는 Sentinel이 레거시 할당자로 폴백하지 않습니다.
 
-## EV74 CMA 메모리
+## EV74 메모리
 
-Sentinel은 각 정상 데몬 샘플에서 `/proc/meminfo`를 읽어 `CmaTotal` 및 `CmaFree` 값을 가져와서 보고합니다.
+Platform 3.0에서 EV74(CVU)는 DMA-BUF 메모리로 작업합니다. EV74가 버퍼를 사용하는 동안 커널은 `/sys/kernel/debug/dma_buf/bufinfo`에서 해당 버퍼의 연결된 장치 목록에 `cvu` 장치를 표시합니다. Sentinel은 `cvu` 또는 `<address>.cvu`라는 이름의 장치에 연결된 객체를 합산하며, 각 DMA-BUF inode는 한 번만 셉니다.
 
 ```text
-EV74 CMA used = CmaTotal - CmaFree
+ev74_mem_allocated_mb = sum of sizes of unique inodes attached to cvu
 ```
 
-`CmaTotal`은 부팅 시 예약된 연속적인 메모리 영역입니다. `CmaFree`는 현재 할당되지 않은 해당 예약 영역의 부분입니다. 시스템 탭에는 사용된 값이 표시되고, 체크포인트 기록에는 총값, 사용 가능한 값, 사용된 값이 모두 저장됩니다. 비교 실행 탭에서는 선택한 실행에 대해 `EV74 CMA memory`를 겹쳐서 표시할 수 있습니다.
+각 EV74 클라이언트가 버퍼에 따로 연결되므로 하나의 버퍼에 `cvu`가 여러 번 표시되는 경우가 많지만, 한 번만 셉니다. Sentinel은 MLA, EV74, `linux,cma` 메모리를 위해 샘플마다 `bufinfo`를 한 번만 읽습니다. System 탭은 이 값을 차트로 표시하며, Compare Runs 탭에서는 선택한 실행에 `EV74 memory`를 겹쳐 볼 수 있습니다.
 
-이는 EV74가 예약된 CMA 풀을 사용하는 경우의 EV74 소비 프록시입니다. Linux CMA는 공유 커널 기능이므로 다른 드라이버의 할당도 `CmaFree`를 줄일 수 있습니다. Sentinel은 `/proc/meminfo`만으로는 해당 페이지를 개별 프로세스에 할당할 수 없습니다. 두 필드 중 하나라도 없으면 파생된 사용 값은 0으로 표시되는 대신 사용할 수 없음으로 보고됩니다. 존재하는 모든 필드는 자체적으로 사용할 수 있는 상태로 유지됩니다.
+이 값은 다음 제한을 고려해서 읽으십시오.
 
-부팅 시 예약된 영역은 다음과 같이 별도로 확인할 수 있습니다.
+- 모델에 전달되는 전처리된 텐서처럼 EV74와 MLA가 공유하는 버퍼는 EV74 메모리와 MLA 메모리 모두에 포함됩니다. 두 값을 더하지 마십시오.
+- 버퍼는 EV74가 사용한 뒤부터 포함됩니다. EV74용으로 할당되었지만 EV74가 아직 처리하지 않은 텐서는 EV74 메모리가 아니라 `linux,cma` 메모리입니다.
+- DMA-BUF 이름은 무시됩니다. 시스템 데몬은 EV74가 사용하지 않는 `EV74`라는 이름의 작은 버퍼를 보유합니다.
+- EV74의 고정 펌웨어 예약 영역과 커널 내부 할당은 DMA-BUF가 아니므로 포함되지 않습니다.
+- CVU 드라이버는 클라이언트당 최대 64개의 버퍼를 캐시합니다. 이를 초과하는 파이프라인에서는 사용 중인 버퍼가 축출되어 값이 낮게 표시될 수 있으며, 축출 횟수는 `/sys/kernel/debug/simaai-cvu/stats`에서 확인할 수 있습니다.
+
+`/dev/cvu`가 없거나 `bufinfo`를 읽거나 구문 분석할 수 없으면 값은 0이 아니라 사용할 수 없음으로 표시됩니다.
+
+## linux,cma 메모리
+
+`linux_cma_used_mb`는 `linux,cma` 힙이 내보낸 DMA-BUF 객체를 합산하며, 각 inode는 한 번만 셉니다. EV74, 비디오, ISP, CPU 버퍼가 이 풀을 공유하므로 이 값은 EV74만의 메모리가 아니라 풀 전체의 할당된 메모리입니다. `/dev/dma_heap/linux,cma`가 없거나 `bufinfo`를 읽거나 구문 분석할 수 없으면 값은 사용할 수 없음으로 표시됩니다.
+
+## CMA 풀
+
+Sentinel은 일반 데몬 샘플마다 `/proc/meminfo`에서 `CmaTotal`과 `CmaFree`도 읽어 다음 값을 보고합니다.
+
+```text
+CMA used = CmaTotal - CmaFree
+```
+
+`CmaTotal`은 부팅 시 예약된 모든 CMA 영역을 포함합니다. `CmaFree`에는 Linux가 CMA에 배치했다가 필요할 때 옮기는 페이지 캐시 같은 이동 가능한 페이지가 포함되지 않습니다. 따라서 CMA used는 할당된 메모리를 과대 표시하며 EV74 메모리도 아닙니다. 유휴 상태의 Modalix Platform 3.0 DevKit에서 이 값은 약 90 MiB였지만 `linux,cma` DMA-BUF의 합계는 3 MiB였습니다. EV74에는 `ev74_mem_allocated_mb`를, 풀에서의 할당에는 `linux_cma_used_mb`를 사용하십시오.
+
+키 `ev74_cma_total_mb`, `ev74_cma_free_mb`, `ev74_cma_used_mb`는 기존 클라이언트와 기록된 실행이 계속 읽을 수 있도록 이름을 유지합니다. 레이블은 `CMA reserved`, `CMA free`, `CMA used`입니다. 체크포인트 기록에는 세 값이 모두 보존됩니다. Linux CMA는 공유 커널 기능이므로 Sentinel은 `/proc/meminfo`만으로 이 페이지를 개별 프로세스에 귀속시킬 수 없습니다. 두 필드 중 하나가 없으면 계산된 사용량은 0이 아니라 사용할 수 없음으로 보고되며, 존재하는 필드는 각각 단독으로 사용할 수 있습니다.
+
+부팅 시 예약은 다음 명령으로 따로 확인할 수 있습니다.
 
 ```bash
 dmesg | grep -i cma

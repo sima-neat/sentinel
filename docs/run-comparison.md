@@ -95,7 +95,7 @@ preserves longer tails and naturally leaves other series absent.
 
 The visible metric selector provides total board power, maximum board/SoC
 temperature, CPU utilization, normalized one-minute CPU load, Linux RAM used,
-MLA allocated memory, and EV74 CMA memory used. Only one metric is overlaid at
+MLA allocated memory, and EV74 allocated memory. Only one metric is overlaid at
 a time, keeping three or four selected runs readable.
 
 All visible runs use the same Braille line weight and rendering style so no

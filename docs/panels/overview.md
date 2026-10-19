@@ -25,6 +25,7 @@ The table reports:
 - normalized one-minute CPU load;
 - Linux memory used in MiB;
 - MLA allocated memory in MiB;
+- EV74 allocated memory in MiB;
 - current board-rail power;
 - eMMC and optional NVMe filesystem usage;
 - aggregate receive and transmit rates.

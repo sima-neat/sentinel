@@ -758,7 +758,7 @@ fn draw_overview(f: &mut Frame, area: Rect, cache: &CachePayload) {
             "cpu_load_1_pct",
             "linux_mem_used_mb",
             "mla_mem_allocated_mb",
-            "ev74_cma_used_mb",
+            "ev74_mem_allocated_mb",
             "power_current_watts",
             "disk_emmc_used_pct",
             "disk_nvme_used_pct",
@@ -1201,7 +1201,7 @@ const COMPARE_METRICS: [(&str, &str, &str); 7] = [
     ("cpu_load_1_pct", "CPU load", "%"),
     ("linux_mem_used_mb", "RAM used", "MB"),
     ("mla_mem_allocated_mb", "MLA memory", "MB"),
-    ("ev74_cma_used_mb", "EV74 CMA memory", "MB"),
+    ("ev74_mem_allocated_mb", "EV74 memory", "MB"),
 ];
 const RUN_COLORS: [Color; 4] = [Color::Cyan, Color::Green, Color::Yellow, Color::Magenta];
 
@@ -2000,14 +2000,14 @@ fn draw_system_bars(f: &mut Frame, area: Rect, cache: &CachePayload) {
         "MB",
         cache,
     );
-    let cma_series = series(cache, "ev74_cma_used_mb");
+    let ev74_series = series(cache, "ev74_mem_allocated_mb");
     draw_line_chart(
         f,
         rows[4],
-        "EV74 CMA memory",
-        cma_series.clone(),
+        "EV74 memory",
+        ev74_series.clone(),
         0.0,
-        max_or(cma_series, 1.0) * 1.2,
+        max_or(ev74_series, 1.0) * 1.2,
         "MB",
         cache,
     );
@@ -2028,8 +2028,9 @@ fn draw_system_bars(f: &mut Frame, area: Rect, cache: &CachePayload) {
             "cpu_load_1_pct",
             "linux_mem_used_pct",
             "linux_mem_used_mb",
+            "linux_cma_used_mb",
             "mla_mem_allocated_mb",
-            "ev74_cma_used_mb",
+            "ev74_mem_allocated_mb",
         ],
     );
     draw_cpu_help(f, lower_rows[1]);
@@ -2590,60 +2591,81 @@ mod tests {
     }
 
     #[test]
-    fn system_tab_shows_ev74_cma_memory_on_standard_terminal() {
+    fn system_tab_shows_ev74_memory_on_standard_terminal() {
         let sample = Sample {
             timestamp: Utc::now(),
-            values: BTreeMap::from([("ev74_cma_used_mb".into(), Some(74.25))]),
+            values: BTreeMap::from([
+                ("ev74_mem_allocated_mb".into(), Some(74.25)),
+                ("linux_cma_used_mb".into(), Some(26.5)),
+            ]),
         };
         let cache = CachePayload {
             schema: 1,
             version: "0.1.0".into(),
             updated_at: Utc::now(),
-            metrics: vec![MetricDefinition::new(
-                "ev74_cma_used_mb",
-                "EV74 CMA used",
-                "CMAUsed",
-                "EV74",
-                "MB",
-                "CMA memory used",
-                None,
-                None,
-            )],
+            metrics: vec![
+                MetricDefinition::new(
+                    "ev74_mem_allocated_mb",
+                    "EV74 memory allocated",
+                    "EV74MB",
+                    "EV74",
+                    "MB",
+                    "DMA-BUF memory EV74 is using",
+                    None,
+                    None,
+                ),
+                MetricDefinition::new(
+                    "linux_cma_used_mb",
+                    "linux,cma used",
+                    "LCMAMB",
+                    "Memory",
+                    "MB",
+                    "DMA-BUF memory from the linux,cma heap",
+                    None,
+                    None,
+                ),
+            ],
             latest: Some(sample.clone()),
             samples: vec![sample],
             processes: Vec::new(),
             power: None,
             errors: Vec::new(),
         };
-        let backend = TestBackend::new(140, 42);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
         let compare = empty_compare();
+        let render = |height| {
+            let mut terminal = Terminal::new(TestBackend::new(140, height)).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    draw(
+                        frame,
+                        &cache,
+                        Tab::System,
+                        true,
+                        0,
+                        0,
+                        &compare,
+                        None,
+                        &InputMode::Normal,
+                    )
+                })
+                .expect("draw system tab");
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
 
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &cache,
-                    Tab::System,
-                    true,
-                    0,
-                    0,
-                    &compare,
-                    None,
-                    &InputMode::Normal,
-                )
-            })
-            .expect("draw system tab");
-        let rendered: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let standard = render(42);
+        assert!(standard.contains("EV74 memory"));
+        assert!(standard.contains("74.2 MB"));
 
-        assert!(rendered.contains("EV74 CMA memory"));
-        assert!(rendered.contains("74.2 MB"));
+        // The details table, which lists linux,cma used, needs a taller terminal.
+        let tall = render(60);
+        assert!(tall.contains("LCMAMB"));
+        assert!(tall.contains("26.5 MB"));
     }
 
     #[test]

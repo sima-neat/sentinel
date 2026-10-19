@@ -9,11 +9,21 @@ const PROCESS_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const LEGACY_MLA_MEMORY_PATH: &str = "/dev/simaai-mem";
 const MLA_DMA_HEAP_PATH: &str = "/dev/dma_heap/simaai,dms";
 const DMA_BUFINFO_PATH: &str = "/sys/kernel/debug/dma_buf/bufinfo";
+const CVU_DEVICE_PATH: &str = "/dev/cvu";
+const LINUX_CMA_HEAP_PATH: &str = "/dev/dma_heap/linux,cma";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MlaMemorySource {
     DmaBuf,
     Legacy,
+}
+
+/// DMA-BUF bytes from one bufinfo snapshot, each buffer counted once per total.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DmaBufTotals {
+    mla_bytes: u64,
+    ev74_bytes: u64,
+    linux_cma_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -87,32 +97,52 @@ pub fn system_metric_definitions() -> Vec<MetricDefinition> {
             None,
         ),
         MetricDefinition::new(
-            "ev74_cma_total_mb",
-            "EV74 CMA reserved",
-            "CMATotal",
+            "ev74_mem_allocated_mb",
+            "EV74 memory allocated",
+            "EV74MB",
             "EV74",
             "MB",
-            "Boot-time contiguous memory reservation reported by CmaTotal in /proc/meminfo.",
+            "DMA-BUF memory EV74 is using: buffers attached to the cvu device, each counted once. Buffers shared with the MLA also count in MLA memory allocated.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
+            "linux_cma_used_mb",
+            "linux,cma used",
+            "LCMAMB",
+            "Memory",
+            "MB",
+            "DMA-BUF memory allocated from the linux,cma heap, each buffer counted once. EV74, video, ISP and CPU buffers share this pool.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
+            "ev74_cma_total_mb",
+            "CMA reserved",
+            "CMATotal",
+            "Memory",
+            "MB",
+            "CmaTotal from /proc/meminfo: contiguous memory reserved at boot across all CMA regions. Not specific to EV74.",
             None,
             None,
         ),
         MetricDefinition::new(
             "ev74_cma_free_mb",
-            "EV74 CMA free",
+            "CMA free",
             "CMAFree",
-            "EV74",
+            "Memory",
             "MB",
-            "Currently free contiguous memory reported by CmaFree in /proc/meminfo.",
+            "CmaFree from /proc/meminfo across all CMA regions. Not specific to EV74.",
             None,
             None,
         ),
         MetricDefinition::new(
             "ev74_cma_used_mb",
-            "EV74 CMA used",
+            "CMA used",
             "CMAUsed",
-            "EV74",
+            "Memory",
             "MB",
-            "CmaTotal minus CmaFree; a proxy for EV74 memory consumption when EV74 owns the CMA pool.",
+            "CmaTotal minus CmaFree across all CMA regions. Includes every CMA user and movable pages such as page cache, so it is not EV74 memory; see EV74 memory allocated.",
             None,
             None,
         ),
@@ -284,7 +314,7 @@ impl SystemCollector {
         let mut values = BTreeMap::new();
         values.extend(self.sample_cpu());
         values.extend(sample_memory());
-        values.insert("mla_mem_allocated_mb".into(), read_mla_memory_mb());
+        values.extend(sample_dma_buf_memory());
         values.extend(self.sample_disks(dt));
         values.extend(self.sample_network(dt));
         if self
@@ -626,8 +656,55 @@ fn parse_meminfo(raw: &str) -> BTreeMap<String, u64> {
         .collect()
 }
 
-fn read_mla_memory_mb() -> f64 {
-    read_mla_memory_bytes()
+fn sample_dma_buf_memory() -> BTreeMap<String, f64> {
+    let exists = |path: &str| Path::new(path).exists();
+    let mla_source = detect_mla_memory_source(exists);
+    let cvu_present = exists(CVU_DEVICE_PATH);
+    let linux_cma_present = exists(LINUX_CMA_HEAP_PATH);
+    // One bufinfo read feeds every DMA-BUF metric in this sample.
+    let totals = (mla_source == Some(MlaMemorySource::DmaBuf) || cvu_present || linux_cma_present)
+        .then(|| fs::read_to_string(DMA_BUFINFO_PATH).ok())
+        .flatten()
+        .and_then(|raw| parse_dma_buf_totals(&raw));
+    let mla_bytes = match mla_source {
+        Some(MlaMemorySource::DmaBuf) => totals.map(|totals| totals.mla_bytes),
+        Some(MlaMemorySource::Legacy) => fs::read_to_string(LEGACY_MLA_MEMORY_PATH)
+            .ok()
+            .and_then(|raw| parse_legacy_mla_memory_bytes(&raw)),
+        None => None,
+    };
+
+    let mut values = BTreeMap::from([("mla_mem_allocated_mb".to_string(), bytes_to_mb(mla_bytes))]);
+    for (key, bytes) in device_dma_buf_bytes(totals, cvu_present, linux_cma_present) {
+        values.insert(key.into(), bytes_to_mb(bytes));
+    }
+    values
+}
+
+/// EV74 and linux,cma bytes, unavailable when their device is absent rather than a false zero.
+fn device_dma_buf_bytes(
+    totals: Option<DmaBufTotals>,
+    cvu_present: bool,
+    linux_cma_present: bool,
+) -> [(&'static str, Option<u64>); 2] {
+    [
+        (
+            "ev74_mem_allocated_mb",
+            totals
+                .filter(|_| cvu_present)
+                .map(|totals| totals.ev74_bytes),
+        ),
+        (
+            "linux_cma_used_mb",
+            totals
+                .filter(|_| linux_cma_present)
+                .map(|totals| totals.linux_cma_bytes),
+        ),
+    ]
+}
+
+fn bytes_to_mb(bytes: Option<u64>) -> f64 {
+    bytes
         .map(|bytes| bytes as f64 / 1024.0 / 1024.0)
         .unwrap_or(f64::NAN)
 }
@@ -640,17 +717,6 @@ fn detect_mla_memory_source(mut path_exists: impl FnMut(&str) -> bool) -> Option
         return Some(MlaMemorySource::Legacy);
     }
     None
-}
-
-fn read_mla_memory_bytes() -> Option<u64> {
-    match detect_mla_memory_source(|path| Path::new(path).exists())? {
-        MlaMemorySource::DmaBuf => fs::read_to_string(DMA_BUFINFO_PATH)
-            .ok()
-            .and_then(|raw| parse_dma_buf_mla_bytes(&raw)),
-        MlaMemorySource::Legacy => fs::read_to_string(LEGACY_MLA_MEMORY_PATH)
-            .ok()
-            .and_then(|raw| parse_legacy_mla_memory_bytes(&raw)),
-    }
 }
 
 fn parse_legacy_mla_memory_bytes(raw: &str) -> Option<u64> {
@@ -741,19 +807,41 @@ fn parse_dma_buf_objects(raw: &str) -> Option<Vec<DmaBufObject<'_>>> {
     Some(objects)
 }
 
-fn parse_dma_buf_mla_bytes(raw: &str) -> Option<u64> {
-    let mut matched_by_inode = BTreeMap::new();
-    for object in parse_dma_buf_objects(raw)? {
-        let exporter = object.exporter.to_ascii_lowercase();
-        let exported_for_mla = exporter == "mla" || exporter == "simaai,dms";
-        let attached_to_mla = object.attached_devices.iter().any(|device| {
-            let device = device.trim().to_ascii_lowercase();
-            device == "mla" || device.ends_with(".mla")
-        });
-        if !exported_for_mla && !attached_to_mla {
-            continue;
-        }
+fn parse_dma_buf_totals(raw: &str) -> Option<DmaBufTotals> {
+    let objects = parse_dma_buf_objects(raw)?;
+    Some(DmaBufTotals {
+        mla_bytes: sum_unique_dma_bufs(&objects, |object| {
+            let exporter = object.exporter.to_ascii_lowercase();
+            exporter == "mla" || exporter == "simaai,dms" || attached_to(object, "mla")
+        })?,
+        // EV74 is attached as `cvu` on Platform 3.0. Buffers named "EV74" are
+        // system-daemon buffers that EV74 is not using, so names are ignored.
+        ev74_bytes: sum_unique_dma_bufs(&objects, |object| attached_to(object, "cvu"))?,
+        linux_cma_bytes: sum_unique_dma_bufs(&objects, |object| {
+            object.exporter.eq_ignore_ascii_case("linux,cma")
+        })?,
+    })
+}
 
+/// Matches a bare device name (`cvu`) or one with a unit address (`5000000.mla`).
+fn attached_to(object: &DmaBufObject<'_>, device_name: &str) -> bool {
+    object.attached_devices.iter().any(|device| {
+        let device = device.trim().to_ascii_lowercase();
+        device == device_name
+            || device
+                .strip_suffix(device_name)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+/// Sums matching objects once per inode. A device attaches to a buffer once per
+/// client, so one buffer can list the same device several times.
+fn sum_unique_dma_bufs(
+    objects: &[DmaBufObject<'_>],
+    matches: impl Fn(&DmaBufObject<'_>) -> bool,
+) -> Option<u64> {
+    let mut matched_by_inode = BTreeMap::new();
+    for object in objects.iter().filter(|object| matches(object)) {
         if let Some(previous_size) = matched_by_inode.insert(object.inode, object.size_bytes) {
             if previous_size != object.size_bytes {
                 return None;
@@ -941,10 +1029,20 @@ impl MountCheck for Path {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_mla_memory_source, network_utilization_percent, parse_default_route_interface,
-        parse_dma_buf_mla_bytes, parse_dma_buf_objects, parse_legacy_mla_memory_bytes,
-        parse_meminfo, MlaMemorySource, LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
+        detect_mla_memory_source, device_dma_buf_bytes, network_utilization_percent,
+        parse_default_route_interface, parse_dma_buf_objects, parse_dma_buf_totals,
+        parse_legacy_mla_memory_bytes, parse_meminfo, DmaBufTotals, MlaMemorySource,
+        LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
     };
+
+    /// bufinfo captured on a Modalix DevKit (eLxr 3.0.0 B1859) mid-run of YOLO26 with
+    /// EV74 preprocessing at 1080p: 136 objects, six attached to `cvu` four times each.
+    const PLATFORM_3_EV74_BUFINFO: &str =
+        include_str!("fixtures/dma-buf-platform-3.0-ev74-preprocess.bufinfo");
+
+    fn parse_dma_buf_mla_bytes(raw: &str) -> Option<u64> {
+        parse_dma_buf_totals(raw).map(|totals| totals.mla_bytes)
+    }
 
     const DMA_BUF_FIXTURE: &str = "\
 Dma-buf Objects:
@@ -1052,6 +1150,96 @@ Total 4 objects, 14163968 bytes
         );
 
         assert_eq!(parse_dma_buf_mla_bytes(&conflicting), None);
+    }
+
+    #[test]
+    fn dma_buf_totals_match_a_platform_3_ev74_capture() {
+        assert_eq!(
+            parse_dma_buf_totals(PLATFORM_3_EV74_BUFINFO),
+            Some(DmaBufTotals {
+                mla_bytes: 61_997_056,
+                ev74_bytes: 24_408_064,
+                linux_cma_bytes: 27_602_944,
+            })
+        );
+    }
+
+    #[test]
+    fn ev74_accounting_counts_attached_buffers_once() {
+        let shared = "Dma-buf Objects:\n\
+                      size flags mode count exp_name ino name\n\
+                      03637248 00000002 02080007 00000008 linux,cma 00000286 <none>\n\
+                      \tAttached Devices:\n\
+                      \tcvu\n\
+                      \tcvu\n\
+                      \tcvu\n\
+                      \t5000000.mla\n\
+                      \tcvu\n\
+                      Total 5 devices attached\n\
+                      \n\
+                      02097152 00000002 02080007 00000002 linux,cma 00000013 EV74\n\
+                      \tAttached Devices:\n\
+                      Total 0 devices attached\n\
+                      \n\
+                      Total 2 objects, 5734400 bytes\n";
+        let totals = parse_dma_buf_totals(shared).unwrap();
+
+        // Attached four times, counted once; shared with the MLA, so in both totals.
+        assert_eq!(totals.ev74_bytes, 3_637_248);
+        assert_eq!(totals.mla_bytes, 3_637_248);
+        // The unattached buffer named "EV74" is not EV74 memory, but it is linux,cma memory.
+        assert_eq!(totals.linux_cma_bytes, 3_637_248 + 2_097_152);
+    }
+
+    #[test]
+    fn ev74_accounting_accepts_a_unit_address_and_rejects_lookalike_devices() {
+        let totals = parse_dma_buf_totals(DMA_BUF_FIXTURE).unwrap();
+        assert_eq!(totals.ev74_bytes, 524_288);
+        assert_eq!(totals.linux_cma_bytes, 4_096 + 1_048_576 + 524_288);
+
+        let lookalike = DMA_BUF_FIXTURE.replace("5100000.cvu", "5100000.notcvu");
+        assert_eq!(parse_dma_buf_totals(&lookalike).unwrap().ev74_bytes, 0);
+    }
+
+    #[test]
+    fn dma_buf_totals_are_zero_when_idle_and_unavailable_when_unreadable() {
+        let idle = "Dma-buf Objects:\n\
+                    size flags mode count exp_name ino name\n\
+                    \n\
+                    Total 0 objects, 0 bytes\n";
+        let zero = DmaBufTotals {
+            mla_bytes: 0,
+            ev74_bytes: 0,
+            linux_cma_bytes: 0,
+        };
+
+        assert_eq!(parse_dma_buf_totals(idle), Some(zero));
+        assert_eq!(parse_dma_buf_totals("permission denied"), None);
+    }
+
+    #[test]
+    fn device_metrics_are_unavailable_without_their_device_or_snapshot() {
+        let totals = Some(DmaBufTotals {
+            mla_bytes: 1,
+            ev74_bytes: 2,
+            linux_cma_bytes: 3,
+        });
+
+        assert_eq!(
+            device_dma_buf_bytes(totals, true, true),
+            [
+                ("ev74_mem_allocated_mb", Some(2)),
+                ("linux_cma_used_mb", Some(3))
+            ]
+        );
+        assert_eq!(
+            device_dma_buf_bytes(totals, false, false),
+            [("ev74_mem_allocated_mb", None), ("linux_cma_used_mb", None)]
+        );
+        assert_eq!(
+            device_dma_buf_bytes(None, true, true),
+            [("ev74_mem_allocated_mb", None), ("linux_cma_used_mb", None)]
+        );
     }
 
     #[test]
