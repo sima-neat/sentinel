@@ -44,7 +44,7 @@ used_pct   = used_bytes / MemTotal × 100
 
 ## MLA 記憶體
 
-在 Platform 3.0 上，若存在 `/dev/dma_heap/simaai,dms`，便會選用 DMA-BUF 遙測。Sentinel 讀取 `/sys/kernel/debug/dma_buf/bufinfo`，加總由 MLA 堆積（`mla` 或 `simaai,dms`）匯出的物件，每個 DMA-BUF inode 只計算一次。其他堆積的緩衝區即使有 MLA 附加，也不是 MLA 記憶體。
+在 Platform 3.0 上，若存在 `/dev/dma_heap/simaai,dms`，便會選用 DMA-BUF 遙測。Sentinel 讀取 `/sys/kernel/debug/dma_buf/bufinfo`，加總由 MLA 堆積（`mla` 或 `simaai,dms`）匯出的物件，以及只有 MLA 使用的共用記憶體池緩衝區（例如從 MLA 堆積溢出到 CMA 的 MLA 配置），每個 DMA-BUF inode 只計算一次。EV74（`cvu`）也使用的共用記憶體池緩衝區（例如 EV74 寫入供 MLA 讀取的輸入）不是 MLA 記憶體。
 
 在沒有此 heap 的舊版上，Sentinel 讀取 `/dev/simaai-mem`，找到 `Total allocated size:`，解析其後的十六進位位元組數，並換算為 MiB。
 

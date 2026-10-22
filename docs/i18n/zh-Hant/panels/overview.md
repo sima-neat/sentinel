@@ -10,7 +10,7 @@
 | 目前電力 | `power_current_watts` | 已成功讀取對應電源通道中的最新有效總數的 PMBus 軌線。請參閱 [Power](power.md)，以了解部分讀取行為。 |
 | 中央處理器 | `cpu_usage_pct` | 彙總 Linux 在最新的系統樣本時間範圍內，CPU 使用率百分比。 |
 | 記憶 | `linux_mem_used_pct` | `(MemTotal - MemAvailable) / MemTotal × 100`. |
-| MLA 記憶體 | `mla_mem_allocated_mb` | 在 Platform 3.0 上，加總由 MLA 堆積（`mla`/`simaai,dms`）匯出的 DMA-BUF 物件，每個 inode 只計算一次，並換算為 MiB。舊版則使用 `/dev/simaai-mem` 的已配置位元組總數。這是已配置的記憶體，而非 MLA 使用率。 |
+| MLA 記憶體 | `mla_mem_allocated_mb` | 在 Platform 3.0 上，加總由 MLA 堆積（`mla`/`simaai,dms`）匯出的 DMA-BUF 物件，以及只有 MLA 使用的共用記憶體池緩衝區，每個 inode 只計算一次，並換算為 MiB。舊版則使用 `/dev/simaai-mem` 的已配置位元組總數。這是已配置的記憶體，而非 MLA 使用率。 |
 | 網路 | `net_rx_mbps + net_tx_mbps` | 所有非迴路介面的總和接收和傳輸速率。儘管名稱中有「關鍵」，但顯示的單位是相當於 MiB/s，而不是兆位元/秒。 |
 
 「熱點圖」對於找出溫度最高的區域很有幫助，但它不應取代「熱感應面板」：它會隱藏哪個感測器負責監測，並且可以在晶片上的感測器和板上的感測器之間切換。

@@ -46,7 +46,7 @@ used_pct   = used_bytes / MemTotal × 100
 
 ## Пам’ять MLA
 
-На Platform 3.0 наявність `/dev/dma_heap/simaai,dms` вмикає телеметрію DMA-BUF. Sentinel зчитує `/sys/kernel/debug/dma_buf/bufinfo` та підсумовує об’єкти, експортовані купами MLA (`mla` або `simaai,dms`), рахуючи кожен inode DMA-BUF один раз. Буфери з інших куп не є пам’яттю MLA, навіть якщо MLA до них приєднаний.
+На Platform 3.0 наявність `/dev/dma_heap/simaai,dms` вмикає телеметрію DMA-BUF. Sentinel зчитує `/sys/kernel/debug/dma_buf/bufinfo` та підсумовує об’єкти, експортовані купами MLA (`mla` або `simaai,dms`), а також буфери спільного пулу, які використовує лише MLA (наприклад, виділення MLA, що переповнили купу MLA і потрапили в CMA), рахуючи кожен inode DMA-BUF один раз. Буфер спільного пулу, який також використовує EV74 (`cvu`), наприклад вхідні дані, які EV74 записує для MLA, не є пам’яттю MLA.
 
 У попередніх випусках без цієї купи Sentinel зчитує `/dev/simaai-mem`, визначає `Total allocated size:`, аналізує наступну шістнадцяткову кількість байтів і перетворює її в MiB.
 

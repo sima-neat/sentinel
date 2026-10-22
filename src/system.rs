@@ -88,7 +88,7 @@ pub fn system_metric_definitions() -> Vec<MetricDefinition> {
             "MLAMB",
             "MLA",
             "MB",
-            "DMA-BUF memory allocated from the MLA heaps (simaai,dms, mla) on Platform 3.0, each buffer counted once, with legacy allocator fallback on older releases.",
+            "DMA-BUF memory allocated from the MLA heaps (simaai,dms, mla) on Platform 3.0, plus shared-pool buffers only the MLA uses, each buffer counted once, with legacy allocator fallback on older releases.",
             None,
             None,
         ),
@@ -752,17 +752,35 @@ fn parse_dma_buf_objects(raw: &str) -> Option<Vec<DmaBufObject<'_>>> {
 
 fn parse_dma_buf_totals(raw: &str) -> Option<DmaBufTotals> {
     let objects = parse_dma_buf_objects(raw)?;
-    // MLA memory is what the MLA heaps hold. Buffers from other heaps are not
-    // counted even when the MLA is attached to them, such as inputs another
-    // engine writes into the shared pool for the MLA to read.
+    // MLA memory is what the MLA heaps hold, plus shared-pool buffers that only the
+    // MLA uses, such as MLA allocations that spill from the MLA heap into CMA. A
+    // shared-pool buffer EV74 (`cvu`) also uses, such as an input EV74 writes for
+    // the MLA to read, is not MLA memory.
     Some(DmaBufTotals {
-        mla_bytes: sum_unique_dma_bufs(&objects, from_mla_heap)?,
+        mla_bytes: sum_unique_dma_bufs(&objects, |object| {
+            from_mla_heap(object) || used_only_by_mla(object)
+        })?,
     })
 }
 
 fn from_mla_heap(object: &DmaBufObject<'_>) -> bool {
     let exporter = object.exporter.to_ascii_lowercase();
     exporter == "mla" || exporter == "simaai,dms"
+}
+
+fn used_only_by_mla(object: &DmaBufObject<'_>) -> bool {
+    attached_to(object, "mla") && !attached_to(object, "cvu")
+}
+
+/// Matches a bare device name (`mla`) or one with a unit address (`5000000.mla`).
+fn attached_to(object: &DmaBufObject<'_>, device_name: &str) -> bool {
+    object.attached_devices.iter().any(|device| {
+        let device = device.trim().to_ascii_lowercase();
+        device == device_name
+            || device
+                .strip_suffix(device_name)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
 }
 
 /// Sums matching objects once per inode. A device attaches to a buffer once per
@@ -960,9 +978,10 @@ impl MountCheck for Path {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_mla_memory_source, network_utilization_percent, parse_default_route_interface,
-        parse_dma_buf_objects, parse_dma_buf_totals, parse_legacy_mla_memory_bytes, parse_meminfo,
-        DmaBufTotals, MlaMemorySource, LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
+        attached_to, detect_mla_memory_source, network_utilization_percent,
+        parse_default_route_interface, parse_dma_buf_objects, parse_dma_buf_totals,
+        parse_legacy_mla_memory_bytes, parse_meminfo, DmaBufTotals, MlaMemorySource,
+        LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
     };
 
     /// Real bufinfo from a Modalix DevKit (eLxr 3.0.0 B1859) while YOLO26 ran at 1080p
@@ -1106,12 +1125,15 @@ Total 4 objects, 14163968 bytes
     }
 
     #[test]
-    fn dma_buf_mla_accounting_counts_only_the_mla_heaps() {
-        // The 1 MiB linux,cma buffer attached to the MLA is not MLA-heap memory.
-        assert_eq!(parse_dma_buf_mla_bytes(DMA_BUF_FIXTURE), Some(2_097_152));
+    fn dma_buf_mla_accounting_counts_mla_heaps_and_mla_only_buffers() {
+        // MLA-heap weights plus the 1 MiB linux,cma buffer only the MLA uses.
+        assert_eq!(
+            parse_dma_buf_mla_bytes(DMA_BUF_FIXTURE),
+            Some(2_097_152 + 1_048_576)
+        );
         assert_eq!(
             parse_dma_buf_mla_bytes(&DMA_BUF_FIXTURE.replace("simaai,dms", "mla")),
-            Some(2_097_152)
+            Some(2_097_152 + 1_048_576)
         );
     }
 
@@ -1159,10 +1181,11 @@ Total 4 objects, 14163968 bytes
     }
 
     #[test]
-    fn mla_total_counts_only_buffers_from_the_mla_heaps() {
+    fn mla_total_counts_mla_heaps_and_mla_only_shared_buffers() {
         const WEIGHTS: u64 = 8 << 20;
         const SCRATCH: u64 = 64 << 10;
         const HANDOFF: u64 = 4 << 20;
+        const SPILLED: u64 = 2 << 20;
         let snapshot = bufinfo(&[
             Buf {
                 size: WEIGHTS,
@@ -1178,13 +1201,21 @@ Total 4 objects, 14163968 bytes
                 name: "<none>",
                 devices: &[],
             },
-            // A shared-pool buffer another engine wrote and the MLA reads: not MLA memory.
+            // A shared-pool buffer EV74 also uses: not MLA memory.
             Buf {
                 size: HANDOFF,
                 exporter: "linux,cma",
                 inode: 3,
                 name: "<none>",
                 devices: &["cvu", "5000000.mla", "5000000.mla"],
+            },
+            // An MLA allocation that spilled from the MLA heap into the shared pool.
+            Buf {
+                size: SPILLED,
+                exporter: "linux,cma",
+                inode: 5,
+                name: "<none>",
+                devices: &["5000000.mla"],
             },
             Buf {
                 size: 1 << 20,
@@ -1198,7 +1229,7 @@ Total 4 objects, 14163968 bytes
         assert_eq!(
             parse_dma_buf_totals(&snapshot),
             Some(DmaBufTotals {
-                mla_bytes: WEIGHTS + SCRATCH
+                mla_bytes: WEIGHTS + SCRATCH + SPILLED
             })
         );
     }
@@ -1219,15 +1250,21 @@ Total 4 objects, 14163968 bytes
     }
 
     #[test]
-    fn mla_total_ignores_tags_and_lookalike_heap_names() {
+    fn mla_total_rejects_lookalike_device_and_heap_names() {
         let snapshot = bufinfo(&[
-            // Tagged for the MLA, but from the shared pool: not MLA-heap memory.
             Buf {
                 size: 4096,
                 exporter: "linux,cma",
                 inode: 1,
                 name: "<none>",
-                devices: &["5000000.mla"],
+                devices: &["5000000.notmla"],
+            },
+            Buf {
+                size: 2048,
+                exporter: "linux,cma",
+                inode: 4,
+                name: "<none>",
+                devices: &["mlax"],
             },
             Buf {
                 size: 8192,
@@ -1259,16 +1296,25 @@ Total 4 objects, 14163968 bytes
             .map(|object| object.size_bytes)
             .sum();
         assert!(mla > 0);
+        // Every shared-pool buffer the MLA uses in this run is also used by EV74.
         assert_eq!(mla, heap_buffers);
 
-        // Tags do not move memory in or out of the MLA total.
+        // More MLA clients attaching changes nothing.
         assert_eq!(
             parse_dma_buf_mla_bytes(&repeat_device_lines(raw, ".mla")),
             Some(mla)
         );
+        // Without EV74 tags, the shared buffers become MLA-only and count as MLA.
+        let shared: u64 = parse_dma_buf_objects(raw)
+            .unwrap()
+            .iter()
+            .filter(|object| attached_to(object, "mla") && attached_to(object, "cvu"))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert!(shared > 0);
         assert_eq!(
-            parse_dma_buf_mla_bytes(&drop_device_lines(raw, ".mla")),
-            Some(mla)
+            parse_dma_buf_mla_bytes(&drop_device_lines(raw, ".cvu")),
+            Some(mla + shared)
         );
     }
 

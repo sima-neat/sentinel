@@ -57,9 +57,11 @@ MiB even though the UI label is MB.
 
 On Platform 3.0, the presence of `/dev/dma_heap/simaai,dms` selects DMA-BUF
 telemetry. Sentinel reads `/sys/kernel/debug/dma_buf/bufinfo` and sums the
-objects exported by the MLA heaps, `mla` or `simaai,dms`, counting each DMA-BUF
-inode once. Buffers from other heaps are not MLA memory even when the MLA is
-attached to them.
+objects exported by the MLA heaps, `mla` or `simaai,dms`, plus shared-pool
+buffers that only the MLA uses, such as MLA allocations that spill from the MLA
+heap into CMA, counting each DMA-BUF inode once. A shared-pool buffer that EV74
+(`cvu`) also uses, such as an input EV74 writes for the MLA to read, is not MLA
+memory.
 
 On earlier releases without that heap, Sentinel reads `/dev/simaai-mem`, finds
 `Total allocated size:`, parses the following hexadecimal byte count, and
