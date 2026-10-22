@@ -4,6 +4,10 @@ After=multi-user.target
 
 [Service]
 Type=simple
+# Board power comes from the kernel's PMBus driver. The device tree declares
+# the regulators, but the module does not load on its own; a missing module
+# leaves power unavailable with the reason in the cache, not a failed start.
+ExecStartPre=-/sbin/modprobe irps5401
 ExecStart=/usr/local/bin/simaai-sentinel daemon --cache /run/simaai-sentinel/cache.json --api-socket /run/simaai-sentinel/api.sock --interval 2.0 --history 240
 Restart=always
 RestartSec=5

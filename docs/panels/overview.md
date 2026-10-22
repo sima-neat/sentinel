@@ -8,7 +8,7 @@ detailed panels. It does not collect separate data.
 | Chart | Metric/calculation | Meaning |
 | --- | --- | --- |
 | Thermal Max | Maximum finite temperature across all current thermal metrics | Hottest reported on-die or board sensor at each cache sample. The sensor producing the maximum can change over time. |
-| Current Power | `power_current_watts` | Latest valid total of PMBus rails successfully read in the corresponding power pass. See [Power](power.md) for partial-read behavior. |
+| Current Power | `power_current_watts` | Latest total of every PMBus rail, read from the kernel driver; empty when any rail could not be read. See [Power](power.md). |
 | CPU | `cpu_usage_pct` | Aggregate Linux CPU busy percentage over the latest system sample window. |
 | Memory | `linux_mem_used_pct` | `(MemTotal - MemAvailable) / MemTotal × 100`. |
 | MLA Memory | `mla_mem_allocated_mb` | On Platform 3.0, the inode-deduplicated union of DMA-BUF objects exported by `mla`/`simaai,dms` or attached to an MLA device, converted to MiB. On earlier releases, the total allocated bytes from `/dev/simaai-mem`. This is allocated memory, not MLA utilization. |

@@ -7,7 +7,7 @@
 | 圖表 | 指標／計算方式 | 意義 |
 | --- | --- | --- |
 | 極限散熱 | 所有目前熱能指標中，最高有限溫度。 | 在每個快取樣本中，報告的最高溫度來自於晶片或板上的感測器。產生最高溫度的感測器可能會隨著時間而改變。 |
-| 目前電力 | `power_current_watts` | 已成功讀取對應電源通道中的最新有效總數的 PMBus 軌線。請參閱 [Power](power.md)，以了解部分讀取行為。 |
+| 目前電力 | `power_current_watts` | 從核心驅動程式讀取的所有 PMBus 電源軌之最新總和；任何電源軌無法讀取時為空白。請參閱 [Power](power.md)。 |
 | 中央處理器 | `cpu_usage_pct` | 彙總 Linux 在最新的系統樣本時間範圍內，CPU 使用率百分比。 |
 | 記憶 | `linux_mem_used_pct` | `(MemTotal - MemAvailable) / MemTotal × 100`. |
 | MLA 記憶體 | `mla_mem_allocated_mb` | 在 Platform 3.0 上，將由 `mla`/`simaai,dms` 匯出或附加至 MLA 裝置的 DMA-BUF 物件聯集依 inode 去除重複後，換算為 MiB。舊版則使用 `/dev/simaai-mem` 的已配置位元組總數。這是已配置的記憶體，而非 MLA 使用率。 |

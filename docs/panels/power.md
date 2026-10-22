@@ -1,49 +1,59 @@
 # Power panel
 
-Sentinel samples PMBus `POUT` registers in a dedicated thread. The default
-interval is 100 ms. The normal cache interval is slower, so the UI publishes
-the latest accumulated state rather than displaying every raw PMBus sample.
+Sentinel reads each rail's output power (`POUT`) from the kernel's PMBus
+driver in a dedicated thread every 250 ms. The normal cache interval is
+slower, so the UI publishes the latest accumulated state rather than
+displaying every power reading.
+
+## Source
+
+Each rail is one `pout` channel of a PMBus regulator's hwmon device:
+`/sys/bus/i2c/devices/<bus>-<address>/hwmon/hwmon*/power<N>_input`, in
+microwatts, where `power<N>_label` names the channel (for example `pout1` for
+PMBus page 0). Sentinel finds the device by its I2C address and the channel by
+its label, never by `hwmonN` or channel number. The kernel driver selects the
+PMBus page and reads the register under its own lock, so other programs that
+read the regulators cannot corrupt Sentinel's readings.
+
+On Modalix the regulators are IRPS5401 devices. The device tree declares them,
+but the `irps5401` module does not load on its own, so the Sentinel service
+runs `modprobe irps5401` before it starts. When no driver is bound, power is
+unavailable and the collector error names the module to load.
 
 ## Headline fields
 
 | Field | Calculation |
 | --- | --- |
-| Current | Sum of rails successfully read during the latest PMBus pass that had at least one successful rail. |
-| Session average | Arithmetic mean of all valid total samples since daemon start. A pass is considered valid when at least one rail succeeds. |
-| Session peak | Maximum valid total sample since daemon start. |
+| Current | Sum of every configured rail in the latest pass. Empty when any rail could not be read. |
+| Session average | Arithmetic mean of the totals of all complete passes since daemon start. A pass is complete when every rail was read. |
+| Session peak | Maximum complete-pass total since daemon start. |
 | Duration | Elapsed monotonic time since the power accumulator started. |
-| Valid samples | PMBus passes in which at least one configured rail was read. |
-| Failed samples | PMBus passes in which no configured rail was read. |
+| Valid samples | Passes in which every configured rail was read. |
+| Failed samples | Passes in which at least one configured rail could not be read. |
 
 All session statistics reset when the daemon restarts.
 
 ## Collector states
 
-- **ACTIVE**: at least one valid sample exists, the latest pass had data, and
-  there is no current rail error.
-- **DEGRADED**: valid data exists, but the latest pass failed completely or at
-  least one rail reported an error.
-- **UNAVAILABLE**: no valid total has been collected.
+- **ACTIVE**: at least one complete pass exists, and the latest pass read
+  every rail.
+- **DEGRADED**: a complete pass exists, but the latest pass could not read at
+  least one rail.
+- **UNAVAILABLE**: no complete pass has been collected.
 
-During a partial failure, Current, Average, and Peak totals can contain fewer
-rails than a healthy sample. If a pass fails completely, Current and all rail
-Power values retain their last successful readings; Failed samples and rail
-Errors increase, and the state becomes DEGRADED. Do not interpret retained
-values as measurements from the failed pass or compare partial and complete
-totals as if they measured the same boundary.
+Sentinel never shows an earlier reading as current. When a rail cannot be
+read, its Power value and Current are empty until the next successful pass,
+Failed samples and the rail's Errors increase, and the state becomes DEGRADED.
+Average and Peak include only complete passes, so every total covers the same
+rails.
 
 ## Rail table fields
 
-- **Power** is the most recent successful reading for that rail. If a later
-  read fails, this value remains at the last success while Errors increments.
+- **Power** is the rail's reading from the latest pass, or empty when that
+  read failed.
 - **Samples** counts successful readings for that rail since daemon start.
-- **Errors** counts failed page-select or PMBus-register reads for that rail.
-
-For a partially successful pass, the total uses only rails that succeeded in
-that pass while each rail row retains its last successful value. For a
-completely failed pass, both the total and rail rows retain earlier values.
-Consequently, summing visible rail rows can differ from Current during a
-partial failure, and neither value is fresh after a complete failure.
+- **Errors** counts failed reads of that rail's kernel `power<N>_input` file,
+  for example while no driver is bound.
 
 ## Modalix SOM rails
 

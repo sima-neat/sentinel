@@ -7,7 +7,7 @@
 | 차트 | 측정 지표/계산 방식 | 의미 |
 | --- | --- | --- |
 | 최대 열 용량 | 현재 사용 중인 모든 열 관련 지표에서 측정되는 최대 유한 온도 | 각 캐시 샘플에서 가장 높은 온도를 기록한 온다이 또는 보드 센서에 대한 정보를 제공합니다. 최대 온도를 기록하는 센서는 시간이 지남에 따라 변경될 수 있습니다. |
-| 현재 전력 | `power_current_watts` | 해당 전원 경로에서 성공적으로 읽은 최신 유효한 총 PMBus 레일 값입니다. 부분적으로 읽는 방식에 대한 자세한 내용은 [Power](power.md)를 참조하십시오. |
+| 현재 전력 | `power_current_watts` | 커널 드라이버에서 읽은 모든 PMBus 레일의 최신 합계입니다. 레일 중 하나라도 읽지 못하면 비어 있습니다. [Power](power.md)를 참조하십시오. |
 | CPU | `cpu_usage_pct` | 집계 Linux 최신 시스템 샘플링 기간 동안 CPU 사용률. |
 | 메모리 | `linux_mem_used_pct` | `(MemTotal - MemAvailable) / MemTotal × 100`. |
 | MLA 메모리 | `mla_mem_allocated_mb` | Platform 3.0에서는 `mla`/`simaai,dms`가 내보내거나 MLA 장치에 연결된 DMA-BUF 객체의 합집합을 inode 기준으로 중복 제거하여 MiB로 변환합니다. 이전 릴리스에서는 `/dev/simaai-mem`의 총 할당 바이트 수를 사용합니다. 이는 할당된 메모리이며 MLA 활용률이 아닙니다. |

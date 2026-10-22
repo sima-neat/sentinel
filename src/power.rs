@@ -1,14 +1,14 @@
-//! Standalone Modalix PMBus power telemetry.
+//! Modalix board power telemetry from the kernel's PMBus drivers.
 //!
-//! The register protocol and built-in rail profiles intentionally mirror
-//! Neat Core's `PowerTelemetry` implementation, but Sentinel does not link to
-//! or otherwise depend on Neat Core.
+//! Each rail is one `pout` channel of a PMBus hwmon device, found through the
+//! regulator's I2C device in sysfs (`/sys/bus/i2c/devices/<bus>-<addr>`) and
+//! the channel's label, never through an `hwmonN` index. The kernel driver
+//! selects the PMBus page and reads the register under its own lock, so other
+//! readers cannot interleave with Sentinel's reads.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::fs::OpenOptions;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,14 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::model::{MetricDefinition, PowerRailStatus, PowerStatus};
 
-const PAGE_REGISTER: u8 = 0x00;
-const POUT_REGISTER: u8 = 0x96;
-const I2C_SLAVE: libc::c_ulong = 0x0703;
-const I2C_SMBUS: libc::c_ulong = 0x0720;
-const I2C_SMBUS_WRITE: u8 = 0;
-const I2C_SMBUS_READ: u8 = 1;
-const I2C_SMBUS_BYTE_DATA: u32 = 2;
-const I2C_SMBUS_BLOCK_MAX: usize = 32;
+const I2C_DEVICES: &str = "/sys/bus/i2c/devices";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerProfile {
@@ -44,10 +37,10 @@ impl PowerProfile {
 pub struct PowerRailConfig {
     pub key: &'static str,
     pub name: &'static str,
-    pub i2c_bus: i32,
-    pub i2c_addr: u8,
-    pub page: u8,
-    pub pout_exponent: i32,
+    /// I2C device name in sysfs, `<bus>-<address>`.
+    pub device: &'static str,
+    /// hwmon label of the rail's output power channel, `pout<page + 1>`.
+    pub channel: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -77,190 +70,144 @@ struct PowerRailReading {
 #[derive(Debug, Clone)]
 struct PowerSnapshot {
     rails: Vec<PowerRailReading>,
-    total_watts: f64,
-    rails_with_power: usize,
 }
 
-pub trait PowerI2cBackend: Send + Sync {
-    fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String>;
-    fn read_register(&self, bus: i32, addr: u8, register: u8) -> Result<u8, String>;
-
-    fn read_power(&self, rail: &PowerRailConfig) -> Result<u8, String> {
-        self.set_page(rail.i2c_bus, rail.i2c_addr, rail.page)?;
-        self.read_register(rail.i2c_bus, rail.i2c_addr, POUT_REGISTER)
+impl PowerSnapshot {
+    /// Total of every rail, or `None` when any rail is missing: a total over
+    /// fewer rails would understate board power.
+    fn total_watts(&self) -> Option<f64> {
+        if self.rails.is_empty() {
+            return None;
+        }
+        self.rails.iter().map(|rail| rail.watts).sum()
     }
 }
 
-#[derive(Debug, Default)]
-struct NativePowerI2cBackend {
-    devices: Mutex<BTreeMap<i32, fs::File>>,
+pub trait PowerSource: Send + Sync {
+    fn read_watts(&self, rail: &PowerRailConfig) -> Result<f64, String>;
 }
 
-impl PowerI2cBackend for NativePowerI2cBackend {
-    fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String> {
-        let device = open_device(bus, addr)?;
-        smbus_write_byte_data(device.as_raw_fd(), PAGE_REGISTER, page).map_err(|error| {
-            format!("i2c write page 0x{page:x} failed on /dev/i2c-{bus} addr 0x{addr:x}: {error}")
-        })
+/// Reads `power<N>_input` (microwatts) from the kernel hwmon device.
+#[derive(Debug)]
+struct HwmonPowerSource {
+    i2c_devices: PathBuf,
+    /// Resolved `power<N>_input` paths. An entry is dropped after a failed
+    /// read so that a rebound driver's new `hwmonN` directory is found.
+    inputs: Mutex<BTreeMap<(&'static str, &'static str), PathBuf>>,
+}
+
+impl HwmonPowerSource {
+    fn new(i2c_devices: impl Into<PathBuf>) -> Self {
+        Self {
+            i2c_devices: i2c_devices.into(),
+            inputs: Mutex::new(BTreeMap::new()),
+        }
     }
 
-    fn read_register(&self, bus: i32, addr: u8, register: u8) -> Result<u8, String> {
-        let device = open_device(bus, addr)?;
-        smbus_read_byte_data(device.as_raw_fd(), register).map_err(|error| {
+    fn resolve(&self, rail: &PowerRailConfig) -> Result<PathBuf, String> {
+        let device = self.i2c_devices.join(rail.device);
+        if !device.exists() {
+            return Err(format!(
+                "no I2C device {} in {}: the device tree does not declare this power monitor",
+                rail.device,
+                self.i2c_devices.display()
+            ));
+        }
+        let Some(hwmon) = hwmon_dir(&device) else {
+            let chip = fs::read_to_string(device.join("name"))
+                .map(|name| name.trim().to_string())
+                .unwrap_or_default();
+            return Err(if device.join("driver").exists() || chip.is_empty() {
+                format!("{} has no hwmon device", rail.device)
+            } else {
+                format!(
+                    "no kernel driver is bound to {} ({chip}); load it with `modprobe {chip}`",
+                    rail.device
+                )
+            });
+        };
+        power_input(&hwmon, rail.channel).ok_or_else(|| {
             format!(
-                "i2c read register 0x{register:x} failed on /dev/i2c-{bus} addr 0x{addr:x}: {error}"
+                "{} ({}) has no {} power channel",
+                rail.device,
+                hwmon.display(),
+                rail.channel
             )
         })
     }
+}
 
-    fn read_power(&self, rail: &PowerRailConfig) -> Result<u8, String> {
-        let mut devices = self
-            .devices
+impl PowerSource for HwmonPowerSource {
+    fn read_watts(&self, rail: &PowerRailConfig) -> Result<f64, String> {
+        let mut inputs = self
+            .inputs
             .lock()
-            .map_err(|_| "I2C device cache lock poisoned".to_string())?;
-        let result = (|| {
-            let device = match devices.entry(rail.i2c_bus) {
-                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    let path = format!("/dev/i2c-{}", rail.i2c_bus);
-                    let device = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .custom_flags(libc::O_CLOEXEC)
-                        .open(&path)
-                        .map_err(|error| format!("open {path} failed: {error}"))?;
-                    entry.insert(device)
-                }
-            };
-            select_slave(device.as_raw_fd(), rail.i2c_bus, rail.i2c_addr)?;
-            smbus_write_byte_data(device.as_raw_fd(), PAGE_REGISTER, rail.page).map_err(
-                |error| {
-                    format!(
-                        "i2c write page 0x{:x} failed on /dev/i2c-{} addr 0x{:x}: {error}",
-                        rail.page, rail.i2c_bus, rail.i2c_addr
-                    )
-                },
-            )?;
-            smbus_read_byte_data(device.as_raw_fd(), POUT_REGISTER).map_err(|error| {
-                format!(
-                    "i2c read register 0x{POUT_REGISTER:x} failed on /dev/i2c-{} addr 0x{:x}: {error}",
-                    rail.i2c_bus, rail.i2c_addr
-                )
-            })
-        })();
+            .map_err(|_| "power input cache lock poisoned".to_string())?;
+        let key = (rail.device, rail.channel);
+        let input = match inputs.get(&key) {
+            Some(input) => input.clone(),
+            None => {
+                let input = self.resolve(rail)?;
+                inputs.insert(key, input.clone());
+                input
+            }
+        };
+        let result = fs::read_to_string(&input)
+            .map_err(|error| format!("read {}: {error}", input.display()))
+            .and_then(|raw| {
+                raw.trim()
+                    .parse::<i64>()
+                    .map(|microwatts| microwatts as f64 / 1_000_000.0)
+                    .map_err(|error| format!("parse {}: {error}", input.display()))
+            });
         if result.is_err() {
-            // Reopen on the next sample after a driver reset or transient bus
-            // failure rather than retaining a stale descriptor indefinitely.
-            devices.remove(&rail.i2c_bus);
+            inputs.remove(&key);
         }
         result
     }
 }
 
-fn select_slave(fd: i32, bus: i32, addr: u8) -> Result<(), String> {
-    let result = unsafe { libc::ioctl(fd, I2C_SLAVE as _, i32::from(addr)) };
-    if result < 0 {
-        Err(format!(
-            "I2C_SLAVE 0x{addr:x} on /dev/i2c-{bus} failed: {}",
-            std::io::Error::last_os_error()
-        ))
-    } else {
-        Ok(())
-    }
+fn hwmon_dir(device: &Path) -> Option<PathBuf> {
+    let mut dirs: Vec<_> = fs::read_dir(device.join("hwmon"))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("hwmon"))
+        })
+        .collect();
+    dirs.sort();
+    dirs.into_iter().next()
 }
 
-#[repr(C)]
-union SmbusData {
-    byte: u8,
-    word: u16,
-    block: [u8; I2C_SMBUS_BLOCK_MAX + 2],
+/// The `power<N>_input` whose `power<N>_label` is `channel`.
+fn power_input(hwmon: &Path, channel: &str) -> Option<PathBuf> {
+    fs::read_dir(hwmon).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name().into_string().ok()?;
+        let index = name.strip_prefix("power")?.strip_suffix("_label")?;
+        let label = fs::read_to_string(entry.path()).ok()?;
+        (label.trim() == channel).then(|| hwmon.join(format!("power{index}_input")))
+    })
 }
 
-#[repr(C)]
-struct SmbusIoctlData {
-    read_write: u8,
-    command: u8,
-    size: u32,
-    data: *mut SmbusData,
-}
-
-fn open_device(bus: i32, addr: u8) -> Result<fs::File, String> {
-    let path = format!("/dev/i2c-{bus}");
-    let device = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|error| format!("open {path} failed: {error}"))?;
-    select_slave(device.as_raw_fd(), bus, addr)?;
-    Ok(device)
-}
-
-fn smbus_access(
-    fd: i32,
-    read_write: u8,
-    command: u8,
-    size: u32,
-    data: &mut SmbusData,
-) -> Result<(), std::io::Error> {
-    let mut args = SmbusIoctlData {
-        read_write,
-        command,
-        size,
-        data,
-    };
-    let result = unsafe { libc::ioctl(fd, I2C_SMBUS as _, &mut args) };
-    if result < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn smbus_write_byte_data(fd: i32, register: u8, value: u8) -> Result<(), std::io::Error> {
-    let mut data = SmbusData { byte: value };
-    smbus_access(
-        fd,
-        I2C_SMBUS_WRITE,
-        register,
-        I2C_SMBUS_BYTE_DATA,
-        &mut data,
-    )
-}
-
-fn smbus_read_byte_data(fd: i32, register: u8) -> Result<u8, std::io::Error> {
-    let mut data = SmbusData { byte: 0 };
-    smbus_access(fd, I2C_SMBUS_READ, register, I2C_SMBUS_BYTE_DATA, &mut data)?;
-    Ok(unsafe { data.byte })
-}
-
-fn read_power_snapshot(config: &PowerConfig, backend: &dyn PowerI2cBackend) -> PowerSnapshot {
-    let mut readings = Vec::with_capacity(config.rails.len());
-    let mut total_watts = 0.0;
-    let mut rails_with_power = 0;
-
-    for rail in &config.rails {
-        match backend.read_power(rail) {
-            Ok(raw) => {
-                let watts = f64::from(raw) * 2f64.powi(rail.pout_exponent);
-                total_watts += watts;
-                rails_with_power += 1;
-                readings.push(PowerRailReading {
+fn read_power_snapshot(config: &PowerConfig, source: &dyn PowerSource) -> PowerSnapshot {
+    PowerSnapshot {
+        rails: config
+            .rails
+            .iter()
+            .map(|rail| match source.read_watts(rail) {
+                Ok(watts) => PowerRailReading {
                     watts: Some(watts),
                     error: None,
-                });
-            }
-            Err(error) => readings.push(PowerRailReading {
-                watts: None,
-                error: Some(error),
-            }),
-        }
-    }
-
-    PowerSnapshot {
-        rails: readings,
-        total_watts,
-        rails_with_power,
+                },
+                Err(error) => PowerRailReading {
+                    watts: None,
+                    error: Some(error),
+                },
+            })
+            .collect(),
     }
 }
 
@@ -303,31 +250,31 @@ impl PowerAccumulator {
     }
 
     fn record(&mut self, snapshot: PowerSnapshot) {
-        let mut errors = Vec::new();
+        let total = snapshot.total_watts();
+        let mut errors: Vec<String> = Vec::new();
         for (aggregate, reading) in self.rails.iter_mut().zip(snapshot.rails) {
+            // A rail that cannot be read has no current value; showing its
+            // previous reading would present a stale number as live.
+            aggregate.current_watts = reading.watts;
             match reading.watts {
-                Some(watts) => {
-                    aggregate.current_watts = Some(watts);
-                    aggregate.samples += 1;
-                }
+                Some(_) => aggregate.samples += 1,
                 None => {
                     aggregate.errors += 1;
                     if let Some(error) = reading.error {
-                        errors.push(error);
+                        if !errors.contains(&error) {
+                            errors.push(error);
+                        }
                     }
                 }
             }
         }
 
-        self.last_sample_valid = snapshot.rails_with_power > 0;
-        if self.last_sample_valid {
-            self.current_watts = Some(snapshot.total_watts);
-            self.total_watts_sum += snapshot.total_watts;
+        self.last_sample_valid = total.is_some();
+        self.current_watts = total;
+        if let Some(total) = total {
+            self.total_watts_sum += total;
             self.valid_samples += 1;
-            self.peak_watts = Some(
-                self.peak_watts
-                    .map_or(snapshot.total_watts, |peak| peak.max(snapshot.total_watts)),
-            );
+            self.peak_watts = Some(self.peak_watts.map_or(total, |peak| peak.max(total)));
         } else {
             self.failed_samples += 1;
         }
@@ -390,7 +337,8 @@ pub fn power_metric_definitions(config: &PowerConfig) -> Vec<MetricDefinition> {
             "Current",
             "Power",
             "W",
-            "Latest valid total PMBus POUT reading across configured board rails.",
+            "Latest total output power of the configured board rails, read from the kernel's \
+             PMBus driver. Unavailable while any rail cannot be read.",
             None,
             None,
         ),
@@ -400,7 +348,8 @@ pub fn power_metric_definitions(config: &PowerConfig) -> Vec<MetricDefinition> {
             "Average",
             "Power",
             "W",
-            "Average valid total board power since the Sentinel daemon started.",
+            "Average board power over samples in which every rail was read, since the Sentinel \
+             daemon started.",
             None,
             None,
         ),
@@ -410,7 +359,8 @@ pub fn power_metric_definitions(config: &PowerConfig) -> Vec<MetricDefinition> {
             "Peak",
             "Power",
             "W",
-            "Peak valid total board power since the Sentinel daemon started.",
+            "Peak board power over samples in which every rail was read, since the Sentinel \
+             daemon started.",
             None,
             None,
         ),
@@ -422,7 +372,11 @@ pub fn power_metric_definitions(config: &PowerConfig) -> Vec<MetricDefinition> {
             rail.name,
             "PowerRail",
             "W",
-            "Latest valid POUT reading for this PMBus rail.",
+            &format!(
+                "Latest output power of this rail: the {} channel of PMBus device {}, read from \
+                 the kernel's hwmon driver.",
+                rail.channel, rail.device
+            ),
             None,
             None,
         )
@@ -435,13 +389,13 @@ pub fn spawn_power_collector(
     config: PowerConfig,
     accumulator: Arc<Mutex<PowerAccumulator>>,
 ) {
-    let backend: Arc<dyn PowerI2cBackend> = Arc::new(NativePowerI2cBackend::default());
+    let source: Arc<dyn PowerSource> = Arc::new(HwmonPowerSource::new(I2C_DEVICES));
     let _ = thread::Builder::new()
         .name("sentinel-power".into())
         .spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 let sample_start = Instant::now();
-                let snapshot = read_power_snapshot(&config, backend.as_ref());
+                let snapshot = read_power_snapshot(&config, source.as_ref());
                 if let Ok(mut state) = accumulator.lock() {
                     state.record(snapshot);
                 }
@@ -455,8 +409,8 @@ pub fn spawn_power_collector(
 
 fn sleep_interruptible(stopped: &AtomicBool, duration: Duration) {
     if !stopped.load(Ordering::Relaxed) {
-        // The power interval is 100 ms, so one sleep has the same sampling
-        // cadence with at most 100 ms shutdown latency and no 10 ms polling.
+        // The power interval is 250 ms, so one sleep has the same sampling
+        // cadence with at most 250 ms shutdown latency and no 10 ms polling.
         thread::sleep(duration);
     }
 }
@@ -478,149 +432,171 @@ fn detect_power_profile_from_model(model: &str) -> PowerProfile {
 }
 
 pub fn rails_for_profile(profile: PowerProfile) -> Vec<PowerRailConfig> {
+    let rail = |key, name, device, channel| PowerRailConfig {
+        key,
+        name,
+        device,
+        channel,
+    };
     match profile {
         PowerProfile::ModalixSom => vec![
-            PowerRailConfig {
-                key: "power_rail_soc_ddr_vdd_watts",
-                name: "SoC and DDR VDD",
-                i2c_bus: 3,
-                i2c_addr: 0x4f,
-                page: 0x00,
-                pout_exponent: -2,
-            },
-            PowerRailConfig {
-                key: "power_rail_hdmi_watts",
-                name: "HDMI 1.2V",
-                i2c_bus: 3,
-                i2c_addr: 0x4f,
-                page: 0x01,
-                pout_exponent: -5,
-            },
-            PowerRailConfig {
-                key: "power_rail_soc_ddr_vddq_watts",
-                name: "SoC and DDR VDDQ",
-                i2c_bus: 3,
-                i2c_addr: 0x4f,
-                page: 0x02,
-                pout_exponent: -5,
-            },
-            PowerRailConfig {
-                key: "power_rail_soc_ddr_vdd2h_watts",
-                name: "SoC and DDR VDD2H",
-                i2c_bus: 3,
-                i2c_addr: 0x4f,
-                page: 0x03,
-                pout_exponent: -5,
-            },
-            PowerRailConfig {
-                key: "power_rail_mla_watts",
-                name: "MLA 0.68V",
-                i2c_bus: 3,
-                i2c_addr: 0x4d,
-                page: 0x00,
-                pout_exponent: -2,
-            },
-            PowerRailConfig {
-                key: "power_rail_pcie_eth_watts",
-                name: "PCIe and ETH VP",
-                i2c_bus: 3,
-                i2c_addr: 0x4d,
-                page: 0x01,
-                pout_exponent: -5,
-            },
-            PowerRailConfig {
-                key: "power_rail_platform_1v8_watts",
-                name: "SOM Platform 1.8V",
-                i2c_bus: 3,
-                i2c_addr: 0x4d,
-                page: 0x02,
-                pout_exponent: -5,
-            },
-            PowerRailConfig {
-                key: "power_rail_platform_3v3_watts",
-                name: "SOM Platform 3.3V",
-                i2c_bus: 3,
-                i2c_addr: 0x4d,
-                page: 0x03,
-                pout_exponent: -5,
-            },
+            rail(
+                "power_rail_soc_ddr_vdd_watts",
+                "SoC and DDR VDD",
+                "3-004f",
+                "pout1",
+            ),
+            rail("power_rail_hdmi_watts", "HDMI 1.2V", "3-004f", "pout2"),
+            rail(
+                "power_rail_soc_ddr_vddq_watts",
+                "SoC and DDR VDDQ",
+                "3-004f",
+                "pout3",
+            ),
+            rail(
+                "power_rail_soc_ddr_vdd2h_watts",
+                "SoC and DDR VDD2H",
+                "3-004f",
+                "pout4",
+            ),
+            rail("power_rail_mla_watts", "MLA 0.68V", "3-004d", "pout1"),
+            rail(
+                "power_rail_pcie_eth_watts",
+                "PCIe and ETH VP",
+                "3-004d",
+                "pout2",
+            ),
+            rail(
+                "power_rail_platform_1v8_watts",
+                "SOM Platform 1.8V",
+                "3-004d",
+                "pout3",
+            ),
+            rail(
+                "power_rail_platform_3v3_watts",
+                "SOM Platform 3.3V",
+                "3-004d",
+                "pout4",
+            ),
         ],
-        PowerProfile::ModalixDvt => vec![PowerRailConfig {
-            key: "power_rail_dvt_pmic_4d_page0_watts",
-            name: "DVT PMIC 0x4d page0",
-            i2c_bus: 4,
-            i2c_addr: 0x4d,
-            page: 0x00,
-            pout_exponent: -2,
-        }],
+        PowerProfile::ModalixDvt => vec![rail(
+            "power_rail_dvt_pmic_4d_page0_watts",
+            "DVT PMIC 0x4d page0",
+            "4-004d",
+            "pout1",
+        )],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
 
-    #[derive(Default)]
-    struct FakeBackend {
-        current_pages: Mutex<HashMap<(i32, u8), u8>>,
-        registers: Mutex<HashMap<(i32, u8, u8, u8), u8>>,
-        failures: Mutex<HashMap<(i32, u8, u8), String>>,
-        calls: Mutex<Vec<String>>,
-    }
+    static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
-    impl PowerI2cBackend for FakeBackend {
-        fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("page:{bus}:{addr:x}:{page:x}"));
-            if let Some(error) = self.failures.lock().unwrap().get(&(bus, addr, page)) {
-                return Err(error.clone());
-            }
-            self.current_pages.lock().unwrap().insert((bus, addr), page);
-            Ok(())
+    /// A `/sys/bus/i2c/devices` tree laid out as the kernel's PMBus core
+    /// publishes it.
+    struct I2cDevices(PathBuf);
+
+    impl I2cDevices {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "sentinel-power-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).unwrap();
+            Self(root)
         }
 
-        fn read_register(&self, bus: i32, addr: u8, register: u8) -> Result<u8, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("read:{bus}:{addr:x}:{register:x}"));
-            if let Some(error) = self.failures.lock().unwrap().get(&(bus, addr, register)) {
-                return Err(error.clone());
+        /// An I2C device without a bound driver.
+        fn device(&self, device: &str, chip: &str) -> PathBuf {
+            let path = self.0.join(device);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("name"), format!("{chip}\n")).unwrap();
+            path
+        }
+
+        /// A bound PMBus device; `channels` are `(index, label, microwatts)`.
+        fn pmbus(&self, device: &str, hwmon: &str, channels: &[(u32, &str, i64)]) -> PathBuf {
+            let dir = self.device(device, "irps5401");
+            fs::create_dir_all(dir.join("driver")).unwrap();
+            let hwmon = dir.join("hwmon").join(hwmon);
+            fs::create_dir_all(&hwmon).unwrap();
+            for (index, label, microwatts) in channels {
+                fs::write(
+                    hwmon.join(format!("power{index}_label")),
+                    format!("{label}\n"),
+                )
+                .unwrap();
+                fs::write(
+                    hwmon.join(format!("power{index}_input")),
+                    format!("{microwatts}\n"),
+                )
+                .unwrap();
             }
-            let page = self.current_pages.lock().unwrap()[&(bus, addr)];
-            self.registers
-                .lock()
-                .unwrap()
-                .get(&(bus, addr, page, register))
-                .copied()
-                .ok_or_else(|| "missing fake register".into())
+            hwmon
+        }
+
+        fn source(&self) -> HwmonPowerSource {
+            HwmonPowerSource::new(&self.0)
         }
     }
+
+    impl Drop for I2cDevices {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    // The irps5401 driver numbers pin1..5 before pout1..5, so pout1 is power6.
+    const IRPS5401_4F: [(u32, &str, i64); 6] = [
+        (1, "pin1", 9_000_000),
+        (6, "pout1", 3_250_000),
+        (7, "pout2", 562_500),
+        (8, "pout3", 125_000),
+        (9, "pout4", 656_250),
+        (10, "pout5", 0),
+    ];
 
     fn som_config() -> PowerConfig {
         PowerConfig {
             profile: PowerProfile::ModalixSom,
-            sample_interval: Duration::from_millis(100),
+            sample_interval: Duration::from_millis(250),
             rails: rails_for_profile(PowerProfile::ModalixSom),
         }
     }
 
+    fn reading(watts: Option<f64>) -> PowerRailReading {
+        PowerRailReading {
+            watts,
+            error: watts.is_none().then(|| "read failed".to_string()),
+        }
+    }
+
     #[test]
-    fn profiles_match_core_power_telemetry() {
+    fn profiles_name_each_rail_by_device_and_pout_channel() {
         let som = rails_for_profile(PowerProfile::ModalixSom);
-        assert_eq!(som.len(), 8);
-        assert_eq!((som[0].i2c_bus, som[0].i2c_addr, som[0].page), (3, 0x4f, 0));
-        assert_eq!(som[0].pout_exponent, -2);
-        assert_eq!((som[4].i2c_addr, som[4].page), (0x4d, 0));
-        assert_eq!(som[4].pout_exponent, -2);
+        let channels: Vec<_> = som.iter().map(|r| (r.device, r.channel)).collect();
+        assert_eq!(
+            channels,
+            [
+                ("3-004f", "pout1"),
+                ("3-004f", "pout2"),
+                ("3-004f", "pout3"),
+                ("3-004f", "pout4"),
+                ("3-004d", "pout1"),
+                ("3-004d", "pout2"),
+                ("3-004d", "pout3"),
+                ("3-004d", "pout4"),
+            ]
+        );
+        assert_eq!(som[4].key, "power_rail_mla_watts");
 
         let dvt = rails_for_profile(PowerProfile::ModalixDvt);
         assert_eq!(dvt.len(), 1);
-        assert_eq!((dvt[0].i2c_bus, dvt[0].i2c_addr, dvt[0].page), (4, 0x4d, 0));
-        assert_eq!(dvt[0].pout_exponent, -2);
+        assert_eq!((dvt[0].device, dvt[0].channel), ("4-004d", "pout1"));
     }
 
     #[test]
@@ -640,86 +616,100 @@ mod tests {
     }
 
     #[test]
-    fn reads_pout_with_scaling_and_partial_failure() {
+    fn reads_rails_by_channel_label_in_watts() {
+        let sysfs = I2cDevices::new();
+        sysfs.pmbus("3-004f", "hwmon4", &IRPS5401_4F);
         let mut config = som_config();
-        config.rails.truncate(2);
-        let backend = FakeBackend::default();
-        backend
-            .registers
-            .lock()
-            .unwrap()
-            .insert((3, 0x4f, 0, POUT_REGISTER), 8);
+        config.rails.truncate(4);
 
-        let snapshot = read_power_snapshot(&config, &backend);
-        assert_eq!(snapshot.rails_with_power, 1);
-        assert_eq!(snapshot.total_watts, 2.0);
-        assert_eq!(snapshot.rails[0].watts, Some(2.0));
-        assert!(snapshot.rails[1].error.is_some());
+        let snapshot = read_power_snapshot(&config, &sysfs.source());
+        let watts: Vec<_> = snapshot.rails.iter().map(|r| r.watts).collect();
         assert_eq!(
-            backend.calls.lock().unwrap().as_slice(),
-            ["page:3:4f:0", "read:3:4f:96", "page:3:4f:1", "read:3:4f:96"]
+            watts,
+            [Some(3.25), Some(0.5625), Some(0.125), Some(0.65625)]
         );
+        assert_eq!(snapshot.total_watts(), Some(4.59375));
     }
 
     #[test]
-    fn aggregates_only_valid_totals_and_tracks_errors() {
+    fn names_the_driver_to_load_when_none_is_bound() {
+        let sysfs = I2cDevices::new();
+        sysfs.device("3-004f", "irps5401");
+        let rail = &som_config().rails[0];
+
+        let error = sysfs.source().read_watts(rail).unwrap_err();
+        assert!(error.contains("modprobe irps5401"), "{error}");
+    }
+
+    #[test]
+    fn reports_a_missing_device_or_channel() {
+        let sysfs = I2cDevices::new();
+        let rails = som_config().rails;
+        let error = sysfs.source().read_watts(&rails[0]).unwrap_err();
+        assert!(error.contains("no I2C device 3-004f"), "{error}");
+
+        sysfs.pmbus("3-004f", "hwmon4", &IRPS5401_4F[..2]);
+        let error = sysfs.source().read_watts(&rails[1]).unwrap_err();
+        assert!(error.contains("no pout2 power channel"), "{error}");
+    }
+
+    #[test]
+    fn finds_the_new_hwmon_directory_after_the_driver_rebinds() {
+        let sysfs = I2cDevices::new();
+        let old = sysfs.pmbus("3-004f", "hwmon4", &IRPS5401_4F);
+        let source = sysfs.source();
+        let rail = &som_config().rails[0];
+        assert_eq!(source.read_watts(rail), Ok(3.25));
+
+        fs::remove_dir_all(&old).unwrap();
+        assert!(source.read_watts(rail).is_err());
+        let new = sysfs.0.join("3-004f/hwmon/hwmon9");
+        fs::create_dir_all(&new).unwrap();
+        fs::write(new.join("power6_label"), "pout1\n").unwrap();
+        fs::write(new.join("power6_input"), "4500000\n").unwrap();
+        assert_eq!(source.read_watts(rail), Ok(4.5));
+    }
+
+    #[test]
+    fn totals_only_complete_samples_and_never_keeps_stale_values() {
         let mut config = som_config();
         config.rails.truncate(2);
-        let mut aggregate = PowerAccumulator::new(config.clone());
+        let mut aggregate = PowerAccumulator::new(config);
         aggregate.record(PowerSnapshot {
-            rails: vec![
-                PowerRailReading {
-                    watts: Some(2.0),
-                    error: None,
-                },
-                PowerRailReading {
-                    watts: Some(1.0),
-                    error: None,
-                },
-            ],
-            total_watts: 3.0,
-            rails_with_power: 2,
+            rails: vec![reading(Some(2.0)), reading(Some(1.0))],
         });
         aggregate.record(PowerSnapshot {
-            rails: vec![
-                PowerRailReading {
-                    watts: Some(5.0),
-                    error: None,
-                },
-                PowerRailReading {
-                    watts: None,
-                    error: Some("read failed".into()),
-                },
-            ],
-            total_watts: 5.0,
-            rails_with_power: 1,
-        });
-        aggregate.record(PowerSnapshot {
-            rails: vec![
-                PowerRailReading {
-                    watts: None,
-                    error: Some("read failed".into()),
-                },
-                PowerRailReading {
-                    watts: None,
-                    error: Some("read failed".into()),
-                },
-            ],
-            total_watts: 0.0,
-            rails_with_power: 0,
+            rails: vec![reading(Some(5.0)), reading(None)],
         });
 
+        // A sample missing a rail has no total and leaves average and peak alone.
         let values = aggregate.metric_values();
-        assert_eq!(values["power_current_watts"], 5.0);
-        assert_eq!(values["power_average_watts"], 4.0);
-        assert_eq!(values["power_peak_watts"], 5.0);
+        assert!(!values.contains_key("power_current_watts"));
+        assert_eq!(values["power_average_watts"], 3.0);
+        assert_eq!(values["power_peak_watts"], 3.0);
+        assert_eq!(values["power_rail_soc_ddr_vdd_watts"], 5.0);
+        assert!(!values.contains_key("power_rail_hdmi_watts"));
+
+        aggregate.record(PowerSnapshot {
+            rails: vec![reading(None), reading(None)],
+        });
+        let values = aggregate.metric_values();
+        assert!(!values.contains_key("power_rail_soc_ddr_vdd_watts"));
         let status = aggregate.status();
-        assert_eq!(status.valid_samples, 2);
-        assert_eq!(status.failed_samples, 1);
+        assert_eq!(status.valid_samples, 1);
+        assert_eq!(status.failed_samples, 2);
         assert!(!status.last_sample_valid);
+        assert_eq!(status.rails[0].current_watts, None);
         assert_eq!(status.rails[0].samples, 2);
         assert_eq!(status.rails[0].errors, 1);
         assert_eq!(status.rails[1].errors, 2);
-        assert!(status.last_error.unwrap().contains("read failed"));
+        // The same reason from every rail is reported once.
+        assert_eq!(status.last_error.as_deref(), Some("read failed"));
+
+        aggregate.record(PowerSnapshot {
+            rails: vec![reading(Some(4.0)), reading(Some(1.5))],
+        });
+        assert_eq!(aggregate.metric_values()["power_current_watts"], 5.5);
+        assert!(aggregate.status().last_sample_valid);
     }
 }

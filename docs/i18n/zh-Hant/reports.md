@@ -70,13 +70,13 @@
 | `profile` | 偵測到軌道剖面，例如 `modalix_som` 或 `modalix_dvt`。 |
 | `sample_interval_ms` | 已設定 PMBus 的採樣間隔。 |
 | `duration_seconds` | 自開始累積電力以來經過的時間。 |
-| `valid_samples` | 至少有一個軌道成功通過。 |
-| `failed_samples` | 沒有任何成功的鐵軌通過。 |
-| `last_sample_valid` | 最新的 PMBus 傳輸是否已讀取至少一條匯流排。 |
-| `last_error` | 將最新一次執行時失敗的 Rails 框架產生的錯誤訊息合併顯示，或顯示 `null`。 |
-| `rails` | 每個軌道的標籤、度量關鍵字、上次成功採樣時的瓦數、成功採樣次數和錯誤次數。 |
+| `valid_samples` | 每條電源軌都已讀取的輪次。 |
+| `failed_samples` | 至少有一條電源軌無法讀取的輪次。 |
+| `last_sample_valid` | 最新一輪是否已讀取每條電源軌。 |
+| `last_error` | 最新一輪中失敗電源軌的每個不同錯誤，或 `null`。 |
+| `rails` | 每條電源軌的標籤、度量關鍵字、最新一輪的瓦數（該次讀取失敗時為 `null`）、成功採樣次數和錯誤次數。 |
 
-在使用這些欄位進行自動比較之前，請參閱「[Power panel](panels/power.md)」；部分軌道讀取會影響總體的可比性。
+在使用這些欄位進行自動比較之前，請參閱「[Power panel](panels/power.md)」；總和只包含讀取了每條電源軌的輪次。
 
 ## 原子性和保留性
 

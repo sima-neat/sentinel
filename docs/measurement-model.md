@@ -15,7 +15,7 @@ cache is displayed. It does not change the hardware sampling interval.
 
 | Data | Default cadence | Notes |
 | --- | ---: | --- |
-| PMBus power | 100 ms | Collected in a dedicated thread. Latest, average, peak, rail counters, and error state are published at the next cache update. |
+| PMBus power | 250 ms | Read from the kernel's PMBus driver in a dedicated thread. Latest, average, peak, rail counters, and error state are published at the next cache update. |
 | Thermal sensors | Separate thermal loop | The loop sleeps for 2 seconds after each collection pass. Reading all RTSN channels also takes time, so the effective complete-pass interval is longer than 2 seconds. |
 | CPU, memory, MLA memory, disk, and network | 2 seconds | Uses the daemon `--interval`; minimum accepted value is 0.5 seconds. |
 | Processes | At least 5 seconds | The 5-second deadline is checked only when the normal daemon loop samples system metrics. With the default 2-second daemon interval, process data normally refreshes about every 6 seconds; a daemon interval longer than 5 seconds becomes the effective minimum. |

@@ -79,14 +79,14 @@ The `power` object contains:
 | `profile` | Detected rail profile, such as `modalix_som` or `modalix_dvt`. |
 | `sample_interval_ms` | Configured PMBus sampling interval. |
 | `duration_seconds` | Time since power accumulation started. |
-| `valid_samples` | Passes with at least one successful rail. |
-| `failed_samples` | Passes with no successful rails. |
-| `last_sample_valid` | Whether the latest PMBus pass read at least one rail. |
-| `last_error` | Combined error text for rails that failed in the latest pass, or `null`. |
-| `rails` | Per-rail label, metric key, last successful watts, successful sample count, and error count. |
+| `valid_samples` | Passes in which every rail was read. |
+| `failed_samples` | Passes in which at least one rail could not be read. |
+| `last_sample_valid` | Whether the latest pass read every rail. |
+| `last_error` | Each distinct error from rails that failed in the latest pass, or `null`. |
+| `rails` | Per-rail label, metric key, watts from the latest pass (`null` when that read failed), successful sample count, and error count. |
 
 See the [Power panel](panels/power.md) before using these fields for automated
-comparison; partial rail reads affect total comparability.
+comparison; totals include only passes that read every rail.
 
 ## Atomicity and retention
 
