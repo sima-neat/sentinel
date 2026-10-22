@@ -1,6 +1,6 @@
 # 系統面板
 
-「系統」面板整合了 Linux CPU 計數器、系統負載平均值、記憶體使用量、SiMa MLA 記憶體遙測、EV74 連續記憶體池，以及週期性的程序快照。
+「系統」面板整合了 Linux CPU 計數器、系統負載平均值、記憶體使用量、SiMa MLA 與 EV74 記憶體遙測、連續記憶體（CMA）使用量，以及週期性的程序快照。
 
 ## CPU 欄位
 
@@ -44,7 +44,7 @@ used_pct   = used_bytes / MemTotal × 100
 
 ## MLA 記憶體
 
-在 Platform 3.0 上，若存在 `/dev/dma_heap/simaai,dms`，便會選用 DMA-BUF 遙測。Sentinel 讀取 `/sys/kernel/debug/dma_buf/bufinfo`，加總由 MLA 堆積（`mla` 或 `simaai,dms`）匯出的物件，以及只有 MLA 使用的共用記憶體池緩衝區（例如從 MLA 堆積溢出到 CMA 的 MLA 配置），每個 DMA-BUF inode 只計算一次。EV74（`cvu`）也使用的共用記憶體池緩衝區（例如 EV74 寫入供 MLA 讀取的輸入）不是 MLA 記憶體。
+在 Platform 3.0 上，若存在 `/dev/dma_heap/simaai,dms`，便會選用 DMA-BUF 遙測。Sentinel 讀取 `/sys/kernel/debug/dma_buf/bufinfo`，加總由 MLA 堆積（`mla` 或 `simaai,dms`）匯出的物件，以及只有 MLA 使用的共用記憶體池緩衝區（例如不經 EV74 階段、由 CPU 準備的輸入，或從 MLA 堆積溢出到 CMA 的 MLA 配置），每個 DMA-BUF inode 只計算一次。EV74（`cvu`）也使用的共用記憶體池緩衝區不是 MLA 記憶體：EV74 為 MLA 寫入的前處理輸入計為 EV74 記憶體。所以同一個緩衝區不會同時出現在兩個總計中，EV74 記憶體與 MLA 記憶體可以相加。
 
 在沒有此 heap 的舊版上，Sentinel 讀取 `/dev/simaai-mem`，找到 `Total allocated size:`，解析其後的十六進位位元組數，並換算為 MiB。
 
@@ -57,20 +57,42 @@ used_pct   = used_bytes / MemTotal × 100
 
 如果無法讀取所選介面，或其文字格式無法識別，則該值將為「無法取得」，而非零。選用 DMA-BUF 遙測後，Sentinel 不會退回使用舊版配置器。
 
-## EV74 CMA 記憶體
+## EV74 記憶體
 
-Sentinel 會從每個正常運作的守護程式樣本的 `/proc/meminfo` 中讀取 `CmaTotal` 和 `CmaFree`，並回報：
+在 Platform 3.0 上，EV74（CVU）使用 DMA-BUF 記憶體運作。EV74 使用某個緩衝區時，核心會在 `/sys/kernel/debug/dma_buf/bufinfo` 中，將 `cvu` 裝置列為該緩衝區的已附加裝置。Sentinel 會加總附加到 `cvu` 或名為 `<address>.cvu` 之裝置的物件，每個 DMA-BUF inode 只計算一次。緩衝區屬於產生它的硬體，因此有兩類物件不計入：由 MLA 堆積（`mla` 或 `simaai,dms`）匯出的物件（屬於 MLA 記憶體），以及視訊解碼器或相機 ISP 為 EV74 讀取而產生的影格。Sentinel 依據 `/sys/bus/platform/devices` 下的裝置樹節點辨識這些產生者：視訊解碼器的 `al,ip-type` 以 `dec` 開頭，相機 ISP 的 `compatible` 包含 `arm,isp`。
 
 ```text
-EV74 CMA used = CmaTotal - CmaFree
+ev74_mem_allocated_mb = sum of sizes of unique inodes attached to cvu,
+                        excluding those exported by an MLA heap
+                        and those also attached to a video decoder or camera ISP
 ```
 
-`CmaTotal` 是在啟動時保留的連續記憶體區域。`CmaFree` 是該保留區域中目前未分配的部分。系統標籤會顯示已使用的值，而檢查點記錄則會保留總計、可用和已使用的值。
-「比較執行」標籤可以疊加選取之執行的 `EV74 CMA memory`。
+每個 EV74 用戶端都會個別附加到緩衝區，因此同一個緩衝區常會多次列出 `cvu`，但仍只計算一次。Sentinel 每次取樣只讀取 `bufinfo` 一次，同時用於 MLA 與 EV74 記憶體。System 分頁會以圖表顯示此值，Compare Runs 分頁可為選取的執行疊加 `EV74 memory`。
 
-當 EV74 是保留的 CMA 儲存區的消費者時，這是一個 EV74 消耗代理。Linux CMA 是一個共享的內核功能，因此另一個驅動程式的分配也可能會減少 `CmaFree`；Sentinel 無法僅僅從 `/proc/meminfo` 將這些頁面歸因於單個程序。如果缺少任何一個欄位，則導出的已使用值會報告為不可用，而不是零；任何存在的欄位都會保持其可用性。
+閱讀此值時請留意以下限制：
 
-啟動時的保留區域可以單獨檢查：
+- EV74 與 MLA 共用的共用記憶體池緩衝區，不論由哪一方寫入，都只計入 EV74 記憶體。在測試過的管線中，這些是 EV74 交給模型的前處理張量。EV74 記憶體與 MLA 記憶體不會包含同一個緩衝區，因此兩者相加即為兩者持有的記憶體。
+- 視訊解碼器或相機 ISP 產生的影格，即使 EV74 正在讀取，也不計入任何指標。一路 RTSP 串流約為 12 張解碼影像（640x512 時為 6.75 MiB）。解碼器自身的工作記憶體也不計入。
+- 緩衝區在 EV74 使用後才會計入。已為 EV74 配置但 EV74 尚未處理的張量屬於 `linux,cma` 記憶體，而非 EV74 記憶體。
+- DMA-BUF 名稱會被忽略。系統常駐程式持有名為 `EV74` 的小型緩衝區，但 EV74 並未使用它們。
+- EV74 固定的韌體保留區與核心內部配置不是 DMA-BUF，因此不包含在內。
+- CVU 驅動程式每個用戶端最多快取 64 個緩衝區。管線自身的 EV74 緩衝區超過此數量時，使用中的緩衝區可能被逐出，導致數值偏低。每個影格都建立新輸入緩衝區的應用程式則可能使數值偏高：驅動程式會為每個用戶端保留最多 64 個舊緩衝區的對應，而這些緩衝區仍維持配置。逐出次數可在 `/sys/kernel/debug/simaai-cvu/stats` 查看。
+
+當 `/dev/cvu` 不存在，或 `bufinfo` 無法讀取或解析時，此值會顯示為無法取得，而非零。
+
+## CMA 記憶體池
+
+Sentinel 也會在每次一般常駐程式取樣時，從 `/proc/meminfo` 讀取 `CmaTotal` 與 `CmaFree`，並回報：
+
+```text
+CMA used = CmaTotal - CmaFree
+```
+
+`CmaTotal` 涵蓋開機時保留的所有 CMA 區域。`CmaFree` 不包含 Linux 放入 CMA、並在需要時移出的可移動頁面（例如頁面快取）。因此 CMA used 會高估已配置的記憶體，也不是 EV74 記憶體：在閒置的 Modalix Platform 3.0 DevKit 上，它約為 90 MiB，而 EV74 記憶體為 0。EV74 記憶體請使用 `ev74_mem_allocated_mb`。
+
+鍵名 `ev74_cma_total_mb`、`ev74_cma_free_mb` 與 `ev74_cma_used_mb` 保持不變，讓現有用戶端與已記錄的執行仍可讀取；其標籤為 `CMA reserved`、`CMA free` 與 `CMA used`。檢查點記錄會保留這三個值。Linux CMA 是共用的核心功能，Sentinel 無法僅憑 `/proc/meminfo` 將這些頁面歸屬到個別程序。若任一欄位不存在，推算出的使用量會回報為無法取得而非零；存在的欄位仍可各自取得。
+
+開機時的保留區可另外使用以下指令檢查：
 
 ```bash
 dmesg | grep -i cma

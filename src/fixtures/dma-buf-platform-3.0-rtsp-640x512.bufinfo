@@ -1,0 +1,1117 @@
+
+Dma-buf Objects:
+size    	flags   	mode    	count   	exp_name	ino     	name
+03637248	00000002	02080007	00000008	linux,cma	00000415	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	5000000.mla
+	cvu
+Total 5 devices attached
+
+03637248	00000002	02080007	00000008	linux,cma	00000414	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	5000000.mla
+	cvu
+Total 5 devices attached
+
+03637248	00000002	02080007	00000008	linux,cma	00000413	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	5000000.mla
+	cvu
+Total 5 devices attached
+
+03637248	00000002	02080007	00000008	linux,cma	00000412	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	5000000.mla
+	cvu
+Total 5 devices attached
+
+03637248	00000002	02080007	00000008	linux,cma	00000411	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	5000000.mla
+	cvu
+Total 5 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000410	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000409	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000408	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000407	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000406	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000405	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000404	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000403	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000402	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000001	linux,cma	00000401	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00061440	00000002	02080007	00000001	mla	00000400	<none>
+	Attached Devices:
+Total 0 devices attached
+
+21024768	00000002	02080007	00000001	simaai,dms	00000399	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000398	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000397	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000396	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000395	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+02572288	00000002	02080007	00000001	simaai,dms	00000394	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000393	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00258048	00000002	02080007	00000001	simaai,dms	00000392	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00036864	00000002	02080007	00000001	simaai,dms	00000391	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00016384	00000002	02080007	00000001	simaai,dms	00000390	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000389	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000388	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000387	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000386	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000385	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000384	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000383	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000382	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00110592	00000002	02080007	00000001	simaai,dms	00000381	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000380	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000379	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00016384	00000002	02080007	00000001	simaai,dms	00000378	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000377	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00610304	00000002	02080007	00000001	simaai,dms	00000376	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000375	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00610304	00000002	02080007	00000001	simaai,dms	00000374	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000373	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000372	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000371	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000370	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000369	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000368	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00016384	00000002	02080007	00000001	simaai,dms	00000367	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00565248	00000002	02080007	00000001	simaai,dms	00000366	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000365	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000364	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000363	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00057344	00000002	02080007	00000001	simaai,dms	00000362	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00028672	00000002	02080007	00000001	simaai,dms	00000361	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00020480	00000002	02080007	00000001	simaai,dms	00000360	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00131072	00000002	02080007	00000001	simaai,dms	00000359	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00253952	00000002	02080007	00000001	simaai,dms	00000358	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00028672	00000002	02080007	00000001	simaai,dms	00000357	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000356	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000355	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000354	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00061440	00000002	02080007	00000001	simaai,dms	00000353	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00733184	00000002	02080007	00000001	simaai,dms	00000352	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00602112	00000002	02080007	00000001	simaai,dms	00000351	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000350	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000349	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000348	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000347	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00020480	00000002	02080007	00000001	simaai,dms	00000346	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000345	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00253952	00000002	02080007	00000001	simaai,dms	00000344	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000343	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000342	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000341	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00249856	00000002	02080007	00000001	simaai,dms	00000340	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00061440	00000002	02080007	00000001	simaai,dms	00000339	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000338	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000337	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000336	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000335	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000334	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00249856	00000002	02080007	00000001	simaai,dms	00000333	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000332	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000331	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000330	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00757760	00000002	02080007	00000001	simaai,dms	00000329	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00217088	00000002	02080007	00000001	simaai,dms	00000328	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00253952	00000002	02080007	00000001	simaai,dms	00000327	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00503808	00000002	02080007	00000001	simaai,dms	00000326	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000325	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000324	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000323	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000322	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00122880	00000002	02080007	00000001	simaai,dms	00000321	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000320	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00131072	00000002	02080007	00000001	simaai,dms	00000319	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+02711552	00000002	02080007	00000001	simaai,dms	00000318	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00045056	00000002	02080007	00000001	simaai,dms	00000317	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000316	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000315	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000314	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00610304	00000002	02080007	00000001	simaai,dms	00000313	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000312	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00106496	00000002	02080007	00000001	simaai,dms	00000311	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00253952	00000002	02080007	00000001	simaai,dms	00000310	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000309	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000308	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000307	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000306	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000305	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00020480	00000002	02080007	00000001	simaai,dms	00000304	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00065536	00000002	02080007	00000001	simaai,dms	00000303	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00499712	00000002	02080007	00000001	simaai,dms	00000302	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+02707456	00000002	02080007	00000001	simaai,dms	00000301	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00172032	00000002	02080007	00000001	simaai,dms	00000300	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000299	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00512000	00000002	02080007	00000001	simaai,dms	00000298	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000297	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00610304	00000002	02080007	00000001	simaai,dms	00000296	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000295	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00126976	00000002	02080007	00000001	simaai,dms	00000294	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00512000	00000002	02080007	00000001	simaai,dms	00000293	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000292	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000291	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000290	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00253952	00000002	02080007	00000001	simaai,dms	00000289	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00004096	00000002	02080007	00000001	simaai,dms	00000288	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00008192	00000002	02080007	00000001	simaai,dms	00000287	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00032768	00000002	02080007	00000001	simaai,dms	00000286	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00147456	00000002	02080007	00000001	simaai,dms	00000285	<none>
+	Attached Devices:
+	5000000.mla
+Total 1 devices attached
+
+00491520	00000002	02080007	00000001	linux,cma	00000284	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00491520	00000002	02080007	00000001	linux,cma	00000283	<none>
+	Attached Devices:
+Total 0 devices attached
+
+00032768	00000002	02080007	00000003	al5r	00000282	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00536576	00000002	02080007	00000003	al5r	00000281	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00536576	00000002	02080007	00000003	al5r	00000280	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00167936	00000002	02080007	00000003	al5r	00000279	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000278	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00028672	00000002	02080007	00000003	al5r	00000277	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000276	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00520192	00000002	02080007	00000005	linux,cma	00000275	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00520192	00000002	02080007	00000005	linux,cma	00000274	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00520192	00000002	02080007	00000005	linux,cma	00000273	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00520192	00000002	02080007	00000005	linux,cma	00000272	<none>
+	Attached Devices:
+	4100000.al5r
+Total 1 devices attached
+
+00589824	00000002	02080007	00000012	linux,cma	00000271	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 5 devices attached
+
+00589824	00000002	02080007	00000012	linux,cma	00000270	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 5 devices attached
+
+00589824	00000002	02080007	00000013	linux,cma	00000269	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 6 devices attached
+
+00589824	00000002	02080007	00000013	linux,cma	00000268	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 6 devices attached
+
+00589824	00000002	02080007	00000013	linux,cma	00000267	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 6 devices attached
+
+00589824	00000002	02080007	00000012	linux,cma	00000266	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 5 devices attached
+
+00589824	00000002	02080007	00000013	linux,cma	00000265	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 6 devices attached
+
+00589824	00000002	02080007	00000013	linux,cma	00000264	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 6 devices attached
+
+00589824	00000002	02080007	00000013	linux,cma	00000263	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 6 devices attached
+
+00589824	00000002	02080007	00000012	linux,cma	00000262	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 5 devices attached
+
+00589824	00000002	02080007	00000013	linux,cma	00000261	<none>
+	Attached Devices:
+	cvu
+	cvu
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 6 devices attached
+
+00589824	00000002	02080007	00000011	linux,cma	00000260	<none>
+	Attached Devices:
+	cvu
+	cvu
+	4100000.al5r
+	4180000.al5r
+Total 4 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000259	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000258	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000257	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000256	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000255	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000254	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000253	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000252	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000251	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000250	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000249	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00491520	00000002	02080007	00000003	al5r	00000248	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000247	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000246	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000245	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000244	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000243	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000242	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000241	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000240	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000239	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000238	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000237	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000236	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000235	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000234	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000233	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000232	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000231	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000230	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000229	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00081920	00000002	02080007	00000003	al5r	00000228	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00020480	00000002	02080007	00000003	al5r	00000227	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+01433600	00000002	02080007	00000003	al5r	00000226	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00016384	00000002	02080007	00000003	al5r	00000225	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00012288	00000002	02080007	00000003	al5r	00000224	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000223	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00327680	00000002	02080007	00000003	al5r	00000222	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00020480	00000002	02080007	00000003	al5r	00000221	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+01433600	00000002	02080007	00000003	al5r	00000220	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00016384	00000002	02080007	00000003	al5r	00000219	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00012288	00000002	02080007	00000003	al5r	00000218	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000217	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00327680	00000002	02080007	00000003	al5r	00000216	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00028672	00000002	02080007	00000003	al5r	00000215	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000214	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00098304	00000002	02080007	00000003	al5r	00000213	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000212	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000003	al5r	00000211	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00131072	00000002	02080007	00000003	al5r	00000210	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00131072	00000002	02080007	00000003	al5r	00000209	<none>
+	Attached Devices:
+	4180000.al5r
+Total 1 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000014	<none>
+	Attached Devices:
+Total 0 devices attached
+
+02097152	00000002	02080007	00000002	linux,cma	00000013	EV74
+	Attached Devices:
+Total 0 devices attached
+
+00004096	00000002	02080007	00000002	linux,cma	00000007	<none>
+	Attached Devices:
+Total 0 devices attached
+
+01048576	00000002	02080007	00000002	linux,cma	00000004	EV74
+	Attached Devices:
+Total 0 devices attached
+
+
+Total 211 objects, 87433216 bytes
