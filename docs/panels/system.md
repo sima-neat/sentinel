@@ -1,8 +1,8 @@
 # System panel
 
 The System panel combines Linux CPU counters, load average, memory accounting,
-SiMa MLA memory telemetry, the EV74 contiguous-memory pool, and periodic
-process snapshots.
+SiMa MLA and EV74 memory telemetry, contiguous-memory (CMA) usage, and
+periodic process snapshots.
 
 ## CPU fields
 
@@ -58,10 +58,12 @@ MiB even though the UI label is MB.
 On Platform 3.0, the presence of `/dev/dma_heap/simaai,dms` selects DMA-BUF
 telemetry. Sentinel reads `/sys/kernel/debug/dma_buf/bufinfo` and sums the
 objects exported by the MLA heaps, `mla` or `simaai,dms`, plus shared-pool
-buffers that only the MLA uses, such as MLA allocations that spill from the MLA
-heap into CMA, counting each DMA-BUF inode once. A shared-pool buffer that EV74
-(`cvu`) also uses, such as an input EV74 writes for the MLA to read, is not MLA
-memory.
+buffers that only the MLA uses, such as an input the CPU prepares with no EV74
+stage or an MLA allocation that spills from the MLA heap into CMA, counting each
+DMA-BUF inode once. A shared-pool buffer that EV74 (`cvu`) also uses is not MLA
+memory: the preprocessed inputs EV74 writes for the MLA count as EV74 memory
+instead. A buffer is therefore never in both totals, and EV74 memory and MLA
+memory can be added.
 
 On earlier releases without that heap, Sentinel reads `/dev/simaai-mem`, finds
 `Total allocated size:`, parses the following hexadecimal byte count, and
@@ -78,26 +80,76 @@ If the selected interface cannot be read or its text format is unrecognized,
 the value is unavailable rather than zero. Sentinel does not fall back to the
 legacy allocator after selecting DMA-BUF telemetry.
 
-## EV74 CMA memory
+## EV74 memory
 
-Sentinel reads `CmaTotal` and `CmaFree` from `/proc/meminfo` on every normal
-daemon sample and reports:
+On Platform 3.0, EV74 (the CVU) works on DMA-BUF memory. While EV74 is using a
+buffer, the kernel lists the `cvu` device under that buffer's attached devices
+in `/sys/kernel/debug/dma_buf/bufinfo`. Sentinel sums the objects attached to
+`cvu` or to a device named `<address>.cvu`, counting each DMA-BUF inode once.
+A buffer belongs to the hardware that produced it, so two kinds of object are
+left out: those exported by an MLA heap (`mla` or `simaai,dms`), which are MLA
+memory, and frames a video decoder or camera ISP produced for EV74 to read.
+Sentinel recognises those producers from their device-tree nodes under
+`/sys/bus/platform/devices`: a video decoder's `al,ip-type` starts with `dec`,
+and a camera ISP's `compatible` includes `arm,isp`.
 
 ```text
-EV74 CMA used = CmaTotal - CmaFree
+ev74_mem_allocated_mb = sum of sizes of unique inodes attached to cvu,
+                        excluding those exported by an MLA heap
+                        and those also attached to a video decoder or camera ISP
 ```
 
-`CmaTotal` is the contiguous memory area reserved at boot. `CmaFree` is the
-currently unallocated portion of that reservation. The System tab displays the
-used value, while checkpoint recordings retain total, free, and used values.
-The Compare Runs tab can overlay `EV74 CMA memory` for selected runs.
+Each EV74 client attaches to a buffer separately, so one buffer often lists
+`cvu` several times; it still counts once. Sentinel reads `bufinfo` once per
+sample for both MLA and EV74 memory. The System tab charts this value,
+and the Compare Runs tab can overlay `EV74 memory` for selected runs.
 
-This is an EV74 consumption proxy when EV74 is the consumer of the reserved
-CMA pool. Linux CMA is a shared kernel facility, so allocations by another
-driver can also reduce `CmaFree`; Sentinel cannot attribute those pages to an
-individual process from `/proc/meminfo` alone. If either field is absent, the
-derived used value is reported as unavailable rather than zero; any field that
-is present remains available on its own.
+Read the value with these limits in mind:
+
+- A shared-pool buffer that EV74 and the MLA share counts as EV74 memory only,
+  whichever of them wrote it. In the pipelines tested, these are the
+  preprocessed tensors EV74 hands to the model. EV74 memory and MLA memory never
+  include the same buffer, so adding them gives the memory both hold.
+- Frames a video decoder or camera ISP produced are counted by neither metric,
+  even while EV74 reads them. With one RTSP stream that is 12 decoded pictures
+  (6.75 MiB at 640x512). The decoder's own working memory is not counted either.
+- A buffer counts once EV74 has used it. A tensor allocated for EV74 that EV74
+  has not processed yet is `linux,cma` memory, not EV74 memory.
+- DMA-BUF names are ignored. System daemons hold small buffers named `EV74`
+  that EV74 is not using.
+- EV74's fixed firmware reservation and kernel-internal allocations are not
+  DMA-BUFs and are not included.
+- The CVU driver caches at most 64 buffers per client. A pipeline whose own EV74
+  buffers exceed this can have in-use buffers evicted, and the value can read
+  low. An application that creates a new input buffer for every frame can make
+  it read high: the driver keeps up to 64 old buffers mapped per client, and
+  they stay allocated. `/sys/kernel/debug/simaai-cvu/stats` reports evictions.
+
+The value is unavailable rather than zero when `/dev/cvu` is absent or when
+`bufinfo` cannot be read or parsed.
+
+## CMA pool
+
+Sentinel also reads `CmaTotal` and `CmaFree` from `/proc/meminfo` on every
+normal daemon sample and reports:
+
+```text
+CMA used = CmaTotal - CmaFree
+```
+
+`CmaTotal` covers every CMA region reserved at boot. `CmaFree` excludes movable
+pages, such as page cache, that Linux places in CMA and moves out on demand. CMA
+used therefore overstates allocated memory and is not EV74 memory: on an idle
+Modalix Platform 3.0 DevKit it read about 90 MiB while EV74 held no memory.
+Use `ev74_mem_allocated_mb` for EV74 memory.
+
+The keys `ev74_cma_total_mb`, `ev74_cma_free_mb`, and `ev74_cma_used_mb` keep
+their names so existing clients and recorded runs still read them; their labels
+are `CMA reserved`, `CMA free`, and `CMA used`. Checkpoint recordings retain
+all three. Linux CMA is a shared kernel facility, and Sentinel cannot attribute
+these pages to an individual process from `/proc/meminfo` alone. If either
+field is absent, the derived used value is reported as unavailable rather than
+zero; any field that is present remains available on its own.
 
 The boot reservation can be inspected separately with:
 
