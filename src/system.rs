@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -9,11 +10,21 @@ const PROCESS_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const LEGACY_MLA_MEMORY_PATH: &str = "/dev/simaai-mem";
 const MLA_DMA_HEAP_PATH: &str = "/dev/dma_heap/simaai,dms";
 const DMA_BUFINFO_PATH: &str = "/sys/kernel/debug/dma_buf/bufinfo";
+const CVU_DEVICE_PATH: &str = "/dev/cvu";
+const PLATFORM_DEVICES_PATH: &str = "/sys/bus/platform/devices";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MlaMemorySource {
     DmaBuf,
     Legacy,
+}
+
+/// DMA-BUF bytes from one bufinfo snapshot, each buffer counted once per total.
+/// Each total is independent: an inconsistency among EV74 buffers does not blank MLA.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DmaBufTotals {
+    mla_bytes: Option<u64>,
+    ev74_bytes: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -82,37 +93,47 @@ pub fn system_metric_definitions() -> Vec<MetricDefinition> {
             "MLAMB",
             "MLA",
             "MB",
-            "MLA DMA-BUF allocation on Platform 3.0, with legacy allocator fallback on older releases.",
+            "DMA-BUF memory allocated from the MLA heaps (simaai,dms, mla) on Platform 3.0, plus shared-pool buffers only the MLA uses, each buffer counted once, with legacy allocator fallback on older releases. Does not include the shared-pool buffers EV74 writes for the MLA; those are EV74 memory.",
+            None,
+            None,
+        ),
+        MetricDefinition::new(
+            "ev74_mem_allocated_mb",
+            "EV74 memory allocated",
+            "EV74MB",
+            "EV74",
+            "MB",
+            "DMA-BUF memory EV74 is using: shared-pool buffers attached to the cvu device, each counted once, including the preprocessed inputs EV74 hands to the MLA. Frames a video decoder or camera ISP produced are not counted. EV74 and MLA memory never count the same buffer, so they can be added.",
             None,
             None,
         ),
         MetricDefinition::new(
             "ev74_cma_total_mb",
-            "EV74 CMA reserved",
+            "CMA reserved",
             "CMATotal",
-            "EV74",
+            "Memory",
             "MB",
-            "Boot-time contiguous memory reservation reported by CmaTotal in /proc/meminfo.",
+            "CmaTotal from /proc/meminfo: contiguous memory reserved at boot across all CMA regions. Not specific to EV74.",
             None,
             None,
         ),
         MetricDefinition::new(
             "ev74_cma_free_mb",
-            "EV74 CMA free",
+            "CMA free",
             "CMAFree",
-            "EV74",
+            "Memory",
             "MB",
-            "Currently free contiguous memory reported by CmaFree in /proc/meminfo.",
+            "CmaFree from /proc/meminfo across all CMA regions. Not specific to EV74.",
             None,
             None,
         ),
         MetricDefinition::new(
             "ev74_cma_used_mb",
-            "EV74 CMA used",
+            "CMA used",
             "CMAUsed",
-            "EV74",
+            "Memory",
             "MB",
-            "CmaTotal minus CmaFree; a proxy for EV74 memory consumption when EV74 owns the CMA pool.",
+            "CmaTotal minus CmaFree across all CMA regions. Includes every CMA user and movable pages such as page cache, so it is not EV74 memory; see EV74 memory allocated.",
             None,
             None,
         ),
@@ -254,6 +275,7 @@ pub struct SystemCollector {
     process_interval: Duration,
     clock_ticks: f64,
     page_size: f64,
+    producer_devices: RefCell<BTreeMap<String, bool>>,
 }
 
 impl SystemCollector {
@@ -270,6 +292,7 @@ impl SystemCollector {
             process_interval: PROCESS_SAMPLE_INTERVAL,
             clock_ticks: clock_ticks_per_second(),
             page_size: page_size_bytes(),
+            producer_devices: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -284,7 +307,7 @@ impl SystemCollector {
         let mut values = BTreeMap::new();
         values.extend(self.sample_cpu());
         values.extend(sample_memory());
-        values.insert("mla_mem_allocated_mb".into(), read_mla_memory_mb());
+        values.extend(sample_dma_buf_memory(&self.producer_devices));
         values.extend(self.sample_disks(dt));
         values.extend(self.sample_network(dt));
         if self
@@ -626,8 +649,51 @@ fn parse_meminfo(raw: &str) -> BTreeMap<String, u64> {
         .collect()
 }
 
-fn read_mla_memory_mb() -> f64 {
-    read_mla_memory_bytes()
+/// `producers` caches, per attached device name, whether it is a frame producer,
+/// so device-tree properties are read once per device rather than every sample.
+fn sample_dma_buf_memory(producers: &RefCell<BTreeMap<String, bool>>) -> BTreeMap<String, f64> {
+    let exists = |path: &str| Path::new(path).exists();
+    let mla_source = detect_mla_memory_source(exists);
+    let cvu_present = exists(CVU_DEVICE_PATH);
+    let is_producer = |device: &str| {
+        if let Some(known) = producers.borrow().get(device) {
+            return *known;
+        }
+        let producer = producer_device(device, read_device_tree_property);
+        producers.borrow_mut().insert(device.to_string(), producer);
+        producer
+    };
+    // One bufinfo read feeds every DMA-BUF metric in this sample.
+    let totals = (mla_source == Some(MlaMemorySource::DmaBuf) || cvu_present)
+        .then(|| fs::read_to_string(DMA_BUFINFO_PATH).ok())
+        .flatten()
+        .and_then(|raw| parse_dma_buf_totals(&raw, is_producer));
+    let mla_bytes = match mla_source {
+        Some(MlaMemorySource::DmaBuf) => totals.and_then(|totals| totals.mla_bytes),
+        Some(MlaMemorySource::Legacy) => fs::read_to_string(LEGACY_MLA_MEMORY_PATH)
+            .ok()
+            .and_then(|raw| parse_legacy_mla_memory_bytes(&raw)),
+        None => None,
+    };
+
+    BTreeMap::from([
+        ("mla_mem_allocated_mb".to_string(), bytes_to_mb(mla_bytes)),
+        (
+            "ev74_mem_allocated_mb".to_string(),
+            bytes_to_mb(ev74_dma_buf_bytes(totals, cvu_present)),
+        ),
+    ])
+}
+
+/// EV74 bytes, unavailable when the CVU device is absent rather than a false zero.
+fn ev74_dma_buf_bytes(totals: Option<DmaBufTotals>, cvu_present: bool) -> Option<u64> {
+    totals
+        .filter(|_| cvu_present)
+        .and_then(|totals| totals.ev74_bytes)
+}
+
+fn bytes_to_mb(bytes: Option<u64>) -> f64 {
+    bytes
         .map(|bytes| bytes as f64 / 1024.0 / 1024.0)
         .unwrap_or(f64::NAN)
 }
@@ -640,17 +706,6 @@ fn detect_mla_memory_source(mut path_exists: impl FnMut(&str) -> bool) -> Option
         return Some(MlaMemorySource::Legacy);
     }
     None
-}
-
-fn read_mla_memory_bytes() -> Option<u64> {
-    match detect_mla_memory_source(|path| Path::new(path).exists())? {
-        MlaMemorySource::DmaBuf => fs::read_to_string(DMA_BUFINFO_PATH)
-            .ok()
-            .and_then(|raw| parse_dma_buf_mla_bytes(&raw)),
-        MlaMemorySource::Legacy => fs::read_to_string(LEGACY_MLA_MEMORY_PATH)
-            .ok()
-            .and_then(|raw| parse_legacy_mla_memory_bytes(&raw)),
-    }
 }
 
 fn parse_legacy_mla_memory_bytes(raw: &str) -> Option<u64> {
@@ -741,19 +796,99 @@ fn parse_dma_buf_objects(raw: &str) -> Option<Vec<DmaBufObject<'_>>> {
     Some(objects)
 }
 
-fn parse_dma_buf_mla_bytes(raw: &str) -> Option<u64> {
-    let mut matched_by_inode = BTreeMap::new();
-    for object in parse_dma_buf_objects(raw)? {
-        let exporter = object.exporter.to_ascii_lowercase();
-        let exported_for_mla = exporter == "mla" || exporter == "simaai,dms";
-        let attached_to_mla = object.attached_devices.iter().any(|device| {
-            let device = device.trim().to_ascii_lowercase();
-            device == "mla" || device.ends_with(".mla")
-        });
-        if !exported_for_mla && !attached_to_mla {
-            continue;
-        }
+/// `is_producer` says whether an attached device produces frames for EV74 to read
+/// (a video decoder or a camera ISP); see `producer_device`.
+fn parse_dma_buf_totals(raw: &str, is_producer: impl Fn(&str) -> bool) -> Option<DmaBufTotals> {
+    let objects = parse_dma_buf_objects(raw)?;
+    // A buffer belongs to the hardware that produced it, not to every device that
+    // reads it. MLA memory is what the MLA heaps hold, plus shared-pool buffers
+    // only the MLA uses (such as MLA allocations that spill into CMA). EV74 memory
+    // is what EV74 is using outside the MLA heaps, including the inputs it writes
+    // for the MLA. Frames a video decoder or camera ISP produced belong to neither.
+    // A buffer matches at most one rule, so the two totals cannot overlap.
+    let from_producer = |object: &DmaBufObject<'_>| {
+        object
+            .attached_devices
+            .iter()
+            .any(|device| is_producer(device.trim()))
+    };
+    Some(DmaBufTotals {
+        mla_bytes: sum_unique_dma_bufs(&objects, |object| {
+            from_mla_heap(object) || (used_only_by_mla(object) && !from_producer(object))
+        }),
+        // EV74 is attached as `cvu` on Platform 3.0. Buffers named "EV74" are
+        // system-daemon buffers that EV74 is not using, so names are ignored.
+        ev74_bytes: sum_unique_dma_bufs(&objects, |object| {
+            attached_to(object, "cvu") && !from_mla_heap(object) && !from_producer(object)
+        }),
+    })
+}
 
+fn used_only_by_mla(object: &DmaBufObject<'_>) -> bool {
+    attached_to(object, "mla") && !attached_to(object, "cvu")
+}
+
+/// Whether a `bufinfo` attached device is a video decoder (`al,ip-type` starting
+/// with `dec`) or a camera ISP (`compatible` containing `arm,isp`), read from its
+/// device-tree node. `read_property(device, property)` returns the raw property.
+fn producer_device(device: &str, read_property: impl Fn(&str, &str) -> Option<Vec<u8>>) -> bool {
+    let valid_name = !device.is_empty()
+        && device
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b','))
+        && !device.starts_with('.');
+    if !valid_name {
+        return false;
+    }
+    let strings = |property| {
+        read_property(device, property)
+            .map(|raw| {
+                raw.split(|byte| *byte == 0)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| String::from_utf8_lossy(part).trim().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    strings("al,ip-type")
+        .iter()
+        .any(|kind| kind.starts_with("dec"))
+        || strings("compatible")
+            .iter()
+            .any(|compatible| compatible == "arm,isp")
+}
+
+fn read_device_tree_property(device: &str, property: &str) -> Option<Vec<u8>> {
+    fs::read(format!(
+        "{PLATFORM_DEVICES_PATH}/{device}/of_node/{property}"
+    ))
+    .ok()
+}
+
+fn from_mla_heap(object: &DmaBufObject<'_>) -> bool {
+    let exporter = object.exporter.to_ascii_lowercase();
+    exporter == "mla" || exporter == "simaai,dms"
+}
+
+/// Matches a bare device name (`cvu`) or one with a unit address (`5000000.mla`).
+fn attached_to(object: &DmaBufObject<'_>, device_name: &str) -> bool {
+    object.attached_devices.iter().any(|device| {
+        let device = device.trim().to_ascii_lowercase();
+        device == device_name
+            || device
+                .strip_suffix(device_name)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+/// Sums matching objects once per inode. A device attaches to a buffer once per
+/// client, so one buffer can list the same device several times.
+fn sum_unique_dma_bufs(
+    objects: &[DmaBufObject<'_>],
+    matches: impl Fn(&DmaBufObject<'_>) -> bool,
+) -> Option<u64> {
+    let mut matched_by_inode = BTreeMap::new();
+    for object in objects.iter().filter(|object| matches(object)) {
         if let Some(previous_size) = matched_by_inode.insert(object.inode, object.size_bytes) {
             if previous_size != object.size_bytes {
                 return None;
@@ -941,10 +1076,107 @@ impl MountCheck for Path {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_mla_memory_source, network_utilization_percent, parse_default_route_interface,
-        parse_dma_buf_mla_bytes, parse_dma_buf_objects, parse_legacy_mla_memory_bytes,
-        parse_meminfo, MlaMemorySource, LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
+        attached_to, detect_mla_memory_source, ev74_dma_buf_bytes, network_utilization_percent,
+        parse_default_route_interface, parse_dma_buf_objects, parse_dma_buf_totals,
+        parse_legacy_mla_memory_bytes, parse_meminfo, producer_device, DmaBufTotals,
+        MlaMemorySource, LEGACY_MLA_MEMORY_PATH, MLA_DMA_HEAP_PATH,
     };
+
+    /// Real bufinfo from a Modalix DevKit (eLxr 3.0.0 B1859) while YOLO26 ran at 1080p
+    /// with EV74 preprocessing. Tests check relationships in it, not captured totals.
+    const PLATFORM_3_YOLO_1080P_BUFINFO: &str =
+        include_str!("fixtures/dma-buf-platform-3.0-yolo26-1080p.bufinfo");
+    /// One RTSP H.264 640x512 stream decoded by the Allegro decoder (`4180000.al5r`,
+    /// `al,ip-type` "dec-v300"), prepared on EV74 and detected on the MLA.
+    const PLATFORM_3_RTSP_640X512_BUFINFO: &str =
+        include_str!("fixtures/dma-buf-platform-3.0-rtsp-640x512.bufinfo");
+
+    /// Totals for a snapshot in which no attached device is a frame producer.
+    fn totals_without_producers(raw: &str) -> Option<DmaBufTotals> {
+        parse_dma_buf_totals(raw, |_| false)
+    }
+
+    fn parse_dma_buf_mla_bytes(raw: &str) -> Option<u64> {
+        totals_without_producers(raw).and_then(|totals| totals.mla_bytes)
+    }
+
+    /// One buffer row in a synthetic bufinfo snapshot.
+    struct Buf {
+        size: u64,
+        exporter: &'static str,
+        inode: u64,
+        name: &'static str,
+        devices: &'static [&'static str],
+    }
+
+    /// Renders buffers in the kernel's bufinfo layout, including the summary line, so
+    /// each test's expected total is the sum of the buffers it lists.
+    fn bufinfo(bufs: &[Buf]) -> String {
+        let mut out =
+            String::from("Dma-buf Objects:\nsize\tflags\tmode\tcount\texp_name\tino\tname\n");
+        for buf in bufs {
+            out += &format!(
+                "{:08}\t00000002\t02080007\t00000002\t{}\t{:08}\t{}\n\tAttached Devices:\n",
+                buf.size, buf.exporter, buf.inode, buf.name
+            );
+            for device in buf.devices {
+                out += &format!("\t{device}\n");
+            }
+            out += &format!("Total {} devices attached\n\n", buf.devices.len());
+        }
+        let bytes: u64 = bufs.iter().map(|buf| buf.size).sum();
+        out + &format!("Total {} objects, {bytes} bytes\n", bufs.len())
+    }
+
+    /// Writes each attachment line of one device `copies` times. Only lines inside an
+    /// "Attached Devices:" block change, so object rows and their names are untouched.
+    fn edit_device_lines(raw: &str, suffix: &str, copies: usize) -> String {
+        let mut out = String::new();
+        let mut in_devices = false;
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            let is_device = in_devices
+                && (trimmed == suffix.trim_start_matches('.') || trimmed.ends_with(suffix));
+            if trimmed == "Attached Devices:" {
+                in_devices = true;
+            } else if trimmed.starts_with("Total ") {
+                in_devices = false;
+            }
+            for _ in 0..if is_device { copies } else { 1 } {
+                out += line;
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Lists every attachment of the named device twice, as a second client would.
+    fn repeat_device_lines(raw: &str, suffix: &str) -> String {
+        edit_device_lines(raw, suffix, 2)
+    }
+
+    /// Removes every attachment of the named device.
+    fn drop_device_lines(raw: &str, suffix: &str) -> String {
+        edit_device_lines(raw, suffix, 0)
+    }
+
+    #[test]
+    fn device_line_helpers_leave_object_rows_alone() {
+        let snapshot = bufinfo(&[Buf {
+            size: 4096,
+            exporter: "linux,cma",
+            inode: 1,
+            name: "weights.mla",
+            devices: &["5000000.mla"],
+        }]);
+
+        let repeated = repeat_device_lines(&snapshot, ".mla");
+        let dropped = drop_device_lines(&snapshot, ".mla");
+        assert_eq!(repeated.matches("weights.mla").count(), 1);
+        assert_eq!(repeated.matches("\t5000000.mla").count(), 2);
+        assert_eq!(dropped.matches("weights.mla").count(), 1);
+        assert_eq!(dropped.matches("\t5000000.mla").count(), 0);
+    }
 
     const DMA_BUF_FIXTURE: &str = "\
 Dma-buf Objects:
@@ -1000,7 +1232,8 @@ Total 4 objects, 14163968 bytes
     }
 
     #[test]
-    fn dma_buf_mla_accounting_uses_inode_union() {
+    fn dma_buf_mla_accounting_counts_mla_heaps_and_mla_only_buffers() {
+        // MLA-heap weights plus the 1 MiB linux,cma buffer only the MLA uses.
         assert_eq!(
             parse_dma_buf_mla_bytes(DMA_BUF_FIXTURE),
             Some(2_097_152 + 1_048_576)
@@ -1052,6 +1285,506 @@ Total 4 objects, 14163968 bytes
         );
 
         assert_eq!(parse_dma_buf_mla_bytes(&conflicting), None);
+    }
+
+    #[test]
+    fn mla_total_counts_mla_heaps_and_mla_only_shared_buffers() {
+        const WEIGHTS: u64 = 8 << 20;
+        const SCRATCH: u64 = 64 << 10;
+        const HANDOFF: u64 = 4 << 20;
+        const SPILLED: u64 = 2 << 20;
+        let snapshot = bufinfo(&[
+            Buf {
+                size: WEIGHTS,
+                exporter: "simaai,dms",
+                inode: 1,
+                name: "<none>",
+                devices: &["5000000.mla"],
+            },
+            Buf {
+                size: SCRATCH,
+                exporter: "mla",
+                inode: 2,
+                name: "<none>",
+                devices: &[],
+            },
+            // A shared-pool buffer EV74 wrote and the MLA reads: EV74 memory, not MLA.
+            Buf {
+                size: HANDOFF,
+                exporter: "linux,cma",
+                inode: 3,
+                name: "<none>",
+                devices: &["cvu", "5000000.mla", "5000000.mla"],
+            },
+            // An MLA allocation that spilled from the MLA heap into the shared pool.
+            Buf {
+                size: SPILLED,
+                exporter: "linux,cma",
+                inode: 5,
+                name: "<none>",
+                devices: &["5000000.mla"],
+            },
+            Buf {
+                size: 1 << 20,
+                exporter: "linux,cma",
+                inode: 4,
+                name: "<none>",
+                devices: &[],
+            },
+        ]);
+
+        assert_eq!(
+            totals_without_producers(&snapshot),
+            Some(DmaBufTotals {
+                mla_bytes: Some(WEIGHTS + SCRATCH + SPILLED),
+                ev74_bytes: Some(HANDOFF),
+            })
+        );
+    }
+
+    #[test]
+    fn a_decoder_frame_the_mla_reads_directly_is_not_mla_memory() {
+        const DECODED: u64 = 576 << 10;
+        let snapshot = bufinfo(&[Buf {
+            size: DECODED,
+            exporter: "linux,cma",
+            inode: 1,
+            name: "<none>",
+            devices: &["4180000.al5r", "5000000.mla"],
+        }]);
+        let decoder = |device: &str| device == "4180000.al5r";
+
+        assert_eq!(
+            parse_dma_buf_totals(&snapshot, decoder),
+            Some(DmaBufTotals {
+                mla_bytes: Some(0),
+                ev74_bytes: Some(0),
+            })
+        );
+        assert_eq!(parse_dma_buf_mla_bytes(&snapshot), Some(DECODED));
+    }
+
+    #[test]
+    fn dma_buf_totals_count_a_buffer_listed_in_two_rows_once() {
+        const WEIGHTS: u64 = 8 << 20;
+        let row = || Buf {
+            size: WEIGHTS,
+            exporter: "simaai,dms",
+            inode: 7,
+            name: "<none>",
+            devices: &["5000000.mla"],
+        };
+        let snapshot = bufinfo(&[row(), row()]);
+
+        assert_eq!(parse_dma_buf_mla_bytes(&snapshot), Some(WEIGHTS));
+    }
+
+    #[test]
+    fn mla_total_rejects_lookalike_device_and_heap_names() {
+        let snapshot = bufinfo(&[
+            Buf {
+                size: 4096,
+                exporter: "linux,cma",
+                inode: 1,
+                name: "<none>",
+                devices: &["5000000.notmla"],
+            },
+            Buf {
+                size: 2048,
+                exporter: "linux,cma",
+                inode: 4,
+                name: "<none>",
+                devices: &["mlax"],
+            },
+            Buf {
+                size: 8192,
+                exporter: "simaai,dmsx",
+                inode: 2,
+                name: "<none>",
+                devices: &[],
+            },
+            Buf {
+                size: 16384,
+                exporter: "mla2",
+                inode: 3,
+                name: "<none>",
+                devices: &[],
+            },
+        ]);
+
+        assert_eq!(parse_dma_buf_mla_bytes(&snapshot), Some(0));
+    }
+
+    #[test]
+    fn mla_total_on_a_real_capture_is_the_sum_of_its_mla_heap_buffers() {
+        let raw = PLATFORM_3_YOLO_1080P_BUFINFO;
+        let mla = parse_dma_buf_mla_bytes(raw).unwrap();
+        let heap_buffers: u64 = parse_dma_buf_objects(raw)
+            .unwrap()
+            .iter()
+            .filter(|object| matches!(object.exporter, "mla" | "simaai,dms"))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert!(mla > 0);
+        // Every shared-pool buffer the MLA uses in this run is also used by EV74.
+        assert_eq!(mla, heap_buffers);
+
+        // More MLA clients attaching changes nothing.
+        assert_eq!(
+            parse_dma_buf_mla_bytes(&repeat_device_lines(raw, ".mla")),
+            Some(mla)
+        );
+        // Without EV74 tags, the shared buffers become MLA-only and count as MLA.
+        let shared: u64 = parse_dma_buf_objects(raw)
+            .unwrap()
+            .iter()
+            .filter(|object| attached_to(object, "mla") && attached_to(object, "cvu"))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert!(shared > 0);
+        assert_eq!(
+            parse_dma_buf_mla_bytes(&drop_device_lines(raw, ".cvu")),
+            Some(mla + shared)
+        );
+    }
+
+    #[test]
+    fn ev74_and_mla_totals_never_share_a_buffer() {
+        let objects = parse_dma_buf_objects(PLATFORM_3_YOLO_1080P_BUFINFO).unwrap();
+        let in_mla = |object: &&super::DmaBufObject<'_>| {
+            matches!(object.exporter, "mla" | "simaai,dms")
+                || (attached_to(object, "mla") && !attached_to(object, "cvu"))
+        };
+        let in_ev74 = |object: &&super::DmaBufObject<'_>| attached_to(object, "cvu");
+
+        assert!(objects.iter().filter(in_mla).any(|_| true));
+        assert!(objects.iter().filter(in_ev74).any(|_| true));
+        assert!(!objects
+            .iter()
+            .any(|object| in_mla(&object) && in_ev74(&object)));
+
+        // So the two metrics add up to the memory either chip holds.
+        let totals = totals_without_producers(PLATFORM_3_YOLO_1080P_BUFINFO).unwrap();
+        let either: u64 = objects
+            .iter()
+            .filter(|object| in_mla(object) || in_ev74(object))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert_eq!(
+            totals.mla_bytes.unwrap() + totals.ev74_bytes.unwrap(),
+            either
+        );
+    }
+
+    #[test]
+    fn an_mla_heap_buffer_ev74_also_uses_counts_once_as_mla() {
+        const MLA_HEAP_SHARED: u64 = 2 << 20;
+        const SHARED_POOL: u64 = 1 << 20;
+        let snapshot = bufinfo(&[
+            Buf {
+                size: MLA_HEAP_SHARED,
+                exporter: "simaai,dms",
+                inode: 1,
+                name: "<none>",
+                devices: &["cvu", "cvu", "5000000.mla"],
+            },
+            Buf {
+                size: SHARED_POOL,
+                exporter: "linux,cma",
+                inode: 2,
+                name: "<none>",
+                devices: &["cvu"],
+            },
+        ]);
+
+        assert_eq!(
+            totals_without_producers(&snapshot),
+            Some(DmaBufTotals {
+                mla_bytes: Some(MLA_HEAP_SHARED),
+                ev74_bytes: Some(SHARED_POOL),
+            })
+        );
+    }
+
+    #[test]
+    fn ev74_leaves_out_frames_a_decoder_or_isp_produced() {
+        const DECODED: u64 = 576 << 10;
+        const CAMERA: u64 = 3 << 20;
+        const TO_ENCODER: u64 = 1 << 20;
+        const HANDOFF: u64 = 4 << 20;
+        let snapshot = bufinfo(&[
+            // A decoded picture EV74 reads; the encoder reads it too.
+            Buf {
+                size: DECODED,
+                exporter: "linux,cma",
+                inode: 1,
+                name: "<none>",
+                devices: &["4180000.al5r", "4100000.al5r", "cvu"],
+            },
+            // A camera frame EV74 reads.
+            Buf {
+                size: CAMERA,
+                exporter: "videobuf2_dma_contig",
+                inode: 2,
+                name: "<none>",
+                devices: &["4220000.isp", "cvu"],
+            },
+            // EV74 output the encoder reads: the encoder is not a producer.
+            Buf {
+                size: TO_ENCODER,
+                exporter: "linux,cma",
+                inode: 3,
+                name: "<none>",
+                devices: &["cvu", "4100000.al5r"],
+            },
+            Buf {
+                size: HANDOFF,
+                exporter: "linux,cma",
+                inode: 4,
+                name: "<none>",
+                devices: &["cvu", "5000000.mla"],
+            },
+        ]);
+        let producers = |device: &str| matches!(device, "4180000.al5r" | "4220000.isp");
+
+        assert_eq!(
+            parse_dma_buf_totals(&snapshot, producers).and_then(|totals| totals.ev74_bytes),
+            Some(TO_ENCODER + HANDOFF)
+        );
+        assert_eq!(
+            totals_without_producers(&snapshot).and_then(|totals| totals.ev74_bytes),
+            Some(DECODED + CAMERA + TO_ENCODER + HANDOFF)
+        );
+    }
+
+    #[test]
+    fn producer_devices_are_recognised_from_device_tree_properties() {
+        let reads = std::cell::Cell::new(0);
+        let properties = |device: &str, property: &str| -> Option<Vec<u8>> {
+            reads.set(reads.get() + 1);
+            let value: &[u8] = match (device, property) {
+                ("4180000.al5r", "al,ip-type") => b"dec-v300\0",
+                ("4100000.al5r", "al,ip-type") => b"enc-v200\0",
+                ("4180000.al5r" | "4100000.al5r", "compatible") => b"al,al5r\0",
+                ("4220000.isp", "compatible") => b"arm,isp\0",
+                ("4240000.isp_stu", "compatible") => b"simaai,stu\0",
+                ("9000000.cam", "compatible") => b"vendor,cam-v1\0arm,isp\0",
+                _ => return None,
+            };
+            Some(value.to_vec())
+        };
+
+        assert!(producer_device("4180000.al5r", properties));
+        assert!(!producer_device("4100000.al5r", properties));
+        assert!(producer_device("4220000.isp", properties));
+        assert!(!producer_device("4240000.isp_stu", properties));
+        assert!(producer_device("9000000.cam", properties));
+        assert!(!producer_device("cvu", properties));
+        assert!(!producer_device("5000000.mla", properties));
+
+        // Names that could leave the device directory are rejected without a read.
+        let before = reads.get();
+        for name in ["", "..", "../etc", "a/b", ".hidden"] {
+            assert!(!producer_device(name, properties));
+        }
+        assert_eq!(reads.get(), before);
+    }
+
+    #[test]
+    fn ev74_on_a_real_rtsp_capture_leaves_out_the_decoded_pictures() {
+        let raw = PLATFORM_3_RTSP_640X512_BUFINFO;
+        let decoder = |device: &str| device == "4180000.al5r";
+        let with_rule = parse_dma_buf_totals(raw, decoder).unwrap();
+        let without_rule = totals_without_producers(raw).unwrap();
+
+        // The pictures the decoder produced for EV74 are what the rule removes.
+        let decoded: u64 = parse_dma_buf_objects(raw)
+            .unwrap()
+            .iter()
+            .filter(|object| attached_to(object, "cvu") && attached_to(object, "al5r"))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert!(decoded > 0);
+        assert_eq!(
+            without_rule.ev74_bytes.unwrap() - with_rule.ev74_bytes.unwrap(),
+            decoded
+        );
+        // What EV74 keeps is the inputs it hands to the MLA; MLA memory is unchanged.
+        let handoff: u64 = parse_dma_buf_objects(raw)
+            .unwrap()
+            .iter()
+            .filter(|object| attached_to(object, "cvu") && attached_to(object, "mla"))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert_eq!(with_rule.ev74_bytes, Some(handoff));
+        assert_eq!(with_rule.mla_bytes, without_rule.mla_bytes);
+    }
+
+    /// Rounds a byte count up to whole 4 KiB pages, as the kernel allocates buffers.
+    fn page_round(bytes: u64) -> u64 {
+        bytes.div_ceil(4096) * 4096
+    }
+
+    #[test]
+    fn ev74_total_counts_cvu_attached_buffers_once() {
+        let input = page_round(1920 * 1080 * 3);
+        const HANDOFF: u64 = 4 << 20;
+        let snapshot = bufinfo(&[
+            // Each EV74 client attaches separately, so `cvu` is listed several times.
+            Buf {
+                size: input,
+                exporter: "linux,cma",
+                inode: 1,
+                name: "<none>",
+                devices: &["cvu", "cvu", "cvu", "cvu"],
+            },
+            Buf {
+                size: HANDOFF,
+                exporter: "linux,cma",
+                inode: 2,
+                name: "<none>",
+                devices: &["cvu", "cvu", "5000000.mla"],
+            },
+            // Daemons name buffers "EV74" without EV74 using them; names are ignored.
+            Buf {
+                size: 2 << 20,
+                exporter: "linux,cma",
+                inode: 3,
+                name: "EV74",
+                devices: &[],
+            },
+            Buf {
+                size: 8 << 20,
+                exporter: "simaai,dms",
+                inode: 4,
+                name: "<none>",
+                devices: &["5000000.mla"],
+            },
+        ]);
+        let totals = totals_without_producers(&snapshot).unwrap();
+
+        assert_eq!(totals.ev74_bytes, Some(input + HANDOFF));
+        // The handoff buffer is EV74 memory only; MLA memory is its own heap's buffer.
+        assert_eq!(totals.mla_bytes, Some(8 << 20));
+    }
+
+    #[test]
+    fn an_inconsistent_ev74_buffer_does_not_blank_mla_memory() {
+        const WEIGHTS: u64 = 8 << 20;
+        // One EV74 buffer listed twice with different sizes: that total is unusable,
+        // but the MLA buffers are consistent and still count.
+        let snapshot = bufinfo(&[
+            Buf {
+                size: 4096,
+                exporter: "linux,cma",
+                inode: 9,
+                name: "<none>",
+                devices: &["cvu"],
+            },
+            Buf {
+                size: 8192,
+                exporter: "linux,cma",
+                inode: 9,
+                name: "<none>",
+                devices: &["cvu"],
+            },
+            Buf {
+                size: WEIGHTS,
+                exporter: "simaai,dms",
+                inode: 1,
+                name: "<none>",
+                devices: &["5000000.mla"],
+            },
+        ]);
+        let totals = totals_without_producers(&snapshot).unwrap();
+
+        assert_eq!(totals.ev74_bytes, None);
+        assert_eq!(totals.mla_bytes, Some(WEIGHTS));
+    }
+
+    #[test]
+    fn ev74_total_accepts_a_unit_address_and_rejects_lookalikes() {
+        let snapshot = bufinfo(&[
+            Buf {
+                size: 4096,
+                exporter: "linux,cma",
+                inode: 1,
+                name: "<none>",
+                devices: &["5100000.cvu"],
+            },
+            Buf {
+                size: 8192,
+                exporter: "linux,cma",
+                inode: 2,
+                name: "<none>",
+                devices: &["5100000.notcvu"],
+            },
+            Buf {
+                size: 16384,
+                exporter: "linux,cma",
+                inode: 3,
+                name: "<none>",
+                devices: &["cvux"],
+            },
+        ]);
+
+        assert_eq!(
+            totals_without_producers(&snapshot).unwrap().ev74_bytes,
+            Some(4096)
+        );
+    }
+
+    #[test]
+    fn ev74_total_is_zero_when_idle_and_unavailable_when_unreadable() {
+        let idle = bufinfo(&[]);
+
+        assert_eq!(
+            totals_without_producers(&idle).and_then(|totals| totals.ev74_bytes),
+            Some(0)
+        );
+        assert_eq!(totals_without_producers("permission denied"), None);
+    }
+
+    #[test]
+    fn ev74_memory_is_unavailable_without_the_device_or_snapshot() {
+        let totals = Some(DmaBufTotals {
+            mla_bytes: Some(1),
+            ev74_bytes: Some(2),
+        });
+
+        assert_eq!(ev74_dma_buf_bytes(totals, true), Some(2));
+        assert_eq!(ev74_dma_buf_bytes(totals, false), None);
+        assert_eq!(ev74_dma_buf_bytes(None, true), None);
+    }
+
+    #[test]
+    fn ev74_total_on_a_real_capture_is_its_input_frame_plus_shared_buffers() {
+        let raw = PLATFORM_3_YOLO_1080P_BUFINFO;
+        let ev74 = totals_without_producers(raw).unwrap().ev74_bytes.unwrap();
+
+        // The capture ran YOLO26 on 1920x1080 RGB frames: EV74 holds one input frame
+        // and the preprocessed tensors it hands to the MLA.
+        let input = page_round(1920 * 1080 * 3);
+        let shared: u64 = parse_dma_buf_objects(raw)
+            .unwrap()
+            .iter()
+            .filter(|object| attached_to(object, "cvu") && attached_to(object, "mla"))
+            .map(|object| object.size_bytes)
+            .sum();
+        assert!(shared > 0);
+        assert_eq!(ev74, input + shared);
+
+        // More EV74 clients attaching changes nothing; no `cvu` tags means no EV74 memory.
+        assert_eq!(
+            totals_without_producers(&repeat_device_lines(raw, ".cvu"))
+                .and_then(|totals| totals.ev74_bytes),
+            Some(ev74)
+        );
+        assert_eq!(
+            totals_without_producers(&drop_device_lines(raw, ".cvu"))
+                .and_then(|totals| totals.ev74_bytes),
+            Some(0)
+        );
     }
 
     #[test]

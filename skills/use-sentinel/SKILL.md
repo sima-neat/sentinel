@@ -1,6 +1,6 @@
 ---
 name: use-sentinel
-description: Read SiMa.ai Sentinel live board telemetry and saved runs, start or stop named telemetry traces, and compare application or model runs through Sentinel's local Unix-socket API. Use for Modalix performance, power, thermal, CPU, RAM, MLA-memory, or EV74 CMA investigations and before/after workload comparisons.
+description: Read SiMa.ai Sentinel live board telemetry and saved runs, start or stop named telemetry traces, and compare application or model runs through Sentinel's local Unix-socket API. Use for Modalix performance, power, thermal, CPU, RAM, MLA-memory, EV74-memory, or CMA investigations and before/after workload comparisons.
 ---
 
 # Use Sentinel

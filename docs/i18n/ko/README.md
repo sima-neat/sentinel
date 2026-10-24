@@ -12,7 +12,7 @@ Sentinel은 백그라운드 데몬에서 Modalix DevKit 텔레메트리를 수�
 | 개요 | [개요 패널](panels/overview.md) | 주요 온도, 전력, CPU, 메모리, MLA 메모리, 저장 장치 및 네트워크 상태. |
 | 열 | [열 패널](panels/thermal.md) | 칩 내부 RTSN/PVT 센서와 보드 수준 하드웨어 모니터 측정값. |
 | 전력 | [전력 패널](panels/power.md) | PMBus 레일 전력, 합계, 세션 평균/최댓값 및 수집기 상태. |
-| 시스템 | [시스템 패널](panels/system.md) | 전체/코어별 CPU, 평균 부하, Linux 메모리, MLA 할당, EV74 CMA 메모리 및 프로세스. |
+| 시스템 | [시스템 패널](panels/system.md) | 전체/코어별 CPU, 평균 부하, Linux 메모리, MLA 및 EV74 메모리, CMA 사용량 및 프로세스. |
 | 저장 장치/네트워크 | [저장 장치 및 네트워크 패널](panels/storage-network.md) | eMMC/NVMe 용량 및 I/O와 전체 네트워크 트래픽. |
 
 ## 보고서 및 수집 동작

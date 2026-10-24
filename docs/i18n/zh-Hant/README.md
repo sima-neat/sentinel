@@ -12,7 +12,7 @@ Sentinel 在背景守護程式中收集 Modalix DevKit 的遙測資料，
 | 總覽 | [總覽面板](panels/overview.md) | 溫度、電源、CPU、記憶體、MLA 記憶體、儲存空間與網路健康狀態的重點指標。 |
 | 熱能 | [熱能面板](panels/thermal.md) | 晶片上的 RTSN/PVT 感測點，以及板級硬體監控讀數。 |
 | 電源 | [電源面板](panels/power.md) | PMBus 電源軌功率、總計、工作階段平均值/峰值，以及收集器健康狀態。 |
-| 系統 | [系統面板](panels/system.md) | 整體/每核心 CPU、平均負載、Linux 記憶體、MLA 配置、EV74 CMA 記憶體與處理程序。 |
+| 系統 | [系統面板](panels/system.md) | 整體/每核心 CPU、平均負載、Linux 記憶體、MLA 與 EV74 記憶體、CMA 使用量與處理程序。 |
 | 儲存/網路 | [儲存與網路面板](panels/storage-network.md) | eMMC/NVMe 容量與 I/O，以及整體網路流量。 |
 
 ## 報告與收集行為
