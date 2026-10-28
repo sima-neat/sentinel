@@ -286,7 +286,7 @@ fn export_runs_command(runs_dir: &Path, args: &[String]) -> Result<()> {
 }
 
 fn write_output_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = output_directory(path);
     if !parent.exists() {
         bail!(
             "export output directory does not exist: {}",
@@ -302,6 +302,14 @@ fn write_output_atomic(path: &Path, data: &[u8]) -> Result<()> {
     fs::write(&temporary, data).with_context(|| format!("write {}", temporary.display()))?;
     fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))?;
     Ok(())
+}
+
+/// The directory `path` is written into. A bare file name has an empty
+/// parent, which names no directory, so it is the current one.
+fn output_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn argument_value(args: &[String], index: &mut usize, flag: &str) -> Result<String> {
@@ -332,4 +340,44 @@ Commands:\n  ops        Continuous terminal operations view (default)\n  table  
 Daemon options:\n  --history N    Number of samples to keep in cache\n  --no-peripherals Disable peripheral discovery\n\n\
 Examples:\n  simaai-sentinel checkpoint --name baseline --note \"before optimization\"\n  simaai-sentinel checkpoint --stop\n  simaai-sentinel runs list\n  simaai-sentinel export baseline optimized --format csv --output comparison.csv\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_output_file_name_is_written_into_the_current_directory() {
+        assert_eq!(
+            output_directory(Path::new("comparison.csv")),
+            Path::new(".")
+        );
+        assert!(output_directory(Path::new("comparison.csv")).exists());
+    }
+
+    #[test]
+    fn an_output_path_is_written_into_its_parent_directory() {
+        assert_eq!(
+            output_directory(Path::new("./comparison.csv")),
+            Path::new(".")
+        );
+        assert_eq!(
+            output_directory(Path::new("exports/comparison.csv")),
+            Path::new("exports")
+        );
+        assert_eq!(
+            output_directory(Path::new("/tmp/comparison.csv")),
+            Path::new("/tmp")
+        );
+    }
+
+    #[test]
+    fn an_output_in_a_missing_directory_is_not_written() {
+        let directory =
+            std::env::temp_dir().join(format!("sentinel-export-missing-{}", std::process::id()));
+        let error = write_output_atomic(&directory.join("comparison.csv"), b"data").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("export output directory does not exist"));
+    }
 }
