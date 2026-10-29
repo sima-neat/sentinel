@@ -147,6 +147,15 @@ pub struct UsbIdentity {
     /// The USB device's sysfs speed in Mb/s as the kernel prints it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<String>,
+    /// The kernel driver bound to the node's USB interface, e.g. `uvcvideo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// `uvcvideo` only: the name Neat's `UsbCameraInput` opens the camera by
+    /// (`UsbCameraInputOptions::camera_name`), from the firmware node of the
+    /// USB device or its nearest ancestor with a firmware node, the USB port
+    /// and interface, and the USB IDs; absent when a part cannot be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_name: Option<String>,
 }
 
 /// Routing and topology of a MIPI CSI-2 sensor. `id` is derived from

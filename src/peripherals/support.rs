@@ -6,16 +6,30 @@
 //! outputs a sensor mode at its own size when the mode is an `isp_input`;
 //! libcamera narrows a larger size that no such mode covers, and may crop a
 //! covered one, which query-only discovery cannot confirm, so a covered size
-//! carries no verdict. Every mode known not to work carries the reason.
+//! carries no verdict. A USB camera's mode is available when Neat's
+//! `UsbCameraInput` opens the camera, a `uvcvideo` one with a `camera_name`,
+//! at that mode on that node: the mode is MJPEG, which it captures at every
+//! size and interval the camera lists, and no node of the camera it tries
+//! first lists the mode's sizes and intervals. Every mode known not to work
+//! carries the reason.
 
 use super::board::Board;
-use super::camera::{Camera, Mode, Source};
+use super::camera::{Camera, Fraction, Interval, MipiCamera, Mode, Source, UsbIdentity};
+use super::v4l2::UVC_DRIVER;
 use super::{CatalogError, Peripheral};
 
 /// The default of `CameraInputOptions.format` in Neat Core
 /// (`include/nodes/io/CameraInput.h`, unchanged since v0.4.0).
 const CAMERAINPUT_FORMAT: &str = "NV12";
-const USB_REASON: &str = "USB cameras have no camera overlay on this board.";
+/// The format Neat Core's `UsbCameraInput` captures, and the driver of the
+/// cameras it lists (`src/nodes/io/internal/UvcCamera.cpp`).
+const USBCAMERAINPUT_FORMAT: &str = "MJPG";
+const USB_FORMAT_REASON: &str = "Neat's USB camera input reads MJPEG only.";
+const USB_DRIVER_REASON: &str = "Neat's USB camera input needs the uvcvideo driver.";
+const USB_NAME_REASON: &str =
+    "Neat's USB camera input cannot name this camera (no firmware node or USB ID).";
+const USB_NODE_REASON: &str =
+    "Neat's USB camera input opens another node of this camera for this mode.";
 const NO_BOARD_REASON: &str = "This board's camera overlays could not be read.";
 const NOT_ISP_SIZE_REASON: &str = "The ISP cannot output this size.";
 const FORMAT_REASON: &str = "Neat's CameraInput outputs NV12 only.";
@@ -33,11 +47,22 @@ pub fn judge(devices: &mut [Peripheral], board: Option<&Board>, errors: &[Catalo
     };
     let configured_complete = field_complete("configured_cameras");
     let supported_complete = field_complete("supported_sensors");
-    for device in devices {
+    let earlier = earlier_mjpeg_listings(devices);
+    for (device, earlier) in devices.iter_mut().zip(&earlier) {
         let Peripheral::Camera(camera) = device else {
             continue;
         };
-        let camera_verdict = camera_verdict(camera, board, configured_complete, supported_complete);
+        let mipi = match &camera.source {
+            Source::V4l2(usb) => {
+                for mode in &mut camera.modes {
+                    set_mode_verdict(mode, usb_verdict(mode, &usb.identity, earlier));
+                }
+                continue;
+            }
+            Source::Mipi(mipi) => mipi,
+        };
+        let camera_verdict =
+            camera_verdict(camera, mipi, board, configured_complete, supported_complete);
         let inputs: Vec<_> = camera
             .modes
             .iter()
@@ -47,13 +72,7 @@ pub fn judge(devices: &mut [Peripheral], board: Option<&Board>, errors: &[Catalo
         for mode in &mut camera.modes {
             match &camera_verdict {
                 CameraVerdict::Unavailable(reason) => set_verdict(mode, Some(false), Some(reason)),
-                CameraVerdict::Supported => match mode_verdict(mode, &inputs) {
-                    ModeVerdict::Available => set_verdict(mode, Some(true), None),
-                    ModeVerdict::Unavailable(reason) => {
-                        set_verdict(mode, Some(false), Some(reason))
-                    }
-                    ModeVerdict::Unknown => set_verdict(mode, None, None),
-                },
+                CameraVerdict::Supported => set_mode_verdict(mode, mode_verdict(mode, &inputs)),
                 CameraVerdict::Unknown => match mode_verdict(mode, &inputs) {
                     ModeVerdict::Unavailable(reason) => {
                         set_verdict(mode, Some(false), Some(reason))
@@ -70,6 +89,14 @@ fn set_verdict(mode: &mut Mode, available: Option<bool>, reason: Option<&str>) {
     mode.reason = reason.map(str::to_string);
 }
 
+fn set_mode_verdict(mode: &mut Mode, verdict: ModeVerdict) {
+    match verdict {
+        ModeVerdict::Available => set_verdict(mode, Some(true), None),
+        ModeVerdict::Unavailable(reason) => set_verdict(mode, Some(false), Some(reason)),
+        ModeVerdict::Unknown => set_verdict(mode, None, None),
+    }
+}
+
 enum CameraVerdict {
     Supported,
     Unavailable(String),
@@ -83,14 +110,11 @@ enum CameraVerdict {
 /// the camera by id.
 fn camera_verdict(
     camera: &Camera,
+    mipi: &MipiCamera,
     board: Option<&Board>,
     configured_complete: bool,
     supported_complete: bool,
 ) -> CameraVerdict {
-    let mipi = match camera.source {
-        Source::V4l2(_) => return CameraVerdict::Unavailable(USB_REASON.to_string()),
-        Source::Mipi(ref mipi) => mipi,
-    };
     let Some(board) = board else {
         return CameraVerdict::Unavailable(NO_BOARD_REASON.to_string());
     };
@@ -122,7 +146,9 @@ enum ModeVerdict {
     /// The sensor lists this size, and a larger `isp_input` mode covers it,
     /// but libcamera may crop or adjust it. Sentinel does not configure the
     /// camera to find out. Also a sensor mode from a catalog without
-    /// `isp_input`.
+    /// `isp_input`; a USB mode whose interface had no driver during the scan;
+    /// and a USB mode only some of whose intervals another node of the camera
+    /// lists, so that Neat opens this node at some rates and not at others.
     Unknown,
 }
 
@@ -147,6 +173,117 @@ fn mode_verdict(mode: &Mode, inputs: &[(u32, u32)]) -> ModeVerdict {
     }
 }
 
+/// A size and frame interval a mode lists.
+type Listing = (u32, u32, Interval);
+
+/// The sizes and intervals a mode lists.
+fn listings(mode: &Mode) -> impl Iterator<Item = Listing> + '_ {
+    let sizes = mode.frame_intervals.iter();
+    sizes.flat_map(|size| size.intervals.iter().map(|&i| (size.width, size.height, i)))
+}
+
+/// Per device, the MJPEG sizes and intervals of the nodes `UsbCameraInput`
+/// tries before it when opening the same `camera_name`: Core lists a
+/// camera's `uvcvideo` nodes by device path, shorter first (`/dev/video2`
+/// before `/dev/video10`), and opens the first MJPEG node that lists the
+/// requested size and rate (`list_nodes` and `resolve_mjpeg_camera` in
+/// `src/nodes/io/internal/UvcCamera.cpp`). Several capture nodes on one UVC
+/// interface, as a camera with several streaming interfaces has, share a
+/// name.
+fn earlier_mjpeg_listings(devices: &[Peripheral]) -> Vec<Vec<Listing>> {
+    let earlier = |device: &Peripheral| {
+        let Some((name, order)) = uvc_node(device) else {
+            return Vec::new();
+        };
+        let before =
+            |other: &&Peripheral| uvc_node(other).is_some_and(|(n, o)| n == name && o < order);
+        let cameras = devices
+            .iter()
+            .filter(before)
+            .filter_map(|other| match other {
+                Peripheral::Camera(camera) => Some(camera),
+                _ => None,
+            });
+        let modes = cameras.flat_map(|camera| &camera.modes);
+        let modes = modes.filter(|mode| mode.format == USBCAMERAINPUT_FORMAT);
+        modes.flat_map(listings).collect()
+    };
+    devices.iter().map(earlier).collect()
+}
+
+/// A named `uvcvideo` node's `camera_name` and its place in Core's order.
+fn uvc_node(device: &Peripheral) -> Option<(&str, (usize, &str))> {
+    let Peripheral::Camera(Camera {
+        source: Source::V4l2(usb),
+        ..
+    }) = device
+    else {
+        return None;
+    };
+    let path = usb.device_path.as_str();
+    match usb.identity.driver.as_deref() {
+        Some(UVC_DRIVER) => Some((usb.identity.camera_name.as_deref()?, (path.len(), path))),
+        _ => None,
+    }
+}
+
+/// The verdict for one mode of a USB camera whose earlier nodes, in the
+/// order `UsbCameraInput` tries them, list `earlier`.
+fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[Listing]) -> ModeVerdict {
+    let uvc = match identity.driver.as_deref() {
+        Some(UVC_DRIVER) => true,
+        Some(_) => return ModeVerdict::Unavailable(USB_DRIVER_REASON),
+        // The interface is unbound only while its driver binds or unbinds
+        // during the scan; Neat lists the node once `uvcvideo` is bound.
+        None => false,
+    };
+    if mode.format != USBCAMERAINPUT_FORMAT {
+        return ModeVerdict::Unavailable(USB_FORMAT_REASON);
+    }
+    if !uvc {
+        return ModeVerdict::Unknown;
+    }
+    if identity.camera_name.is_none() {
+        return ModeVerdict::Unavailable(USB_NAME_REASON);
+    }
+    // Core matches a requested rate against a discrete interval exactly and
+    // against a range by its bounds, ignoring the step. `uvcvideo` lists
+    // discrete sizes only, so sizes match exactly.
+    let periods = |interval: Interval| match interval {
+        Interval::Discrete(period) => (period, period),
+        Interval::Stepwise {
+            minimum, maximum, ..
+        }
+        | Interval::Continuous {
+            minimum, maximum, ..
+        } => (minimum, maximum),
+    };
+    let at_most = |a: Fraction, b: Fraction| {
+        u64::from(a.numerator) * u64::from(b.denominator)
+            <= u64::from(b.numerator) * u64::from(a.denominator)
+    };
+    let (mut opened_elsewhere, mut opened_here) = (true, true);
+    for (width, height, interval) in listings(mode) {
+        let (low, high) = periods(interval);
+        let same_size = earlier
+            .iter()
+            .filter(|&&(w, h, _)| (w, h) == (width, height));
+        let ranges = same_size.map(|&(.., earlier)| periods(earlier));
+        let (mut covered, mut overlapped) = (false, false);
+        for (min, max) in ranges {
+            covered |= at_most(min, low) && at_most(high, max);
+            overlapped |= at_most(min, high) && at_most(low, max);
+        }
+        opened_elsewhere &= covered;
+        opened_here &= !overlapped;
+    }
+    match () {
+        _ if opened_here => ModeVerdict::Available,
+        _ if opened_elsewhere => ModeVerdict::Unavailable(USB_NODE_REASON),
+        _ => ModeVerdict::Unknown,
+    }
+}
+
 /// A sensor's name from its device-tree `compatible` string: `sony,imx477` is
 /// `IMX477`.
 fn sensor_name(compatible: &str) -> String {
@@ -163,6 +300,7 @@ fn sensor_name(compatible: &str) -> String {
 mod tests {
     use super::*;
     use crate::peripherals::board::{ConfiguredCamera, SupportedSensor};
+    use crate::peripherals::camera::{RangeKind, SizeRange, UsbIdentity};
     use serde_json::json;
 
     /// The IMX477 camera of the published example, with its ISP modes.
@@ -186,15 +324,16 @@ mod tests {
     }
 
     /// NV12 at the ISP's sizes is available for a sensor the overlays
-    /// support; other formats say why not, and USB modes never are.
-    /// Microphones are left alone.
+    /// support, and MJPEG for a USB camera `UsbCameraInput` lists; other
+    /// formats say why not. Microphones are left alone.
     #[test]
     fn modes_of_a_supported_sensor_are_available_in_nv12() {
         let (mut devices, board) = example();
         judge(&mut devices, Some(&board), &[]);
         for (id, mode, available, reason) in verdicts(&devices) {
             let expected = match () {
-                _ if id.starts_with("camera:v4l2:") => Some(USB_REASON),
+                _ if id.starts_with("camera:v4l2:") && mode.starts_with("MJPG ") => None,
+                _ if id.starts_with("camera:v4l2:") => Some(USB_FORMAT_REASON),
                 _ if mode.starts_with("NV12 ") => None,
                 _ => Some(FORMAT_REASON),
             };
@@ -209,6 +348,168 @@ mod tests {
         };
         let mode = serde_json::to_value(&microphone.modes[0]).unwrap();
         assert!(mode.get("available").is_none());
+    }
+
+    /// A USB camera of another driver is unavailable, and so are the MJPEG
+    /// modes, size ranges included, of a `uvcvideo` camera without a
+    /// `camera_name`, which Neat cannot open. Without a driver (an interface
+    /// binding or unbinding during the scan) MJPEG modes lose a stale
+    /// verdict. Other formats still say why not, and USB verdicts ignore the
+    /// board.
+    #[test]
+    fn usb_modes_follow_the_driver_and_the_format() {
+        let (devices, _) = example();
+        let usb_verdicts = |edit: &dyn Fn(&mut UsbIdentity)| {
+            let mut devices = devices.clone();
+            let Peripheral::Camera(ref mut camera) = devices[1] else {
+                panic!("the example's second device is its USB camera");
+            };
+            let Source::V4l2(ref mut usb) = camera.source else {
+                panic!("the example's second device is its USB camera");
+            };
+            edit(&mut usb.identity);
+            let mut range = camera.modes[0].clone();
+            (range.width, range.height) = (None, None);
+            range.size_range = Some(SizeRange {
+                kind: RangeKind::Continuous,
+                min_width: 160,
+                min_height: 120,
+                max_width: 1920,
+                max_height: 1080,
+                step_width: 1,
+                step_height: 1,
+            });
+            camera.modes.push(range);
+            judge(&mut devices, None, &[]);
+            let verdicts = verdicts(&devices).into_iter();
+            let verdicts = verdicts.filter(|(id, ..)| id.starts_with("camera:v4l2:"));
+            let verdicts = verdicts.map(|(_, _, available, reason)| (available, reason));
+            verdicts.collect::<Vec<_>>()
+        };
+        let reason = |reason: &str| (Some(false), Some(reason.to_string()));
+        let mjpeg = reason(USB_FORMAT_REASON);
+        let available = (Some(true), None);
+        assert_eq!(
+            usb_verdicts(&|_| {}),
+            [available.clone(), mjpeg.clone(), available]
+        );
+        let gspca = |identity: &mut UsbIdentity| {
+            identity.driver = Some("gspca_zc3xx".into());
+            identity.camera_name = None;
+        };
+        assert_eq!(usb_verdicts(&gspca), vec![reason(USB_DRIVER_REASON); 3]);
+        let unnamed = reason(USB_NAME_REASON);
+        assert_eq!(
+            usb_verdicts(&|identity| identity.camera_name = None),
+            [unnamed.clone(), mjpeg.clone(), unnamed]
+        );
+        let unknown = [(None, None), mjpeg, (None, None)];
+        assert_eq!(usb_verdicts(&|identity| identity.driver = None), unknown);
+    }
+
+    /// Nodes of one USB camera share its `camera_name`, and Neat opens the
+    /// first node by device path (`/dev/video2` before `/dev/video10`) that
+    /// lists the requested size and rate. A later node's MJPEG mode is
+    /// unavailable when earlier nodes list its size at each of its
+    /// intervals, a discrete one exactly or within a range, and has no
+    /// verdict when they list only some. Another camera is not affected.
+    #[test]
+    fn later_nodes_of_a_usb_camera_lose_the_modes_earlier_nodes_list() {
+        let (devices, _) = example();
+        let Peripheral::Camera(ref c920) = devices[1] else {
+            panic!("the example's second device is its USB camera");
+        };
+        let mjpg = |width: u32, height: u32, intervals: serde_json::Value| -> Mode {
+            let size = json!({"width": width, "height": height, "intervals": intervals});
+            let mode = json!({"format": "MJPG", "width": width, "height": height,
+                              "frame_intervals": [size]});
+            serde_json::from_value(mode).unwrap()
+        };
+        let fraction = |denominator: u32| json!({"numerator": 1, "denominator": denominator});
+        let discrete = |denominators: &[u32]| {
+            let interval = |&d: &u32| json!({"type": "discrete", "numerator": 1, "denominator": d});
+            json!(denominators.iter().map(interval).collect::<Vec<_>>())
+        };
+        let range = |fastest, slowest| {
+            json!([{"type": "continuous", "minimum": fraction(fastest),
+                    "maximum": fraction(slowest), "step": fraction(1)}])
+        };
+        let node = |path: &str, name: &str, modes: Vec<Mode>| {
+            let mut camera = c920.clone();
+            camera.modes = modes;
+            let Source::V4l2(ref mut usb) = camera.source else {
+                panic!("the example's second device is its USB camera");
+            };
+            usb.device_path = path.into();
+            usb.identity.camera_name = Some(name.into());
+            Peripheral::Camera(camera)
+        };
+        let first = || {
+            vec![
+                mjpg(1920, 1080, discrete(&[30, 15])),
+                mjpg(1280, 720, range(30, 5)),
+            ]
+        };
+        // `/dev/video10` comes first in the catalog but second in Core's order.
+        let judged = |name: &str, modes: Vec<Mode>| {
+            let mut devices = vec![
+                node("/dev/video10", name, modes),
+                node("/dev/video2", "camera", first()),
+            ];
+            judge(&mut devices, None, &[]);
+            let verdicts = verdicts(&devices).into_iter();
+            let verdicts = verdicts.map(|(_, _, available, reason)| (available, reason));
+            verdicts.collect::<Vec<_>>()
+        };
+        let available = (Some(true), None);
+        let elsewhere = (Some(false), Some(USB_NODE_REASON.to_string()));
+        let yuyv = c920.modes[1].clone();
+        let later = || {
+            vec![
+                mjpg(1920, 1080, discrete(&[30, 15])),
+                mjpg(1280, 720, discrete(&[15])),
+                mjpg(640, 480, discrete(&[30])),
+                yuyv.clone(),
+            ]
+        };
+        let format = (Some(false), Some(USB_FORMAT_REASON.to_string()));
+        let firsts = [available.clone(), available.clone()];
+        let expected = [
+            elsewhere.clone(),
+            elsewhere,
+            available.clone(),
+            format.clone(),
+        ];
+        assert_eq!(judged("camera", later()), [&expected[..], &firsts].concat());
+        let some_rates = vec![
+            mjpg(1920, 1080, discrete(&[30, 60])),
+            mjpg(1280, 720, range(60, 5)),
+        ];
+        let unknown = [(None, None), (None, None)];
+        assert_eq!(
+            judged("camera", some_rates),
+            [&unknown[..], &firsts].concat()
+        );
+        let other = [available.clone(), available.clone(), available, format];
+        assert_eq!(judged("other", later()), [&other[..], &firsts].concat());
+    }
+
+    /// The verdicts stored in the published example, for its USB and MIPI
+    /// cameras alike, are the ones `judge` gives, so they cannot drift.
+    #[test]
+    fn the_published_example_carries_the_verdicts_sentinel_gives() {
+        let text = include_str!("../../docs/peripherals/catalog-example.json");
+        let catalog: super::super::Catalog = serde_json::from_str(text).unwrap();
+        let mut judged = catalog.clone();
+        let cameras = judged.devices.iter_mut().filter_map(|device| match device {
+            Peripheral::Camera(camera) => Some(camera),
+            _ => None,
+        });
+        for mode in cameras.flat_map(|camera| &mut camera.modes) {
+            set_verdict(mode, Some(false), Some("stale"));
+        }
+        judge(&mut judged.devices, judged.board.as_ref(), &judged.errors);
+        assert_eq!(judged, catalog);
     }
 
     /// A sensor no overlay supports, or one the device tree does not link to

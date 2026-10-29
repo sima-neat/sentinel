@@ -18,6 +18,12 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 不同的連接埠就是不同的攝影機，
 插在不同連接埠的相同攝影機也會有不同的 id。
 
+`identity.camera_name` 僅出現在 `uvcvideo` 驅動程式的節點上，是 Neat 的 `UsbCameraInput`
+開啟攝影機時所用的名稱（`UsbCameraInputOptions::camera_name`），其建構方式與 Neat 仿照 libcamera 的做法相同：USB 裝置本身或其最近一個
+具有韌體節點的上層裝置之韌體節點（`/sys/firmware/devicetree` 之下的裝置樹路徑，否則為其 ACPI
+`firmware_node/path`）、去掉匯流排編號的介面名稱，以及 `idVendor:idProduct`，
+例如 `/base/pci@7000000000-3.1:1.0-046d:08e5`。任何一部分無法讀取時即省略。
+
 ## 欄位
 
 | 欄位 | 出現時機 | 意義 |
@@ -28,7 +34,7 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 | `model` | 已知時 | USB 的 `product` 字串，否則為驅動程式回報的 card 名稱 |
 | `device_path` | 一律 | `/dev/videoN`；僅用於路由，不作為識別 |
 | `by_id_path` | 有 udev 連結時 | 解析至 `device_path` 的 `/dev/v4l/by-id/...` 連結 |
-| `identity` | 一律 | `stable_key`、`topology`、`interface`、`node_index`，以及在 USB 裝置有回報時的 `vendor_id`、`product_id`、`serial`、`manufacturer` 與 `speed`（核心所印出的 sysfs 速度，單位為 Mb/s，例如 `"480"`） |
+| `identity` | 一律 | `stable_key`、`topology`、`interface`、`node_index`，以及在 USB 裝置有回報時的 `vendor_id`、`product_id`、`serial`、`manufacturer` 與 `speed`（核心所印出的 sysfs 速度，單位為 Mb/s，例如 `"480"`）；節點的 USB 介面已繫結核心驅動程式時的 `driver`（例如 `uvcvideo`）；`camera_name`（見上文） |
 | `availability` | 一律 | `{"state": "unknown", "reason": ...}`：探索從不開啟串流，因此無法判斷攝影機是否正在使用中 |
 | `modes` | 一律 | 攝影機可輸出的內容；見下文 |
 
@@ -46,8 +52,18 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 | `frame_intervals` | 一律 | 針對每個探測的尺寸（`width`、`height`），列出裝置宣告的所有間隔：`{"type": "discrete", "numerator", "denominator"}` 或 `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 尺寸範圍會以其最小與最大尺寸進行探測。
-沒有影格間隔的尺寸不構成模式。每個模式也都帶有 `available: false` 與 `reason`：
-USB 攝影機在板上沒有攝影機覆蓋層（請參閱[目錄](../api.md)）。
+沒有影格間隔的尺寸不構成模式。每個模式也都帶有 `available`，為 false 時另附
+`reason`（請參閱[目錄](../api.md)）。Neat 的 `UsbCameraInput` 以 `camera_name` 開啟
+`uvcvideo` 攝影機，並以攝影機列出的尺寸與影格間隔擷取 MJPEG，因此這類攝影機的
+`MJPG` 模式皆可用，除非該攝影機較早的節點已列出它（見下文）。其他格式不可用，使用其他驅動程式的攝影機的所有模式也不可用。
+沒有 `camera_name` 的 `uvcvideo` 攝影機，其 `MJPG` 模式不可用，因為 `UsbCameraInput` 無法開啟它；
+沒有 `driver` 的節點（掃描期間其介面正在繫結或解除繫結）的模式不會帶有判斷。
+
+具有多個串流介面的攝影機，在其 VideoControl 介面上有多個擷取節點，它們共用同一個 `camera_name`；
+具有多個 VideoControl 介面的裝置，每個介面各有一個 `camera_name`。`UsbCameraInput` 依裝置路徑由短到長
+（`/dev/video2` 先於 `/dev/video10`）嘗試攝影機的節點，並開啟第一個列出所要求 MJPEG 尺寸與速率的節點：
+離散間隔須完全相符，範圍則須落在其邊界內。因此，當攝影機較早的節點在 `MJPG` 模式的每個影格間隔都列出其尺寸時，
+該模式不可用；只在部分間隔列出時，則不會帶有判斷。
 
 ## 限制與錯誤
 
@@ -67,6 +83,8 @@ USB 攝影機在板上沒有攝影機覆蓋層（請參閱[目錄](../api.md)）
 
 ## 範例
 
+此為示意用的記錄；其 sysfs 拓撲與 ACPI 路徑已簡化。
+
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
  "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
@@ -74,10 +92,12 @@ USB 攝影機在板上沒有攝影機覆蓋層（請參閱[目錄](../api.md)）
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
               "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480"},
+              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-046d:082d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,
             "frame_intervals": [{"width": 1920, "height": 1080, "intervals": [
-              {"type": "discrete", "numerator": 1, "denominator": 30}]}]}]}
+              {"type": "discrete", "numerator": 1, "denominator": 30}]}],
+            "available": true}]}
 ```

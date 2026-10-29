@@ -18,6 +18,15 @@ unchanged across replugs into the same port and `/dev/videoN` renumbering. A
 different port is a different camera, and identical cameras in different ports
 have different ids.
 
+`identity.camera_name`, present for nodes of the `uvcvideo` driver, is the name
+Neat's `UsbCameraInput` opens the camera by (`UsbCameraInputOptions::camera_name`),
+built as Neat builds it after libcamera: the firmware node of the USB device or
+its nearest ancestor with a firmware node (its device-tree path below
+`/sys/firmware/devicetree`, else its ACPI `firmware_node/path`), the interface
+name without its bus number, and `idVendor:idProduct`, for example
+`/base/pci@7000000000-3.1:1.0-046d:08e5`. It is omitted when a part cannot be
+read.
+
 ## Fields
 
 | Field | Present | Meaning |
@@ -28,7 +37,7 @@ have different ids.
 | `model` | when known | The USB `product` string, else the driver's card name |
 | `device_path` | always | `/dev/videoN`; routing only, not identity |
 | `by_id_path` | with a udev link | The `/dev/v4l/by-id/...` link that resolves to `device_path` |
-| `identity` | always | `stable_key`, `topology`, `interface`, `node_index`, and, when the USB device reports them, `vendor_id`, `product_id`, `serial`, `manufacturer` and `speed` (sysfs speed in Mb/s as the kernel prints it, e.g. `"480"`) |
+| `identity` | always | `stable_key`, `topology`, `interface`, `node_index`, and, when the USB device reports them, `vendor_id`, `product_id`, `serial`, `manufacturer` and `speed` (sysfs speed in Mb/s as the kernel prints it, e.g. `"480"`); `driver`, the kernel driver bound to the node's USB interface (e.g. `uvcvideo`), when one is; `camera_name` (see above) |
 | `availability` | always | `{"state": "unknown", "reason": ...}`: discovery never opens a stream, so it cannot tell whether the camera is in use |
 | `modes` | always | What the camera can output; see below |
 
@@ -46,8 +55,25 @@ single- and multi-planar listings of a format are merged.
 | `frame_intervals` | always | Per probed size (`width`, `height`), every interval the device advertises: `{"type": "discrete", "numerator", "denominator"}` or `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 A size range is probed at its minimum and maximum size. A size without frame
-intervals has no mode. Every mode also has `available: false` and a `reason`:
-USB cameras have no camera overlay on the board (see [the catalog](../api.md)).
+intervals has no mode. Every mode also has `available` and, when it is false,
+`reason` (see [the catalog](../api.md)). Neat's `UsbCameraInput` opens a
+`uvcvideo` camera by its `camera_name` and captures MJPEG at the sizes and frame
+intervals the camera lists, so an `MJPG` mode of such a camera is available
+unless an earlier node of the camera lists it (see below). Other formats are
+unavailable, and so is every mode of a camera of another driver. The `MJPG`
+modes of a `uvcvideo` camera without `camera_name` are unavailable, since
+`UsbCameraInput` cannot open it; those of a node without `driver`, whose
+interface was binding or unbinding during the scan, have no verdict.
+
+A camera with several streaming interfaces has several capture nodes on its
+VideoControl interface, and they share its `camera_name`; a device with several
+VideoControl interfaces has a `camera_name` for each. `UsbCameraInput` tries a
+camera's nodes by device path, shorter first (`/dev/video2` before
+`/dev/video10`), and opens the first one that lists the requested MJPEG size
+and rate, a discrete interval exactly or a range within its bounds. An `MJPG`
+mode is therefore unavailable when earlier nodes of the camera list its size at
+every one of its frame intervals, and has no verdict when they list it at only
+some of them.
 
 ## Limits and errors
 
@@ -67,6 +93,8 @@ latest by the rescan its removal triggers.
 
 ## Example
 
+An illustrative record; its sysfs topology and ACPI path are simplified.
+
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
  "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
@@ -74,10 +102,12 @@ latest by the rescan its removal triggers.
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
               "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480"},
+              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-046d:082d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,
             "frame_intervals": [{"width": 1920, "height": 1080, "intervals": [
-              {"type": "discrete", "numerator": 1, "denominator": 30}]}]}]}
+              {"type": "discrete", "numerator": 1, "denominator": 30}]}],
+            "available": true}]}
 ```
