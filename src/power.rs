@@ -386,7 +386,7 @@ pub fn power_metric_definitions(config: &PowerConfig) -> Vec<MetricDefinition> {
     let mut metrics = vec![
         MetricDefinition::new(
             "power_current_watts",
-            "Current board power",
+            "Current board power (Estimated)",
             "Current",
             "Power",
             "W",
@@ -396,7 +396,7 @@ pub fn power_metric_definitions(config: &PowerConfig) -> Vec<MetricDefinition> {
         ),
         MetricDefinition::new(
             "power_average_watts",
-            "Average board power",
+            "Average board power (Estimated)",
             "Average",
             "Power",
             "W",
@@ -406,7 +406,7 @@ pub fn power_metric_definitions(config: &PowerConfig) -> Vec<MetricDefinition> {
         ),
         MetricDefinition::new(
             "power_peak_watts",
-            "Peak board power",
+            "Peak board power (Estimated)",
             "Peak",
             "Power",
             "W",
