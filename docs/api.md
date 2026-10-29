@@ -94,14 +94,22 @@ outputs its exact size, and its format is NV12, the format Neat's
 `CameraInput` outputs. The ISP outputs the exact size of a mode it lists
 (`isp_output`), or, when it sets sizes at run time, of a sensor mode it takes
 as RAW input unchanged (`isp_input`). A mode known not to meet those conditions
-has `available: false` and a `reason`; USB cameras are never available. When the
-board field needed to establish sensor support is incomplete, facts it did
+has `available: false` and a `reason`. When the board field needed to
+establish sensor support is incomplete, facts it did
 return can prove support, but a missing match cannot prove rejection; an
 otherwise viable mode has no verdict. Another NV12
 `sensor_mode` is unavailable when no `isp_input` mode is at least as large,
 because libcamera would change its size, and has no verdict when one is: libcamera
 may crop the larger mode to it, which Sentinel cannot confirm without
 configuring the camera, and discovery never configures or streams from cameras.
+A USB camera's mode is available when its format is MJPEG, which Neat's
+`UsbCameraInput` reads, the camera is a `uvcvideo` camera with an
+`identity.camera_name`, by which `UsbCameraInput` opens it, and no node of the
+camera that `UsbCameraInput` tries first lists the mode. Other formats and
+drivers are unavailable, and so are the MJPEG modes of a `uvcvideo` camera
+without `camera_name` and those an earlier node lists. The MJPEG modes of a
+node without `driver`, and those an earlier node lists at only some of their
+frame intervals, have no verdict (see [USB cameras](peripherals/camera.md)).
 Whether an application supports an unjudged mode or any other device is
 decided by that application.
 
@@ -125,8 +133,9 @@ Device records are described per type: [USB cameras](peripherals/camera.md),
 [`peripherals/catalog-example.json`](peripherals/catalog-example.json) is a
 complete response from a DevKit, with the USB camera trimmed to one mode per
 format. Its `board` block is transcribed from the DevKit rather than
-captured. A Sentinel test checks it against the schema, so clients can test
-against it.
+captured. Sentinel tests check it against the schema and check that its
+`available` and `reason` values are the ones Sentinel gives, so clients can
+test against it.
 
 ## Security and concurrency
 

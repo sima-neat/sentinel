@@ -89,12 +89,17 @@ Sentinel 回報硬體事實，並在唯讀介面足以判斷時只做一項判�
 感測器的 `compatible` 列於 `board.supported_sensors`）、ISP 輸出其確切尺寸，
 且格式為 Neat 的 `CameraInput` 輸出的 NV12 時，模式為 `available: true`。
 ISP 會以確切尺寸輸出它列出的模式（`isp_output`），或在執行階段決定尺寸時，
-輸出它原封不動作為 RAW 輸入的感測器模式（`isp_input`）。已知不符合這些條件的模式為 `available: false` 並附上 `reason`；
-USB 攝影機一律不可用。若判定感測器支援所需的板子欄位不完整，已讀取的事實仍可證明支援，
+輸出它原封不動作為 RAW 輸入的感測器模式（`isp_input`）。已知不符合這些條件的模式為 `available: false` 並附上 `reason`。
+若判定感測器支援所需的板子欄位不完整，已讀取的事實仍可證明支援，
 但找不到相符項目不能證明不支援；其他條件皆符合的模式不會帶有判斷。
 其他 NV12 `sensor_mode` 若沒有任何至少同樣大的 `isp_input` 模式，就為不可用，
 因為 libcamera 會改變其尺寸；若有這樣的模式，則不會帶有判斷：libcamera 可能將較大的模式
 裁切成該尺寸，而 Sentinel 不設定攝影機就無法確認這一點，且探索絕不會設定攝影機或從中串流。
+當 USB 攝影機模式的格式為 Neat 的 `UsbCameraInput` 所讀取的 MJPEG，該攝影機是帶有
+`identity.camera_name` 的 `uvcvideo` 攝影機（`UsbCameraInput` 以此開啟它），且 `UsbCameraInput`
+先嘗試的同一攝影機節點都未列出該模式時，該模式可用。其他格式與驅動程式皆不可用；沒有 `camera_name`
+的 `uvcvideo` 攝影機的 MJPEG 模式，以及較早節點已列出的 MJPEG 模式，同樣不可用。沒有 `driver` 的節點的
+MJPEG 模式，以及較早節點只在部分影格間隔列出的模式，不會帶有判斷（請參閱 [USB 攝影機](peripherals/camera.md)）。
 應用程式是否支援未判定的模式或其他裝置，由該應用程式決定。
 
 `POST /v1/peripherals/refresh` 會等待一次在該請求之後開始的掃描，
@@ -115,7 +120,7 @@ USB 攝影機一律不可用。若判定感測器支援所需的板子欄位不�
 [`peripherals/catalog-example.json`](peripherals/catalog-example.json) 是一份
 來自 DevKit 的完整回應，其中 USB 攝影機已精簡為每種格式一個模式。
 其 `board` 區塊抄錄自 DevKit，而非
-實際擷取。Sentinel 的測試會依據結構描述檢查它，因此用戶端可以
+實際擷取。Sentinel 的測試會依據結構描述檢查它，並檢查其 `available` 與 `reason` 值正是 Sentinel 所給出的值，因此用戶端可以
 拿它來測試。
 
 ## 安全性與並行性

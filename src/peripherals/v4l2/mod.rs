@@ -38,6 +38,9 @@ use super::{Peripheral, Provider, ProviderError};
 
 pub const PROVIDER_NAME: &str = "camera.v4l2";
 
+/// The driver of the USB cameras Neat's `UsbCameraInput` opens.
+pub(super) const UVC_DRIVER: &str = "uvcvideo";
+
 const AVAILABILITY_REASON: &str = "V4L2 does not expose a reliable read-only ownership state; \
 discovery does not acquire, configure, or stream from the camera.";
 
@@ -376,6 +379,46 @@ impl Enumerator<'_> {
     }
 }
 
+/// The name Neat's `UsbCameraInput` opens a `uvcvideo` camera by, built as
+/// Core's `uvc::camera_id` (`src/nodes/io/internal/UvcCamera.cpp`) builds it
+/// after libcamera's uvcvideo handler: the firmware node of the USB device or
+/// its nearest ancestor with a firmware node, the `interface` name (relative
+/// to `sys`) without its bus number, and `vendor:product`, e.g.
+/// `/base/pci@7000000000-3.1:1.0-1a2b:3c4d`. `None` when a part cannot be read.
+fn camera_name(
+    sys: &Path,
+    interface: &Path,
+    vendor: Option<&str>,
+    product: Option<&str>,
+) -> Option<String> {
+    let name = interface.file_name()?.to_str()?;
+    let (_, ports) = name.split_once('-')?;
+    let (vendor, product) = (vendor?, product?);
+    let controller = interface
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| !dir.as_os_str().is_empty())
+        .find_map(|dir| firmware_node(sys, &sys.join(dir)))?;
+    Some(format!("{controller}-{ports}-{vendor}:{product}"))
+}
+
+/// libcamera's `sysfs::firmwareNodePath()`: the device-tree node of `dir`
+/// below `<sys>/firmware/devicetree`, else its ACPI path.
+fn firmware_node(sys: &Path, dir: &Path) -> Option<String> {
+    if let Ok(node) = fs::canonicalize(dir.join("of_node")) {
+        let base = sys.join("firmware/devicetree");
+        let node = match node.strip_prefix(&base) {
+            Ok(relative) => Path::new("/").join(relative),
+            Err(_) => node,
+        };
+        return Some(node.to_string_lossy().into_owned());
+    }
+    // Skipping an unreadable path and walking on is deliberate: Core's
+    // `read_line` reads it as empty, which names nothing.
+    let path = read_text_file(&dir.join("firmware_node/path")).ok()??;
+    (!path.is_empty()).then_some(path)
+}
+
 /// The `/dev/v4l/by-id` links (udev's persistent names) by the node they
 /// resolve to; the first in name order wins. A missing directory or an
 /// unresolvable link contributes nothing.
@@ -529,16 +572,37 @@ impl V4l2Provider {
             });
         let attribute =
             |name: &str| read(&usb.join(name)).map(|text| text.filter(|text| !text.is_empty()));
+        // The node's device is its USB interface, whose driver is the camera's.
+        let link = sys.join(device).join("driver");
+        let driver = match fs::read_link(&link) {
+            Ok(target) => target
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            Err(error) if disappeared(errno_of(&error)) => None,
+            Err(error) => {
+                let action = "failed to read V4L2 sysfs driver link";
+                return Err(failed(action, &link, &error, false));
+            }
+        };
+        let (vendor_id, product_id) = (attribute("idVendor")?, attribute("idProduct")?);
+        let camera_name = match driver.as_deref() {
+            Some(UVC_DRIVER) => {
+                camera_name(sys, device, vendor_id.as_deref(), product_id.as_deref())
+            }
+            _ => None,
+        };
         let identity = UsbIdentity {
             stable_key,
             topology: topology.into_owned(),
             interface,
             node_index: index,
-            vendor_id: attribute("idVendor")?,
-            product_id: attribute("idProduct")?,
+            vendor_id,
+            product_id,
             serial: attribute("serial")?,
             manufacturer: attribute("manufacturer")?,
             speed: attribute("speed")?,
+            driver,
+            camera_name,
         };
         let model = attribute("product")?
             .unwrap_or_else(|| trim_c_space(&bounded_string(&capability.card)).to_string());

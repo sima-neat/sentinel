@@ -18,6 +18,13 @@
 다른 포트에 연결하면 다른 카메라로 간주되며, 서로 다른 포트에 있는 동일한 카메라는
 서로 다른 id를 갖습니다.
 
+`identity.camera_name`는 `uvcvideo` 드라이버의 노드에만 있으며, Neat의 `UsbCameraInput`이
+카메라를 여는 이름(`UsbCameraInputOptions::camera_name`)입니다. Neat이 libcamera를 따라 만드는 방식 그대로 만듭니다.
+USB 장치 또는 펌웨어 노드가 있는 가장 가까운 상위 장치의 펌웨어 노드(`/sys/firmware/devicetree` 아래의
+디바이스 트리 경로, 없으면 ACPI `firmware_node/path`), 버스 번호를 뺀 인터페이스 이름,
+`idVendor:idProduct`로 구성되며, 예를 들면 `/base/pci@7000000000-3.1:1.0-1a2b:3c4d`입니다.
+구성 요소 중 하나라도 읽을 수 없으면 생략됩니다.
+
 ## 필드
 
 | 필드 | 포함 조건 | 의미 |
@@ -28,7 +35,7 @@
 | `model` | 알려진 경우 | USB `product` 문자열, 없으면 드라이버의 카드 이름 |
 | `device_path` | 항상 | `/dev/videoN`; 라우팅 전용이며 식별자가 아님 |
 | `by_id_path` | udev 링크가 있는 경우 | `device_path`로 확인되는 `/dev/v4l/by-id/...` 링크 |
-| `identity` | 항상 | `stable_key`, `topology`, `interface`, `node_index`, 그리고 USB 장치가 보고하는 경우 `vendor_id`, `product_id`, `serial`, `manufacturer` 및 `speed`(커널이 출력하는 그대로의 Mb/s 단위 sysfs 속도, 예: `"480"`) |
+| `identity` | 항상 | `stable_key`, `topology`, `interface`, `node_index`, 그리고 USB 장치가 보고하는 경우 `vendor_id`, `product_id`, `serial`, `manufacturer` 및 `speed`(커널이 출력하는 그대로의 Mb/s 단위 sysfs 속도, 예: `"480"`); 노드의 USB 인터페이스에 바인딩된 커널 드라이버가 있으면 `driver`(예: `uvcvideo`); `camera_name`(위 참조) |
 | `availability` | 항상 | `{"state": "unknown", "reason": ...}`: 탐지는 스트림을 열지 않으므로 카메라가 사용 중인지 알 수 없음 |
 | `modes` | 항상 | 카메라가 출력할 수 있는 항목. 아래 참조 |
 
@@ -46,8 +53,20 @@
 | `frame_intervals` | 항상 | 프로브한 크기(`width`, `height`)마다 장치가 알리는 모든 간격: `{"type": "discrete", "numerator", "denominator"}` 또는 `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 크기 범위는 최소 크기와 최대 크기에서 프로브합니다. 프레임
-간격이 없는 크기에는 모드가 없습니다. 각 모드에는 `available: false`와 `reason`도 있습니다.
-USB 카메라에는 보드의 카메라 오버레이가 없기 때문입니다([카탈로그](../api.md) 참조).
+간격이 없는 크기에는 모드가 없습니다. 각 모드에는 `available`도 있으며, false이면
+`reason`도 있습니다([카탈로그](../api.md) 참조). Neat의 `UsbCameraInput`은
+`uvcvideo` 카메라를 `camera_name`로 열고 카메라가 나열하는 크기와 프레임 간격으로 MJPEG를
+캡처하므로, 그런 카메라의 `MJPG` 모드는 카메라의 앞선 노드가 나열하지 않는 한 사용할 수 있습니다(아래 참조).
+그 밖의 형식은 사용할 수 없으며, 다른 드라이버를 쓰는 카메라의 모든 모드도 사용할 수 없습니다.
+`camera_name`이 없는 `uvcvideo` 카메라의 `MJPG` 모드는 `UsbCameraInput`이 그 카메라를 열 수 없으므로
+사용할 수 없습니다. `driver`가 없는 노드(스캔 중에 인터페이스가 바인딩 또는 언바인딩되던 노드)의 모드에는 판정이 없습니다.
+
+여러 스트리밍 인터페이스가 있는 카메라는 VideoControl 인터페이스에 캡처 노드가 여러 개 있으며, 이 노드들은
+같은 `camera_name`을 공유합니다. VideoControl 인터페이스가 여러 개인 장치는 인터페이스마다 `camera_name`이 있습니다.
+`UsbCameraInput`은 카메라의 노드를 장치 경로가 짧은 순서(`/dev/video10`보다 `/dev/video2`가 먼저)로 시도하고,
+요청한 MJPEG 크기와 속도를 나열하는 첫 노드를 엽니다. 이산 간격은 정확히 일치해야 하고 범위는 경계 안에서 일치합니다.
+따라서 `MJPG` 모드는 카메라의 앞선 노드가 그 크기를 모든 프레임 간격에서 나열하면 사용할 수 없고,
+일부 간격에서만 나열하면 판정이 없습니다.
 
 ## 제한 및 오류
 
@@ -67,17 +86,21 @@ USB 카메라에는 보드의 카메라 오버레이가 없기 때문입니다([
 
 ## 예시
 
+설명용 레코드이며, sysfs 토폴로지와 ACPI 경로는 단순화했습니다.
+
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
- "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
- "by_id_path": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0",
+ "model": "UVC Webcam", "device_path": "/dev/video97",
+ "by_id_path": "/dev/v4l/by-id/usb-1a2b_UVC_Webcam_A1B2-video-index0",
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
-              "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480"},
+              "node_index": "0", "vendor_id": "1a2b", "product_id": "3c4d",
+              "serial": "A1B2", "manufacturer": "Example Vendor", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-1a2b:3c4d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,
             "frame_intervals": [{"width": 1920, "height": 1080, "intervals": [
-              {"type": "discrete", "numerator": 1, "denominator": 30}]}]}]}
+              {"type": "discrete", "numerator": 1, "denominator": 30}]}],
+            "available": true}]}
 ```

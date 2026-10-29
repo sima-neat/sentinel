@@ -18,6 +18,13 @@
 異なるポートに接続すると別のカメラとして扱われ、
 異なるポートに接続された同一のカメラにはそれぞれ異なるidが付きます。
 
+`identity.camera_name`は`uvcvideo`ドライバーのノードにのみあり、Neatの`UsbCameraInput`がカメラを開くときの名前
+（`UsbCameraInputOptions::camera_name`）です。Neatがlibcameraにならって組み立てるのと同じ方法で組み立てます。
+USBデバイス、またはファームウェアノードを持つ最も近いその祖先のファームウェアノード
+（`/sys/firmware/devicetree`以下のデバイスツリーのパス、なければACPIの`firmware_node/path`）、
+バス番号を除いたインターフェース名、`idVendor:idProduct`からなり、
+例は`/base/pci@7000000000-3.1:1.0-1a2b:3c4d`です。いずれかの部分を読み取れない場合は省略されます。
+
 ## フィールド
 
 | フィールド | 出現条件 | 意味 |
@@ -28,7 +35,7 @@
 | `model` | 判明している場合 | USBの`product`文字列。ない場合はドライバーのカード名 |
 | `device_path` | 常に | `/dev/videoN`。ルーティング専用で、識別には使用しません |
 | `by_id_path` | udevリンクがある場合 | `device_path`に解決される`/dev/v4l/by-id/...`リンク |
-| `identity` | 常に | `stable_key`、`topology`、`interface`、`node_index`、およびUSBデバイスが報告する場合は`vendor_id`、`product_id`、`serial`、`manufacturer`、`speed`（カーネルが出力するとおりのMb/s単位のsysfs速度。例：`"480"`） |
+| `identity` | 常に | `stable_key`、`topology`、`interface`、`node_index`、およびUSBデバイスが報告する場合は`vendor_id`、`product_id`、`serial`、`manufacturer`、`speed`（カーネルが出力するとおりのMb/s単位のsysfs速度。例：`"480"`）、ノードのUSBインターフェースにカーネルドライバーがバインドされている場合は`driver`（例：`uvcvideo`）、`camera_name`（上記を参照） |
 | `availability` | 常に | `{"state": "unknown", "reason": ...}`：検出処理はストリームを開かないため、カメラが使用中かどうかを判別できません |
 | `modes` | 常に | カメラが出力できる内容。下記を参照 |
 
@@ -46,8 +53,20 @@
 | `frame_intervals` | 常に | プローブした各サイズ（`width`、`height`）について、デバイスが通知するすべての間隔：`{"type": "discrete", "numerator", "denominator"}`または`{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 サイズ範囲は、その最小サイズと最大サイズでプローブされます。
-フレーム間隔のないサイズにはモードがありません。各モードは`available: false`と`reason`も持ちます。
-USBカメラにはボード上のカメラオーバーレイがないためです（[カタログ](../api.md)を参照）。
+フレーム間隔のないサイズにはモードがありません。各モードは`available`も持ち、falseの場合は
+`reason`も持ちます（[カタログ](../api.md)を参照）。Neatの`UsbCameraInput`は
+`uvcvideo`カメラを`camera_name`で開き、カメラが列挙するサイズとフレーム間隔でMJPEGをキャプチャするため、
+そのようなカメラの`MJPG`モードは、カメラの先のノードが列挙していない限り利用可能です（下記を参照）。
+その他のフォーマットは利用不可で、他のドライバーのカメラのモードもすべて利用不可です。
+`camera_name`のない`uvcvideo`カメラの`MJPG`モードは、`UsbCameraInput`がそのカメラを開けないため利用不可です。
+`driver`のないノード（スキャン中にインターフェースのバインドまたはアンバインドが進行していたもの）のモードには判定が付きません。
+
+複数のストリーミングインターフェースを持つカメラは、VideoControlインターフェース上に複数のキャプチャノードを持ち、
+それらは同じ`camera_name`を共有します。複数のVideoControlインターフェースを持つデバイスは、それぞれに`camera_name`を持ちます。
+`UsbCameraInput`はカメラのノードをデバイスパスの短い順（`/dev/video10`より先に`/dev/video2`）に試し、
+要求されたMJPEGのサイズとレートを列挙する最初のノードを開きます。離散間隔は完全一致で、範囲はその境界内で一致します。
+したがって`MJPG`モードは、カメラの先のノードがそのサイズをすべてのフレーム間隔で列挙している場合は利用不可で、
+一部の間隔でのみ列挙している場合は判定が付きません。
 
 ## 制限とエラー
 
@@ -67,17 +86,21 @@ USBカメラにはボード上のカメラオーバーレイがないためで�
 
 ## 例
 
+説明用のレコードです。sysfsのトポロジーとACPIパスは簡略化しています。
+
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
- "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
- "by_id_path": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0",
+ "model": "UVC Webcam", "device_path": "/dev/video97",
+ "by_id_path": "/dev/v4l/by-id/usb-1a2b_UVC_Webcam_A1B2-video-index0",
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
-              "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480"},
+              "node_index": "0", "vendor_id": "1a2b", "product_id": "3c4d",
+              "serial": "A1B2", "manufacturer": "Example Vendor", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-1a2b:3c4d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,
             "frame_intervals": [{"width": 1920, "height": 1080, "intervals": [
-              {"type": "discrete", "numerator": 1, "denominator": 30}]}]}]}
+              {"type": "discrete", "numerator": 1, "denominator": 30}]}],
+            "available": true}]}
 ```

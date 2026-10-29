@@ -18,6 +18,13 @@ USB, тож вузли платформи та ISP ніколи не відкр�
 порт означає іншу камеру, а однакові камери в різних портах
 мають різні id.
 
+`identity.camera_name`, наявний для вузлів драйвера `uvcvideo`, — це ім'я, за яким `UsbCameraInput`
+у Neat відкриває камеру (`UsbCameraInputOptions::camera_name`). Його побудовано так само, як його будує Neat слідом за
+libcamera: вузол прошивки USB-пристрою або його найближчого предка з вузлом прошивки (шлях у дереві
+пристроїв під `/sys/firmware/devicetree`, інакше його ACPI-шлях `firmware_node/path`), ім'я
+інтерфейсу без номера шини та `idVendor:idProduct`, наприклад
+`/base/pci@7000000000-3.1:1.0-1a2b:3c4d`. Його пропущено, якщо будь-яку частину не вдається прочитати.
+
 ## Поля
 
 | Поле | Наявність | Значення |
@@ -28,7 +35,7 @@ USB, тож вузли платформи та ISP ніколи не відкр�
 | `model` | якщо відомо | Рядок USB `product`, інакше назва картки (card) драйвера |
 | `device_path` | завжди | `/dev/videoN`; лише для маршрутизації, не для ідентифікації |
 | `by_id_path` | за наявності посилання udev | Посилання `/dev/v4l/by-id/...`, яке вказує на `device_path` |
-| `identity` | завжди | `stable_key`, `topology`, `interface`, `node_index` і, якщо USB-пристрій їх повідомляє, `vendor_id`, `product_id`, `serial`, `manufacturer` та `speed` (швидкість із sysfs у Мбіт/с у тому вигляді, як її виводить ядро, наприклад `"480"`) |
+| `identity` | завжди | `stable_key`, `topology`, `interface`, `node_index` і, якщо USB-пристрій їх повідомляє, `vendor_id`, `product_id`, `serial`, `manufacturer` та `speed` (швидкість із sysfs у Мбіт/с у тому вигляді, як її виводить ядро, наприклад `"480"`); `driver` — драйвер ядра, прив'язаний до USB-інтерфейсу вузла (наприклад, `uvcvideo`), якщо такий є; `camera_name` (див. вище) |
 | `availability` | завжди | `{"state": "unknown", "reason": ...}`: виявлення ніколи не відкриває потік, тому не може визначити, чи використовується камера |
 | `modes` | завжди | Що камера може виводити; див. нижче |
 
@@ -46,8 +53,20 @@ USB, тож вузли платформи та ISP ніколи не відкр�
 | `frame_intervals` | завжди | Для кожного опитаного розміру (`width`, `height`) — кожен інтервал, який оголошує пристрій: `{"type": "discrete", "numerator", "denominator"}` або `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
 Діапазон розмірів опитується за його мінімальним і максимальним розміром. Розмір без інтервалів
-кадрів не має режиму. Кожен режим також має `available: false` і `reason`:
-USB-камери не мають оверлея камери на платі (див. [каталог](../api.md)).
+кадрів не має режиму. Кожен режим також має `available` і, якщо воно false,
+`reason` (див. [каталог](../api.md)). `UsbCameraInput` у Neat відкриває камеру
+`uvcvideo` за її `camera_name` і захоплює MJPEG із розмірами та інтервалами кадрів, які
+перелічує камера, тож режим `MJPG` такої камери доступний, якщо його не перелічує раніший вузол
+камери (див. нижче). Інші формати недоступні, як і кожен режим камери з іншим драйвером. Режими
+`MJPG` камери `uvcvideo` без `camera_name` недоступні, бо `UsbCameraInput` не може її відкрити;
+режими вузла без `driver`, інтерфейс якого під час сканування прив'язувався або відв'язувався, не мають рішення.
+
+Камера з кількома інтерфейсами потокового передавання має кілька вузлів захоплення на своєму інтерфейсі
+VideoControl, і вони мають спільне `camera_name`; пристрій із кількома інтерфейсами VideoControl має
+`camera_name` для кожного з них. `UsbCameraInput` пробує вузли камери за шляхом пристрою, коротші першими
+(`/dev/video2` перед `/dev/video10`), і відкриває перший, який перелічує запитані розмір і частоту MJPEG:
+дискретний інтервал — точно, діапазон — у його межах. Тому режим `MJPG` недоступний, коли раніші вузли
+камери перелічують його розмір для кожного з його інтервалів кадрів, і не має рішення, коли лише для деяких.
 
 ## Обмеження та помилки
 
@@ -67,17 +86,21 @@ USB-камери не мають оверлея камери на платі (д
 
 ## Приклад
 
+Ілюстративний запис; топологію sysfs і шлях ACPI спрощено.
+
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
- "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
- "by_id_path": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0",
+ "model": "UVC Webcam", "device_path": "/dev/video97",
+ "by_id_path": "/dev/v4l/by-id/usb-1a2b_UVC_Webcam_A1B2-video-index0",
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
-              "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480"},
+              "node_index": "0", "vendor_id": "1a2b", "product_id": "3c4d",
+              "serial": "A1B2", "manufacturer": "Example Vendor", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-1a2b:3c4d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,
             "frame_intervals": [{"width": 1920, "height": 1080, "intervals": [
-              {"type": "discrete", "numerator": 1, "denominator": 30}]}]}]}
+              {"type": "discrete", "numerator": 1, "denominator": 30}]}],
+            "available": true}]}
 ```
