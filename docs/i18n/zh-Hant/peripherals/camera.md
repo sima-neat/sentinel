@@ -22,7 +22,7 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 開啟攝影機時所用的名稱（`UsbCameraInputOptions::camera_name`），其建構方式與 Neat 仿照 libcamera 的做法相同：USB 裝置本身或其最近一個
 具有韌體節點的上層裝置之韌體節點（`/sys/firmware/devicetree` 之下的裝置樹路徑，否則為其 ACPI
 `firmware_node/path`）、去掉匯流排編號的介面名稱，以及 `idVendor:idProduct`，
-例如 `/base/pci@7000000000-3.1:1.0-046d:08e5`。任何一部分無法讀取時即省略。
+例如 `/base/pci@7000000000-3.1:1.0-1a2b:3c4d`。任何一部分無法讀取時即省略。
 
 ## 欄位
 
@@ -87,13 +87,13 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
- "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
- "by_id_path": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0",
+ "model": "UVC Webcam", "device_path": "/dev/video97",
+ "by_id_path": "/dev/v4l/by-id/usb-1a2b_UVC_Webcam_A1B2-video-index0",
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
-              "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480",
-              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-046d:082d"},
+              "node_index": "0", "vendor_id": "1a2b", "product_id": "3c4d",
+              "serial": "A1B2", "manufacturer": "Example Vendor", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-1a2b:3c4d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,

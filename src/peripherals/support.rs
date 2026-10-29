@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn later_nodes_of_a_usb_camera_lose_the_modes_earlier_nodes_list() {
         let (devices, _) = example();
-        let Peripheral::Camera(ref c920) = devices[1] else {
+        let Peripheral::Camera(ref usb_camera) = devices[1] else {
             panic!("the example's second device is its USB camera");
         };
         let mjpg = |width: u32, height: u32, intervals: serde_json::Value| -> Mode {
@@ -435,7 +435,7 @@ mod tests {
                     "maximum": fraction(slowest), "step": fraction(1)}])
         };
         let node = |path: &str, name: &str, modes: Vec<Mode>| {
-            let mut camera = c920.clone();
+            let mut camera = usb_camera.clone();
             camera.modes = modes;
             let Source::V4l2(ref mut usb) = camera.source else {
                 panic!("the example's second device is its USB camera");
@@ -463,7 +463,7 @@ mod tests {
         };
         let available = (Some(true), None);
         let elsewhere = (Some(false), Some(USB_NODE_REASON.to_string()));
-        let yuyv = c920.modes[1].clone();
+        let yuyv = usb_camera.modes[1].clone();
         let later = || {
             vec![
                 mjpg(1920, 1080, discrete(&[30, 15])),

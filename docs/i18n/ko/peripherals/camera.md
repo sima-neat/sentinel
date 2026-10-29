@@ -22,7 +22,7 @@
 카메라를 여는 이름(`UsbCameraInputOptions::camera_name`)입니다. Neat이 libcamera를 따라 만드는 방식 그대로 만듭니다.
 USB 장치 또는 펌웨어 노드가 있는 가장 가까운 상위 장치의 펌웨어 노드(`/sys/firmware/devicetree` 아래의
 디바이스 트리 경로, 없으면 ACPI `firmware_node/path`), 버스 번호를 뺀 인터페이스 이름,
-`idVendor:idProduct`로 구성되며, 예를 들면 `/base/pci@7000000000-3.1:1.0-046d:08e5`입니다.
+`idVendor:idProduct`로 구성되며, 예를 들면 `/base/pci@7000000000-3.1:1.0-1a2b:3c4d`입니다.
 구성 요소 중 하나라도 읽을 수 없으면 생략됩니다.
 
 ## 필드
@@ -90,13 +90,13 @@ USB 장치 또는 펌웨어 노드가 있는 가장 가까운 상위 장치의 �
 
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
- "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
- "by_id_path": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0",
+ "model": "UVC Webcam", "device_path": "/dev/video97",
+ "by_id_path": "/dev/v4l/by-id/usb-1a2b_UVC_Webcam_A1B2-video-index0",
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
-              "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480",
-              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-046d:082d"},
+              "node_index": "0", "vendor_id": "1a2b", "product_id": "3c4d",
+              "serial": "A1B2", "manufacturer": "Example Vendor", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-1a2b:3c4d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,

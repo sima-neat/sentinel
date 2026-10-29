@@ -24,7 +24,7 @@ built as Neat builds it after libcamera: the firmware node of the USB device or
 its nearest ancestor with a firmware node (its device-tree path below
 `/sys/firmware/devicetree`, else its ACPI `firmware_node/path`), the interface
 name without its bus number, and `idVendor:idProduct`, for example
-`/base/pci@7000000000-3.1:1.0-046d:08e5`. It is omitted when a part cannot be
+`/base/pci@7000000000-3.1:1.0-1a2b:3c4d`. It is omitted when a part cannot be
 read.
 
 ## Fields
@@ -97,13 +97,13 @@ An illustrative record; its sysfs topology and ACPI path are simplified.
 
 ```json
 {"type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
- "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
- "by_id_path": "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0",
+ "model": "UVC Webcam", "device_path": "/dev/video97",
+ "by_id_path": "/dev/v4l/by-id/usb-1a2b_UVC_Webcam_A1B2-video-index0",
  "identity": {"stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
               "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
-              "node_index": "0", "vendor_id": "046d", "product_id": "082d",
-              "serial": "A1B2", "manufacturer": "Logitech", "speed": "480",
-              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-046d:082d"},
+              "node_index": "0", "vendor_id": "1a2b", "product_id": "3c4d",
+              "serial": "A1B2", "manufacturer": "Example Vendor", "speed": "480",
+              "driver": "uvcvideo", "camera_name": "\\_SB_.PCI0-2.3:1.0-1a2b:3c4d"},
  "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable read-only ownership state; discovery does not acquire, configure, or stream from the camera."},
  "modes": [{"format": "MJPG", "format_description": "Motion-JPEG",
             "width": 1920, "height": 1080,

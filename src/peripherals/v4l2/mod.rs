@@ -384,7 +384,7 @@ impl Enumerator<'_> {
 /// after libcamera's uvcvideo handler: the firmware node of the USB device or
 /// its nearest ancestor with a firmware node, the `interface` name (relative
 /// to `sys`) without its bus number, and `vendor:product`, e.g.
-/// `/base/pci@7000000000-3.1:1.0-046d:08e5`. `None` when a part cannot be read.
+/// `/base/pci@7000000000-3.1:1.0-1a2b:3c4d`. `None` when a part cannot be read.
 fn camera_name(
     sys: &Path,
     interface: &Path,

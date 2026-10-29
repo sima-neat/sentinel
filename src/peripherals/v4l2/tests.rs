@@ -23,11 +23,11 @@ type Nodes<'a> = Vec<(&'a str, Result<FakeVideoNode, i32>)>;
 /// `(width, height, frame period denominators)`.
 type Size<'a> = (u32, u32, &'a [u32]);
 
-/// A USB camera (046d:082d plus `attributes`) at `<sys>/<usb>` with interface
+/// A USB camera (1a2b:3c4d plus `attributes`) at `<sys>/<usb>` with interface
 /// `<port>:1.0` (number `00`, bound to `uvcvideo`) and one video node per
 /// `(name, index)`.
 fn add_camera(sys: &Path, usb: &str, attributes: &[(&str, &str)], videos: &[(&str, &str)]) {
-    let defaults = [("idVendor", "046d"), ("idProduct", "082d")];
+    let defaults = [("idVendor", "1a2b"), ("idProduct", "3c4d")];
     for (name, value) in defaults.iter().chain(attributes) {
         write_file(&sys.join(usb).join(name), &format!("{value}\n"));
     }
@@ -134,7 +134,7 @@ fn one_camera(videos: &[(&str, &str)]) -> TempDir {
     root
 }
 
-/// A Logitech C920 with a pinned id, identity, model and mode. Its metadata
+/// A UVC webcam with a pinned id, identity, model and mode. Its metadata
 /// node is excluded. Then with the details a fuller
 /// system provides: manufacturer, speed and serial from the USB device,
 /// `by_id_path` from the udev link that resolves to the node (none once the
@@ -145,8 +145,8 @@ fn usb_camera_carries_its_facts_plus_optional_details() {
     let (sys, dev) = (root.path().join("sys"), root.path().join("dev"));
     let usb = "devices/pci0000:00/usb1/1-2.3";
     let videos = [("video97", "0"), ("video98", "1")];
-    add_camera(&sys, usb, &[("product", "HD Pro Webcam C920")], &videos);
-    let mut camera = node("HD Pro Webcam C920", V4L2_CAP_VIDEO_CAPTURE);
+    add_camera(&sys, usb, &[("product", "UVC Webcam")], &videos);
+    let mut camera = node("UVC Webcam", V4L2_CAP_VIDEO_CAPTURE);
     add_format(&mut camera, CAPTURE, b"MJPG", &[(1920, 1080, &[30])]);
     let catalog = |camera: &FakeVideoNode| {
         let nodes = vec![("video97", Ok(camera.clone())), ("video98", Ok(metadata()))];
@@ -154,14 +154,14 @@ fn usb_camera_carries_its_facts_plus_optional_details() {
     };
     let mut expected = json!([{
         "type": "camera", "id": "camera:v4l2:295faa7ac0d61654", "backend": "v4l2",
-        "model": "HD Pro Webcam C920", "device_path": "/dev/video97",
+        "model": "UVC Webcam", "device_path": "/dev/video97",
         "availability": {"state": "unknown", "reason": "V4L2 does not expose a reliable \
             read-only ownership state; discovery does not acquire, configure, or stream \
             from the camera."},
         "identity": {
             "stable_key": "sysfs:devices/pci0000:00/usb1/1-2.3:interface=00:index=0",
             "topology": "devices/pci0000:00/usb1/1-2.3", "interface": "00",
-            "node_index": "0", "vendor_id": "046d", "product_id": "082d",
+            "node_index": "0", "vendor_id": "1a2b", "product_id": "3c4d",
             "driver": "uvcvideo"
         },
         "modes": [{
@@ -173,7 +173,7 @@ fn usb_camera_carries_its_facts_plus_optional_details() {
     assert_eq!(catalog(&camera), expected);
 
     let identity = [
-        ("manufacturer", " Logitech \n"),
+        ("manufacturer", " Example Vendor \n"),
         ("speed", "480"),
         ("serial", "A1B2"),
     ];
@@ -186,11 +186,11 @@ fn usb_camera_carries_its_facts_plus_optional_details() {
         &sys.join("devices/pci0000:00/firmware_node/path"),
         "\\_SB_.PCI0\n",
     );
-    expected[0]["identity"]["camera_name"] = json!("\\_SB_.PCI0-2.3:1.0-046d:082d");
+    expected[0]["identity"]["camera_name"] = json!("\\_SB_.PCI0-2.3:1.0-1a2b:3c4d");
     write_file(&dev.join("video97"), "");
     let by_id = dev.join("v4l/by-id");
     fs::create_dir_all(&by_id).unwrap();
-    let link = "usb-046d_HD_Pro_Webcam_C920_A1B2-video-index0";
+    let link = "usb-1a2b_UVC_Webcam_A1B2-video-index0";
     symlink("../../video97", by_id.join(link)).unwrap();
     symlink("../../video9", by_id.join("usb-dangling-video-index0")).unwrap();
     camera.formats[0].2 = "Motion-JPEG";
@@ -224,8 +224,8 @@ fn ids_follow_usb_topology() {
     let ((first_camera, first), (replugged_camera, replugged)) = (usb(&first), usb(&replugged));
     assert_eq!(first_camera.id, replugged_camera.id);
     let key = format!("sysfs:{USB}:interface=00:index=0");
-    let expected = json!({"node_index": "0", "interface": "00", "vendor_id": "046d",
-                          "product_id": "082d", "topology": USB, "stable_key": key,
+    let expected = json!({"node_index": "0", "interface": "00", "vendor_id": "1a2b",
+                          "product_id": "3c4d", "topology": USB, "stable_key": key,
                           "driver": "uvcvideo"});
     assert_eq!(serde_json::to_value(&first.identity).unwrap(), expected);
     let mut expected = expected;
@@ -257,7 +257,7 @@ fn ids_follow_usb_topology() {
 /// node (a device-tree `of_node` before an ACPI `firmware_node/path`), the interface
 /// without its bus number, and `vendor:product`. It is omitted when a part is
 /// missing, and so is it for a node of another driver, whose driver is still
-/// reported. The tree follows the topology of a DevKit's C920 capture
+/// reported. The tree follows the topology of a UVC camera on a DevKit
 /// (`docs/peripherals/catalog-example.json`); its firmware nodes are
 /// synthetic, after Core's DevKit-shaped fixture.
 #[test]
@@ -267,7 +267,7 @@ fn camera_name_names_the_controller_port_and_usb_ids() {
     let host = "devices/platform/7ff0000000.pci";
     let xhci = format!("{host}/pci0003:00/0003:00:00.0/0003:01:00.0");
     let device = format!("{xhci}/usb1/1-3/1-3.1");
-    add_camera(&sys, &device, &[("idProduct", "08e5")], &[("video0", "0")]);
+    add_camera(&sys, &device, &[("idProduct", "5e6f")], &[("video0", "0")]);
     let of_node = |device: &str, node: &str| {
         fs::create_dir_all(sys.join("firmware/devicetree").join(node)).unwrap();
         let link = sys.join(device).join("of_node");
@@ -275,20 +275,20 @@ fn camera_name_names_the_controller_port_and_usb_ids() {
     };
     of_node(host, "base/pci@7000000000");
     let identity = || {
-        let records = scan(root.path(), vec![("video0", Ok(uvc_camera("C920")))]).unwrap();
+        let records = scan(root.path(), vec![("video0", Ok(uvc_camera("UVC Webcam")))]).unwrap();
         let identity = &usb(&records[0]).1.identity;
         (identity.driver.clone(), identity.camera_name.clone())
     };
     let uvc = |id: &str| (Some("uvcvideo".to_string()), Some(id.to_string()));
-    assert_eq!(identity(), uvc("/base/pci@7000000000-3.1:1.0-046d:08e5"));
+    assert_eq!(identity(), uvc("/base/pci@7000000000-3.1:1.0-1a2b:5e6f"));
 
     // The nearest firmware-described ancestor wins, its of_node first.
     write_file(&sys.join(&xhci).join("firmware_node/path"), "\\_SB_.XHC_\n");
-    assert_eq!(identity(), uvc("\\_SB_.XHC_-3.1:1.0-046d:08e5"));
+    assert_eq!(identity(), uvc("\\_SB_.XHC_-3.1:1.0-1a2b:5e6f"));
     of_node(&xhci, "base/pci@7000000000/usb@0");
     assert_eq!(
         identity(),
-        uvc("/base/pci@7000000000/usb@0-3.1:1.0-046d:08e5")
+        uvc("/base/pci@7000000000/usb@0-3.1:1.0-1a2b:5e6f")
     );
 
     for path in [xhci.clone(), host.to_string()] {
@@ -303,30 +303,30 @@ fn camera_name_names_the_controller_port_and_usb_ids() {
     of_node(host, "base/pci@7000000000");
     fs::remove_file(sys.join(&device).join("idProduct")).unwrap();
     assert_eq!(identity(), (Some("uvcvideo".into()), None), "no idProduct");
-    write_file(&sys.join(&device).join("idProduct"), "08e5\n");
+    write_file(&sys.join(&device).join("idProduct"), "5e6f\n");
     write_file(&sys.join(&device).join("idVendor"), "\n");
     assert_eq!(
         identity(),
         (Some("uvcvideo".into()), None),
         "empty idVendor"
     );
-    write_file(&sys.join(&device).join("idVendor"), "046d\n");
+    write_file(&sys.join(&device).join("idVendor"), "1a2b\n");
 
     // The walk starts at the USB device: an of_node on the interface is not
     // read, one on the device is.
     let interface = format!("{device}/1-3.1:1.0");
     of_node(&interface, "base/interface");
-    let host_name = uvc("/base/pci@7000000000-3.1:1.0-046d:08e5");
+    let host_name = uvc("/base/pci@7000000000-3.1:1.0-1a2b:5e6f");
     assert_eq!(identity(), host_name);
     of_node(&device, "base/camera");
-    assert_eq!(identity(), uvc("/base/camera-3.1:1.0-046d:08e5"));
+    assert_eq!(identity(), uvc("/base/camera-3.1:1.0-1a2b:5e6f"));
     fs::remove_file(sys.join(&device).join("of_node")).unwrap();
     // A node outside the device tree keeps its full path (`scan` shows paths
     // below the temporary root as on a board).
     let outside = root.path().join("elsewhere/usb@0");
     fs::create_dir_all(&outside).unwrap();
     symlink(&outside, sys.join(&xhci).join("of_node")).unwrap();
-    assert_eq!(identity(), uvc("/elsewhere/usb@0-3.1:1.0-046d:08e5"));
+    assert_eq!(identity(), uvc("/elsewhere/usb@0-3.1:1.0-1a2b:5e6f"));
     fs::remove_file(sys.join(&xhci).join("of_node")).unwrap();
     // A looping of_node names nothing, so the walk goes on to the parent's
     // ACPI path; an empty ACPI path names nothing either.
@@ -334,7 +334,7 @@ fn camera_name_names_the_controller_port_and_usb_ids() {
     symlink(&looping, &looping).unwrap();
     let hub = format!("{xhci}/usb1/1-3");
     write_file(&sys.join(&hub).join("firmware_node/path"), "\\_SB_.HS03\n");
-    assert_eq!(identity(), uvc("\\_SB_.HS03-3.1:1.0-046d:08e5"));
+    assert_eq!(identity(), uvc("\\_SB_.HS03-3.1:1.0-1a2b:5e6f"));
     write_file(&sys.join(&hub).join("firmware_node/path"), "\n");
     assert_eq!(identity(), host_name);
     fs::remove_file(&looping).unwrap();
@@ -410,7 +410,7 @@ fn composite_cameras_are_judged_in_neats_node_order() {
         ("video2", Ok(second)),
         ("video3", Ok(metadata())),
     ];
-    let name = "/base/usb@0-1:1.0-046d:082d";
+    let name = "/base/usb@0-1:1.0-1a2b:3c4d";
     let elsewhere = "Neat's USB camera input opens another node of this camera for this mode.";
     let expected: Verdicts = vec![
         (
@@ -452,7 +452,7 @@ fn composite_cameras_are_judged_in_neats_node_order() {
         (path("video0"), name.into(), available.clone()),
         (
             path("video2"),
-            "/base/usb@0-1:1.2-046d:082d".into(),
+            "/base/usb@0-1:1.2-1a2b:3c4d".into(),
             available,
         ),
     ];
@@ -504,7 +504,7 @@ fn only_usb_video_capture_nodes_are_enumerated() {
 fn modes_are_canonical_and_ranges_are_probed_at_both_ends() {
     let root = one_camera(&[("video0", "0")]);
     let mplane = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    let mut camera = uvc_camera("C920");
+    let mut camera = uvc_camera("UVC Webcam");
     camera.capability.device_caps |= V4L2_CAP_VIDEO_CAPTURE_MPLANE;
     camera.formats[0].2 = "YUYV 4:2:2";
     add_format(&mut camera, mplane, b"MJPG", &[]);
@@ -614,20 +614,20 @@ fn driver_and_sysfs_errors_fail_the_scan() {
 
     let interface = sys.join(USB).join("1-1:1.0/bInterfaceNumber");
     fs::remove_file(&interface).unwrap();
-    let c920 = || Ok(uvc_camera("C920"));
-    let (code, _) = fail(c920());
+    let usb_camera = || Ok(uvc_camera("UVC Webcam"));
+    let (code, _) = fail(usb_camera());
     assert_eq!(code, "peripherals.discovery_failed", "no stable interface");
     write_file(&interface, "00\n");
     // `idVendor` alone marks the USB device; `idProduct` is optional.
     fs::remove_file(sys.join(USB).join("idProduct")).unwrap();
-    let records = scan(root.path(), vec![("video0", c920())]).unwrap();
+    let records = scan(root.path(), vec![("video0", usb_camera())]).unwrap();
     assert_eq!(usb(&records[0]).1.identity.product_id, None);
     // An attribute that exists but cannot be read fails the scan rather than
     // reading as absent.
     let serial = sys.join(USB).join("serial");
     let _ = fs::remove_file(&serial);
     fs::create_dir(&serial).unwrap();
-    let (code, reason) = fail(c920());
+    let (code, reason) = fail(usb_camera());
     assert_eq!(code, "io.open");
     assert!(
         reason.starts_with("failed to read V4L2 sysfs attribute"),
@@ -638,7 +638,7 @@ fn driver_and_sysfs_errors_fail_the_scan() {
     let driver = sys.join(USB).join("1-1:1.0/driver");
     fs::remove_file(&driver).unwrap();
     write_file(&driver, "");
-    let (code, reason) = fail(c920());
+    let (code, reason) = fail(usb_camera());
     assert_eq!(code, "io.open");
     let link = "failed to read V4L2 sysfs driver link";
     assert!(reason.starts_with(link), "{reason}");
@@ -648,7 +648,7 @@ fn driver_and_sysfs_errors_fail_the_scan() {
     let entry = sys.join("class/video4linux/video5");
     fs::create_dir_all(&entry).unwrap();
     symlink(entry.join("device"), entry.join("device")).unwrap();
-    let (code, reason) = fail(c920());
+    let (code, reason) = fail(usb_camera());
     assert_eq!(code, "io.open");
     let resolve = "failed to resolve V4L2 sysfs device";
     assert!(reason.starts_with(resolve), "{reason}");
@@ -680,12 +680,12 @@ fn vanished_devices_are_skipped() {
     fs::create_dir_all(sys.join("class/video4linux/video9")).unwrap();
     let videos = [("video2", "0"), ("video3", "1")];
     add_camera(&sys, "devices/platform/xhci/usb1/1-2", &[], &videos);
-    let mut vanishing = uvc_camera("C920");
+    let mut vanishing = uvc_camera("UVC Webcam");
     vanishing.fail = Some((VIDIOC_ENUM_FRAMESIZES, libc::ENXIO));
     let nodes = vec![
         ("video0", Err(libc::ENODEV)),
         ("video1", Ok(vanishing)),
-        ("video3", Ok(uvc_camera("C920"))),
+        ("video3", Ok(uvc_camera("UVC Webcam"))),
     ];
     let records = scan(root.path(), nodes).unwrap();
     assert_eq!(device_paths(&records), ["/dev/video3"]);
@@ -709,7 +709,10 @@ fn enumeration_ioctls_a_driver_lacks_give_no_modes() {
         );
         let mut grabber = uvc_camera("Grabber");
         grabber.fail = Some((request, libc::ENOTTY));
-        let nodes = vec![("video0", Ok(grabber)), ("video2", Ok(uvc_camera("C920")))];
+        let nodes = vec![
+            ("video0", Ok(grabber)),
+            ("video2", Ok(uvc_camera("UVC Webcam"))),
+        ];
         let records = scan(root.path(), nodes).unwrap();
         let modes = |path: &str| {
             let device = records.iter().find(|d| usb(d).1.device_path == path);
@@ -731,7 +734,7 @@ fn camera_unplugged_after_open_is_skipped() {
     let (sys, dev) = (root.path().join("sys"), root.path().join("dev"));
     let second = "devices/platform/xhci/usb1/1-2";
     add_camera(&sys, second, &[], &[("video1", "0")]);
-    let camera = || Ok(uvc_camera("C920"));
+    let camera = || Ok(uvc_camera("UVC Webcam"));
     let nodes = vec![("video0", camera()), ("video1", camera())];
     let (usb, served) = (sys.join(USB), opener(&dev, nodes));
     let unplug: Opener = Box::new(move |path: &Path| {
