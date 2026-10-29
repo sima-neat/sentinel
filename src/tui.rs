@@ -954,7 +954,7 @@ fn draw_power(f: &mut Frame, area: Rect, cache: &CachePayload) {
     draw_line_chart(
         f,
         columns[0],
-        "Current board power",
+        "Current board power (Estimated)",
         series(cache, "power_current_watts"),
         0.0,
         scale_max,
@@ -1005,7 +1005,7 @@ fn draw_power_peak(f: &mut Frame, area: Rect, peak: Option<f64>, scale_max: f64)
         rows[1],
     );
     f.render_widget(
-        Paragraph::new("Maximum valid total since daemon start")
+        Paragraph::new("Maximum valid total since daemon start (Estimated)")
             .alignment(Alignment::Center)
             .style(Style::default().fg(DIM).bg(BG)),
         rows[2],

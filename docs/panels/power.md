@@ -72,6 +72,9 @@ Current is monitored board-rail power, not AC wall power or complete system
 input power. It can exclude unmonitored rails, regulator losses, carrier-board
 components, storage, fans, and host-side devices.
 
+Every total is an estimate: it is the sum of the regulator POUT readings that the
+PMBus devices report, not a calibrated measurement of the SOM input power.
+
 Likewise, model energy is not represented by `MLA 0.68V` alone. Inference also
 uses DDR, SoC, and platform rails. Record the profile, rail health, Sentinel
 version, workload window, and ambient/board conditions when comparing runs.
