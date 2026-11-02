@@ -57,10 +57,10 @@ single- and multi-planar listings of a format are merged.
 A size range is probed at its minimum and maximum size. A size without frame
 intervals has no mode. Every mode also has `available` and, when it is false,
 `reason` (see [the catalog](../api.md)). Neat's `UsbCameraInput` opens a
-`uvcvideo` camera by its `camera_name` and captures MJPEG at the sizes and frame
-intervals the camera lists, so an `MJPG` mode of such a camera is available
+`uvcvideo` camera by its `camera_name` and captures MJPEG or even-width YUYV at the sizes and frame
+intervals the camera lists, so an `MJPG` or even-width `YUYV` mode of such a camera is available
 unless an earlier node of the camera lists it (see below). Other formats are
-unavailable, and so is every mode of a camera of another driver. The `MJPG`
+unavailable, and so is every mode of a camera of another driver. The supported
 modes of a `uvcvideo` camera without `camera_name` are unavailable, since
 `UsbCameraInput` cannot open it; those of a node without `driver`, whose
 interface was binding or unbinding during the scan, have no verdict.
@@ -69,9 +69,9 @@ A camera with several streaming interfaces has several capture nodes on its
 VideoControl interface, and they share its `camera_name`; a device with several
 VideoControl interfaces has a `camera_name` for each. `UsbCameraInput` tries a
 camera's nodes by device path, shorter first (`/dev/video2` before
-`/dev/video10`), and opens the first one that lists the requested MJPEG size
-and rate, a discrete interval exactly or a range within its bounds. An `MJPG`
-mode is therefore unavailable when earlier nodes of the camera list its size at
+`/dev/video10`), and opens the first one that lists the requested format, size
+and rate, a discrete interval exactly or a stepwise interval on its exact rational lattice. A supported
+mode is therefore unavailable when earlier nodes of the camera list the same format and size at
 every one of its frame intervals, and has no verdict when they list it at only
 some of them.
 
@@ -111,3 +111,9 @@ An illustrative record; its sysfs topology and ACPI path are simplified.
               {"type": "discrete", "numerator": 1, "denominator": 30}]}],
             "available": true}]}
 ```
+
+YUYV width ranges have no verdict because they may include odd widths. Overlapping
+interval ranges with different step lattices remain undecided unless full coverage
+is proven. An MJPEG node never shadows a YUYV node. These are query-only format
+admission decisions for a coordinated YUYV release, not proof of DMA import,
+color metadata, USB bandwidth, firmware availability or achieved frame rate.
