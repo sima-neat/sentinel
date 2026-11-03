@@ -63,7 +63,8 @@ unless an earlier node of the camera lists it (see below). Other formats are
 unavailable, and so is every mode of a camera of another driver. The supported
 modes of a `uvcvideo` camera without `camera_name` are unavailable, since
 `UsbCameraInput` cannot open it; those of a node without `driver`, whose
-interface was binding or unbinding during the scan, have no verdict.
+interface was binding or unbinding during the scan, have no verdict. Support
+classification also leaves a mode undecided if its frame-interval evidence is empty.
 
 A camera with several streaming interfaces has several capture nodes on its
 VideoControl interface, and they share its `camera_name`; a device with several

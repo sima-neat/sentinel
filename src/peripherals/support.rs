@@ -275,7 +275,9 @@ fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[(String, Listing)
             <= u64::from(b.numerator) * u64::from(a.denominator)
     };
     let (mut opened_elsewhere, mut opened_here) = (true, true);
+    let mut listed_interval = false;
     for (width, height, interval) in listings(mode) {
+        listed_interval = true;
         let (low, high) = periods(interval);
         let same_size = earlier
             .iter()
@@ -302,6 +304,7 @@ fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[(String, Listing)
         opened_here &= !overlapped;
     }
     match () {
+        _ if !listed_interval => ModeVerdict::Unknown,
         _ if opened_here => ModeVerdict::Available,
         _ if opened_elsewhere => ModeVerdict::Unavailable(USB_NODE_REASON),
         _ => ModeVerdict::Unknown,
@@ -556,6 +559,33 @@ mod tests {
         );
         let other = [available.clone(), available.clone(), available, format];
         assert_eq!(judged("other", later()), [&other[..], &firsts].concat());
+    }
+
+    #[test]
+    fn usb_without_frame_intervals_is_unknown() {
+        let (devices, _) = example();
+        let Peripheral::Camera(camera) = &devices[1] else {
+            panic!("USB fixture");
+        };
+        let Source::V4l2(usb) = &camera.source else {
+            panic!("USB fixture");
+        };
+        for format in ["MJPG", "YUYV"] {
+            let mut mode = camera.modes[1].clone();
+            mode.format = format.into();
+            for size in &mut mode.frame_intervals {
+                size.intervals.clear();
+            }
+            assert!(matches!(
+                usb_verdict(&mode, &usb.identity, &[]),
+                ModeVerdict::Unknown
+            ));
+            mode.frame_intervals.clear();
+            assert!(matches!(
+                usb_verdict(&mode, &usb.identity, &[]),
+                ModeVerdict::Unknown
+            ));
+        }
     }
 
     #[test]
