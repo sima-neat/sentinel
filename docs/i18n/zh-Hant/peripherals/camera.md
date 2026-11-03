@@ -51,19 +51,19 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
 | `size_range` | 階梯式或連續尺寸 | `type`（`stepwise` 或 `continuous`）、`min_width`、`min_height`、`max_width`、`max_height`、`step_width`、`step_height` |
 | `frame_intervals` | 一律 | 針對每個探測的尺寸（`width`、`height`），列出裝置宣告的所有間隔：`{"type": "discrete", "numerator", "denominator"}` 或 `{"type": "stepwise" or "continuous", "minimum", "maximum", "step"}` |
 
-尺寸範圍會以其最小與最大尺寸進行探測。
-沒有影格間隔的尺寸不構成模式。每個模式也都帶有 `available`，為 false 時另附
-`reason`（請參閱[目錄](../api.md)）。Neat 的 `UsbCameraInput` 以 `camera_name` 開啟
-`uvcvideo` 攝影機，並以攝影機列出的尺寸與影格間隔擷取 MJPEG，因此這類攝影機的
-`MJPG` 模式皆可用，除非該攝影機較早的節點已列出它（見下文）。其他格式不可用，使用其他驅動程式的攝影機的所有模式也不可用。
-沒有 `camera_name` 的 `uvcvideo` 攝影機，其 `MJPG` 模式不可用，因為 `UsbCameraInput` 無法開啟它；
-沒有 `driver` 的節點（掃描期間其介面正在繫結或解除繫結）的模式不會帶有判斷。
+尺寸範圍會以最小與最大尺寸進行探測。沒有影格間隔的尺寸不構成模式。每個模式也都帶有 `available`，
+為 false 時另附 `reason`（請參閱[目錄](../api.md)）。Neat 的 `UsbCameraInput` 以 `camera_name` 開啟
+`uvcvideo` 攝影機，並以攝影機列出的尺寸與影格間隔擷取 MJPEG 或偶數寬度的 YUYV。因此，這類攝影機的
+`MJPG` 或偶數寬度的 `YUYV` 模式皆可用，除非該攝影機較早的節點已列出它（見下文）。其他格式不可用，
+使用其他驅動程式的攝影機的所有模式也不可用。沒有 `camera_name` 的 `uvcvideo` 攝影機，即使是支援格式的模式
+也不可用，因為 `UsbCameraInput` 無法開啟它。沒有 `driver` 的節點，即掃描期間介面正在繫結或解除繫結的節點，
+其模式不會帶有判斷。影格間隔依據為空時，也不會判定是否支援。
 
-具有多個串流介面的攝影機，在其 VideoControl 介面上有多個擷取節點，它們共用同一個 `camera_name`；
+具有多個串流介面的攝影機，在 VideoControl 介面上有多個擷取節點，它們共用同一個 `camera_name`；
 具有多個 VideoControl 介面的裝置，每個介面各有一個 `camera_name`。`UsbCameraInput` 依裝置路徑由短到長
-（`/dev/video2` 先於 `/dev/video10`）嘗試攝影機的節點，並開啟第一個列出所要求 MJPEG 尺寸與速率的節點：
-離散間隔須完全相符，範圍則須落在其邊界內。因此，當攝影機較早的節點在 `MJPG` 模式的每個影格間隔都列出其尺寸時，
-該模式不可用；只在部分間隔列出時，則不會帶有判斷。
+（`/dev/video2` 先於 `/dev/video10`）嘗試攝影機的節點，並開啟第一個列出所要求格式、尺寸與速率的節點。
+離散間隔必須完全相符，階梯式間隔則必須位於其精確有理數步距格點上。因此，當較早的節點在某模式的每個影格間隔
+都列出相同格式與尺寸時，即使該模式的格式受支援也不可用；只在部分間隔列出時，則不會帶有判斷。
 
 ## 限制與錯誤
 
@@ -101,3 +101,7 @@ USB Video Class（UVC）攝影機，由 `camera.v4l2`
               {"type": "discrete", "numerator": 1, "denominator": 30}]}],
             "available": true}]}
 ```
+
+YUYV 寬度範圍可能包含奇數寬度，因此不會帶有判斷。步距格點不同的重疊間隔範圍，除非能證明完全涵蓋，否則也維持未定。
+MJPEG 節點不會遮蔽 YUYV 節點的模式。這些是配合 YUYV 協同發布而進行的唯讀查詢格式允許判定，並非 DMA 匯入、
+色彩中繼資料、USB 頻寬、韌體可用性或實際影格率的證明。
