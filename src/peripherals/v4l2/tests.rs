@@ -427,10 +427,7 @@ fn composite_cameras_are_judged_in_neats_node_order() {
             vec![
                 verdict("MJPG 320x240", None),
                 verdict("MJPG 640x480", Some(elsewhere)),
-                verdict(
-                    "YUYV 640x480",
-                    Some("Neat's USB camera input reads MJPEG only."),
-                ),
+                verdict("YUYV 640x480", None),
             ],
         ),
     ];

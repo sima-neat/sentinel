@@ -8,7 +8,7 @@
 //! covered one, which query-only discovery cannot confirm, so a covered size
 //! carries no verdict. A USB camera's mode is available when Neat's
 //! `UsbCameraInput` opens the camera, a `uvcvideo` one with a `camera_name`,
-//! at that mode on that node: the mode is MJPEG, which it captures at every
+//! at that mode on that node: the mode is MJPEG or even-width YUYV, captured at the
 //! size and interval the camera lists, and no node of the camera it tries
 //! first lists the mode's sizes and intervals. Every mode known not to work
 //! carries the reason.
@@ -23,8 +23,9 @@ use super::{CatalogError, Peripheral};
 const CAMERAINPUT_FORMAT: &str = "NV12";
 /// The format Neat Core's `UsbCameraInput` captures, and the driver of the
 /// cameras it lists (`src/nodes/io/internal/UvcCamera.cpp`).
-const USBCAMERAINPUT_FORMAT: &str = "MJPG";
-const USB_FORMAT_REASON: &str = "Neat's USB camera input reads MJPEG only.";
+const USBCAMERAINPUT_FORMATS: [&str; 2] = ["MJPG", "YUYV"];
+const USB_FORMAT_REASON: &str = "Neat's USB camera input reads MJPEG or YUYV.";
+const USB_WIDTH_REASON: &str = "Neat's YUYV camera input requires an even width.";
 const USB_DRIVER_REASON: &str = "Neat's USB camera input needs the uvcvideo driver.";
 const USB_NAME_REASON: &str =
     "Neat's USB camera input cannot name this camera (no firmware node or USB ID).";
@@ -47,7 +48,7 @@ pub fn judge(devices: &mut [Peripheral], board: Option<&Board>, errors: &[Catalo
     };
     let configured_complete = field_complete("configured_cameras");
     let supported_complete = field_complete("supported_sensors");
-    let earlier = earlier_mjpeg_listings(devices);
+    let earlier = earlier_usb_listings(devices);
     for (device, earlier) in devices.iter_mut().zip(&earlier) {
         let Peripheral::Camera(camera) = device else {
             continue;
@@ -182,15 +183,15 @@ fn listings(mode: &Mode) -> impl Iterator<Item = Listing> + '_ {
     sizes.flat_map(|size| size.intervals.iter().map(|&i| (size.width, size.height, i)))
 }
 
-/// Per device, the MJPEG sizes and intervals of the nodes `UsbCameraInput`
+/// Per device, the format-specific sizes and intervals of the nodes `UsbCameraInput`
 /// tries before it when opening the same `camera_name`: Core lists a
 /// camera's `uvcvideo` nodes by device path, shorter first (`/dev/video2`
-/// before `/dev/video10`), and opens the first MJPEG node that lists the
+/// before `/dev/video10`), and opens the first matching-format node that lists the
 /// requested size and rate (`list_nodes` and `resolve_mjpeg_camera` in
 /// `src/nodes/io/internal/UvcCamera.cpp`). Several capture nodes on one UVC
 /// interface, as a camera with several streaming interfaces has, share a
 /// name.
-fn earlier_mjpeg_listings(devices: &[Peripheral]) -> Vec<Vec<Listing>> {
+fn earlier_usb_listings(devices: &[Peripheral]) -> Vec<Vec<(String, Listing)>> {
     let earlier = |device: &Peripheral| {
         let Some((name, order)) = uvc_node(device) else {
             return Vec::new();
@@ -205,8 +206,10 @@ fn earlier_mjpeg_listings(devices: &[Peripheral]) -> Vec<Vec<Listing>> {
                 _ => None,
             });
         let modes = cameras.flat_map(|camera| &camera.modes);
-        let modes = modes.filter(|mode| mode.format == USBCAMERAINPUT_FORMAT);
-        modes.flat_map(listings).collect()
+        let modes = modes.filter(|mode| USBCAMERAINPUT_FORMATS.contains(&mode.format.as_str()));
+        modes
+            .flat_map(|mode| listings(mode).map(|listing| (mode.format.clone(), listing)))
+            .collect()
     };
     devices.iter().map(earlier).collect()
 }
@@ -229,7 +232,7 @@ fn uvc_node(device: &Peripheral) -> Option<(&str, (usize, &str))> {
 
 /// The verdict for one mode of a USB camera whose earlier nodes, in the
 /// order `UsbCameraInput` tries them, list `earlier`.
-fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[Listing]) -> ModeVerdict {
+fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[(String, Listing)]) -> ModeVerdict {
     let uvc = match identity.driver.as_deref() {
         Some(UVC_DRIVER) => true,
         Some(_) => return ModeVerdict::Unavailable(USB_DRIVER_REASON),
@@ -237,7 +240,7 @@ fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[Listing]) -> Mode
         // during the scan; Neat lists the node once `uvcvideo` is bound.
         None => false,
     };
-    if mode.format != USBCAMERAINPUT_FORMAT {
+    if !USBCAMERAINPUT_FORMATS.contains(&mode.format.as_str()) {
         return ModeVerdict::Unavailable(USB_FORMAT_REASON);
     }
     if !uvc {
@@ -246,8 +249,17 @@ fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[Listing]) -> Mode
     if identity.camera_name.is_none() {
         return ModeVerdict::Unavailable(USB_NAME_REASON);
     }
+    if mode.format == "YUYV" {
+        match mode.width {
+            Some(width) if width == 0 || width % 2 != 0 => {
+                return ModeVerdict::Unavailable(USB_WIDTH_REASON)
+            }
+            None => return ModeVerdict::Unknown, // A range may contain both odd and even widths.
+            _ => {}
+        }
+    }
     // Core matches a requested rate against a discrete interval exactly and
-    // against a range by its bounds, ignoring the step. `uvcvideo` lists
+    // against a stepwise range using the exact step lattice. `uvcvideo` lists
     // discrete sizes only, so sizes match exactly.
     let periods = |interval: Interval| match interval {
         Interval::Discrete(period) => (period, period),
@@ -263,24 +275,78 @@ fn usb_verdict(mode: &Mode, identity: &UsbIdentity, earlier: &[Listing]) -> Mode
             <= u64::from(b.numerator) * u64::from(a.denominator)
     };
     let (mut opened_elsewhere, mut opened_here) = (true, true);
+    let mut listed_interval = false;
     for (width, height, interval) in listings(mode) {
+        listed_interval = true;
         let (low, high) = periods(interval);
         let same_size = earlier
             .iter()
-            .filter(|&&(w, h, _)| (w, h) == (width, height));
-        let ranges = same_size.map(|&(.., earlier)| periods(earlier));
+            .filter(|(format, (w, h, _))| format == &mode.format && (*w, *h) == (width, height));
+        let ranges = same_size.map(|(_, (_, _, earlier))| *earlier);
         let (mut covered, mut overlapped) = (false, false);
-        for (min, max) in ranges {
-            covered |= at_most(min, low) && at_most(high, max);
-            overlapped |= at_most(min, high) && at_most(low, max);
+        for earlier_interval in ranges {
+            let (min, max) = periods(earlier_interval);
+            if let Interval::Discrete(period) = interval {
+                let contains = interval_contains(earlier_interval, period);
+                covered |= contains;
+                overlapped |= contains;
+            } else {
+                // Bound overlap alone cannot prove that two different step
+                // lattices cover each other. Leave such cases undecided.
+                covered |= interval == earlier_interval
+                    || (matches!(earlier_interval, Interval::Continuous { .. })
+                        && at_most(min, low)
+                        && at_most(high, max));
+                overlapped |= at_most(min, high) && at_most(low, max);
+            }
         }
         opened_elsewhere &= covered;
         opened_here &= !overlapped;
     }
     match () {
+        _ if !listed_interval => ModeVerdict::Unknown,
         _ if opened_here => ModeVerdict::Available,
         _ if opened_elsewhere => ModeVerdict::Unavailable(USB_NODE_REASON),
         _ => ModeVerdict::Unknown,
+    }
+}
+
+// Exact V4L2 interval arithmetic; u128 contains products of three u32 values.
+fn interval_contains(interval: Interval, value: Fraction) -> bool {
+    let valid = |v: Fraction| v.numerator > 0 && v.denominator > 0;
+    if !valid(value) {
+        return false;
+    }
+    let at_most = |a: Fraction, b: Fraction| {
+        u128::from(a.numerator) * u128::from(b.denominator)
+            <= u128::from(b.numerator) * u128::from(a.denominator)
+    };
+    let (minimum, maximum, step) = match interval {
+        Interval::Discrete(v) => return valid(v) && at_most(v, value) && at_most(value, v),
+        Interval::Continuous {
+            minimum, maximum, ..
+        } => (minimum, maximum, None),
+        Interval::Stepwise {
+            minimum,
+            maximum,
+            step,
+        } => (minimum, maximum, Some(step)),
+    };
+    if !valid(minimum) || !valid(maximum) || !at_most(minimum, value) || !at_most(value, maximum) {
+        return false;
+    }
+    match step {
+        None => true,
+        Some(step) if valid(step) => {
+            let delta = u128::from(value.numerator) * u128::from(minimum.denominator)
+                - u128::from(minimum.numerator) * u128::from(value.denominator);
+            (delta * u128::from(step.denominator))
+                % (u128::from(value.denominator)
+                    * u128::from(minimum.denominator)
+                    * u128::from(step.numerator))
+                == 0
+        }
+        Some(_) => false,
     }
 }
 
@@ -332,7 +398,11 @@ mod tests {
         judge(&mut devices, Some(&board), &[]);
         for (id, mode, available, reason) in verdicts(&devices) {
             let expected = match () {
-                _ if id.starts_with("camera:v4l2:") && mode.starts_with("MJPG ") => None,
+                _ if id.starts_with("camera:v4l2:")
+                    && (mode.starts_with("MJPG ") || mode.starts_with("YUYV ")) =>
+                {
+                    None
+                }
                 _ if id.starts_with("camera:v4l2:") => Some(USB_FORMAT_REASON),
                 _ if mode.starts_with("NV12 ") => None,
                 _ => Some(FORMAT_REASON),
@@ -387,12 +457,9 @@ mod tests {
             verdicts.collect::<Vec<_>>()
         };
         let reason = |reason: &str| (Some(false), Some(reason.to_string()));
-        let mjpeg = reason(USB_FORMAT_REASON);
+        let raw = (Some(true), None);
         let available = (Some(true), None);
-        assert_eq!(
-            usb_verdicts(&|_| {}),
-            [available.clone(), mjpeg.clone(), available]
-        );
+        assert_eq!(usb_verdicts(&|_| {}), [available.clone(), raw, available]);
         let gspca = |identity: &mut UsbIdentity| {
             identity.driver = Some("gspca_zc3xx".into());
             identity.camera_name = None;
@@ -401,9 +468,9 @@ mod tests {
         let unnamed = reason(USB_NAME_REASON);
         assert_eq!(
             usb_verdicts(&|identity| identity.camera_name = None),
-            [unnamed.clone(), mjpeg.clone(), unnamed]
+            [unnamed.clone(), unnamed.clone(), unnamed]
         );
-        let unknown = [(None, None), mjpeg, (None, None)];
+        let unknown = [(None, None), (None, None), (None, None)];
         assert_eq!(usb_verdicts(&|identity| identity.driver = None), unknown);
     }
 
@@ -472,7 +539,7 @@ mod tests {
                 yuyv.clone(),
             ]
         };
-        let format = (Some(false), Some(USB_FORMAT_REASON.to_string()));
+        let format = available.clone();
         let firsts = [available.clone(), available.clone()];
         let expected = [
             elsewhere.clone(),
@@ -492,6 +559,79 @@ mod tests {
         );
         let other = [available.clone(), available.clone(), available, format];
         assert_eq!(judged("other", later()), [&other[..], &firsts].concat());
+    }
+
+    #[test]
+    fn usb_without_frame_intervals_is_unknown() {
+        let (devices, _) = example();
+        let Peripheral::Camera(camera) = &devices[1] else {
+            panic!("USB fixture");
+        };
+        let Source::V4l2(usb) = &camera.source else {
+            panic!("USB fixture");
+        };
+        for format in ["MJPG", "YUYV"] {
+            let mut mode = camera.modes[1].clone();
+            mode.format = format.into();
+            for size in &mut mode.frame_intervals {
+                size.intervals.clear();
+            }
+            assert!(matches!(
+                usb_verdict(&mode, &usb.identity, &[]),
+                ModeVerdict::Unknown
+            ));
+            mode.frame_intervals.clear();
+            assert!(matches!(
+                usb_verdict(&mode, &usb.identity, &[]),
+                ModeVerdict::Unknown
+            ));
+        }
+    }
+
+    #[test]
+    fn yuyv_odd_width_and_exact_interval_steps() {
+        let (devices, _) = example();
+        let Peripheral::Camera(camera) = &devices[1] else {
+            panic!("USB fixture");
+        };
+        let Source::V4l2(usb) = &camera.source else {
+            panic!("USB fixture");
+        };
+        let mut mode = camera.modes[1].clone();
+        mode.width = Some(641);
+        assert!(matches!(
+            usb_verdict(&mode, &usb.identity, &[]),
+            ModeVerdict::Unavailable(USB_WIDTH_REASON)
+        ));
+        mode.width = None;
+        assert!(matches!(
+            usb_verdict(&mode, &usb.identity, &[]),
+            ModeVerdict::Unknown
+        ));
+        let period = |d| Fraction {
+            numerator: 1,
+            denominator: d,
+        };
+        let step = Interval::Stepwise {
+            minimum: period(60),
+            maximum: period(15),
+            step: period(60),
+        };
+        assert!(interval_contains(step, period(30)));
+        assert!(!interval_contains(step, period(24)));
+        assert!(!interval_contains(step, period(0)));
+        let ntsc = Fraction {
+            numerator: 1001,
+            denominator: 30000,
+        };
+        assert!(interval_contains(
+            Interval::Discrete(ntsc),
+            Fraction {
+                numerator: 2002,
+                denominator: 60000
+            }
+        ));
+        assert!(!interval_contains(Interval::Discrete(ntsc), period(30)));
     }
 
     /// The verdicts stored in the published example, for its USB and MIPI

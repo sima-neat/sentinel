@@ -231,8 +231,7 @@
           ],
           "height": 1472,
           "width": 2560,
-          "available": false,
-          "reason": "Neat's USB camera input reads MJPEG only."
+          "available": true
         }
       ],
       "type": "camera"
