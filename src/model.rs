@@ -67,6 +67,8 @@ pub struct PowerRailStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PowerStatus {
     pub profile: String,
+    #[serde(default)]
+    pub method: String,
     pub sample_interval_ms: u64,
     pub duration_seconds: f64,
     pub valid_samples: u64,
