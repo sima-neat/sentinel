@@ -1,8 +1,11 @@
 //! Standalone Modalix PMBus power telemetry.
 //!
-//! The register protocol and built-in rail profiles intentionally mirror
-//! Neat Core's `PowerTelemetry` implementation, but Sentinel does not link to
-//! or otherwise depend on Neat Core.
+//! The built-in rail profiles intentionally mirror Neat Core's
+//! `PowerTelemetry` implementation, but Sentinel does not link to or otherwise
+//! depend on Neat Core. SoM rails are measured with the `SoM_Power_Share.py`
+//! reference method, ported in [`som_power_share`].
+
+mod som_power_share;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,6 +26,7 @@ const I2C_SMBUS: libc::c_ulong = 0x0720;
 const I2C_SMBUS_WRITE: u8 = 0;
 const I2C_SMBUS_READ: u8 = 1;
 const I2C_SMBUS_BYTE_DATA: u32 = 2;
+const I2C_SMBUS_WORD_DATA: u32 = 3;
 const I2C_SMBUS_BLOCK_MAX: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,18 @@ impl PowerProfile {
         match self {
             Self::ModalixSom => "modalix_som",
             Self::ModalixDvt => "modalix_dvt",
+        }
+    }
+
+    /// How rail power is measured; SoM names the reference script version.
+    pub fn method(self) -> String {
+        match self {
+            Self::ModalixSom => format!(
+                "{}@{}",
+                som_power_share::METHOD,
+                &som_power_share::SCRIPT_SHA256[..12]
+            ),
+            Self::ModalixDvt => "pmbus_pout".into(),
         }
     }
 }
@@ -60,9 +76,14 @@ pub struct PowerConfig {
 impl PowerConfig {
     pub fn auto(sample_interval: Duration) -> Self {
         let profile = detect_power_profile();
+        let floor = match profile {
+            // One SoM pass averages 50 reads on each of 8 rails: about 1 s.
+            PowerProfile::ModalixSom => Duration::from_secs(1),
+            PowerProfile::ModalixDvt => Duration::from_millis(1),
+        };
         Self {
             profile,
-            sample_interval: sample_interval.max(Duration::from_millis(1)),
+            sample_interval: sample_interval.max(floor),
             rails: rails_for_profile(profile),
         }
     }
@@ -84,6 +105,7 @@ struct PowerSnapshot {
 pub trait PowerI2cBackend: Send + Sync {
     fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String>;
     fn read_register(&self, bus: i32, addr: u8, register: u8) -> Result<u8, String>;
+    fn read_word(&self, bus: i32, addr: u8, register: u8) -> Result<u16, String>;
 
     fn read_power(&self, rail: &PowerRailConfig) -> Result<u8, String> {
         self.set_page(rail.i2c_bus, rail.i2c_addr, rail.page)?;
@@ -96,33 +118,24 @@ struct NativePowerI2cBackend {
     devices: Mutex<BTreeMap<i32, fs::File>>,
 }
 
-impl PowerI2cBackend for NativePowerI2cBackend {
-    fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String> {
-        let device = open_device(bus, addr)?;
-        smbus_write_byte_data(device.as_raw_fd(), PAGE_REGISTER, page).map_err(|error| {
-            format!("i2c write page 0x{page:x} failed on /dev/i2c-{bus} addr 0x{addr:x}: {error}")
-        })
-    }
-
-    fn read_register(&self, bus: i32, addr: u8, register: u8) -> Result<u8, String> {
-        let device = open_device(bus, addr)?;
-        smbus_read_byte_data(device.as_raw_fd(), register).map_err(|error| {
-            format!(
-                "i2c read register 0x{register:x} failed on /dev/i2c-{bus} addr 0x{addr:x}: {error}"
-            )
-        })
-    }
-
-    fn read_power(&self, rail: &PowerRailConfig) -> Result<u8, String> {
+impl NativePowerI2cBackend {
+    /// Runs one SMBus transfer on the cached bus descriptor.
+    fn transfer<T>(
+        &self,
+        bus: i32,
+        addr: u8,
+        what: std::fmt::Arguments,
+        op: impl FnOnce(i32) -> Result<T, std::io::Error>,
+    ) -> Result<T, String> {
         let mut devices = self
             .devices
             .lock()
             .map_err(|_| "I2C device cache lock poisoned".to_string())?;
         let result = (|| {
-            let device = match devices.entry(rail.i2c_bus) {
+            let device = match devices.entry(bus) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    let path = format!("/dev/i2c-{}", rail.i2c_bus);
+                    let path = format!("/dev/i2c-{bus}");
                     let device = OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -132,28 +145,43 @@ impl PowerI2cBackend for NativePowerI2cBackend {
                     entry.insert(device)
                 }
             };
-            select_slave(device.as_raw_fd(), rail.i2c_bus, rail.i2c_addr)?;
-            smbus_write_byte_data(device.as_raw_fd(), PAGE_REGISTER, rail.page).map_err(
-                |error| {
-                    format!(
-                        "i2c write page 0x{:x} failed on /dev/i2c-{} addr 0x{:x}: {error}",
-                        rail.page, rail.i2c_bus, rail.i2c_addr
-                    )
-                },
-            )?;
-            smbus_read_byte_data(device.as_raw_fd(), POUT_REGISTER).map_err(|error| {
-                format!(
-                    "i2c read register 0x{POUT_REGISTER:x} failed on /dev/i2c-{} addr 0x{:x}: {error}",
-                    rail.i2c_bus, rail.i2c_addr
-                )
+            select_slave(device.as_raw_fd(), bus, addr)?;
+            op(device.as_raw_fd()).map_err(|error| {
+                format!("i2c {what} failed on /dev/i2c-{bus} addr 0x{addr:x}: {error}")
             })
         })();
         if result.is_err() {
             // Reopen on the next sample after a driver reset or transient bus
             // failure rather than retaining a stale descriptor indefinitely.
-            devices.remove(&rail.i2c_bus);
+            devices.remove(&bus);
         }
         result
+    }
+}
+
+impl PowerI2cBackend for NativePowerI2cBackend {
+    fn set_page(&self, bus: i32, addr: u8, page: u8) -> Result<(), String> {
+        self.transfer(bus, addr, format_args!("write page 0x{page:x}"), |fd| {
+            smbus_write_byte_data(fd, PAGE_REGISTER, page)
+        })
+    }
+
+    fn read_register(&self, bus: i32, addr: u8, register: u8) -> Result<u8, String> {
+        self.transfer(
+            bus,
+            addr,
+            format_args!("read register 0x{register:x}"),
+            |fd| smbus_read_byte_data(fd, register),
+        )
+    }
+
+    fn read_word(&self, bus: i32, addr: u8, register: u8) -> Result<u16, String> {
+        self.transfer(
+            bus,
+            addr,
+            format_args!("read register 0x{register:x}"),
+            |fd| smbus_read_word_data(fd, register),
+        )
     }
 }
 
@@ -182,18 +210,6 @@ struct SmbusIoctlData {
     command: u8,
     size: u32,
     data: *mut SmbusData,
-}
-
-fn open_device(bus: i32, addr: u8) -> Result<fs::File, String> {
-    let path = format!("/dev/i2c-{bus}");
-    let device = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC)
-        .open(&path)
-        .map_err(|error| format!("open {path} failed: {error}"))?;
-    select_slave(device.as_raw_fd(), bus, addr)?;
-    Ok(device)
 }
 
 fn smbus_access(
@@ -234,15 +250,39 @@ fn smbus_read_byte_data(fd: i32, register: u8) -> Result<u8, std::io::Error> {
     Ok(unsafe { data.byte })
 }
 
+fn smbus_read_word_data(fd: i32, register: u8) -> Result<u16, std::io::Error> {
+    let mut data = SmbusData { word: 0 };
+    smbus_access(fd, I2C_SMBUS_READ, register, I2C_SMBUS_WORD_DATA, &mut data)?;
+    Ok(unsafe { data.word })
+}
+
+fn read_som_rail(backend: &dyn PowerI2cBackend, rail: &PowerRailConfig) -> Result<f64, String> {
+    let (pmic, name) = som_power_share::find_rail(rail.i2c_addr, rail.page).ok_or_else(|| {
+        format!(
+            "SoM_Power_Share has no rail at addr 0x{:x} page {}",
+            rail.i2c_addr, rail.page
+        )
+    })?;
+    let reading = som_power_share::read_rail(backend, pmic, name);
+    reading
+        .pout
+        .ok_or_else(|| reading.error.unwrap_or_else(|| "no PMBus sample".into()))
+}
+
 fn read_power_snapshot(config: &PowerConfig, backend: &dyn PowerI2cBackend) -> PowerSnapshot {
     let mut readings = Vec::with_capacity(config.rails.len());
     let mut total_watts = 0.0;
     let mut rails_with_power = 0;
 
     for rail in &config.rails {
-        match backend.read_power(rail) {
-            Ok(raw) => {
-                let watts = f64::from(raw) * 2f64.powi(rail.pout_exponent);
+        let reading = match config.profile {
+            PowerProfile::ModalixSom => read_som_rail(backend, rail),
+            PowerProfile::ModalixDvt => backend
+                .read_power(rail)
+                .map(|raw| f64::from(raw) * 2f64.powi(rail.pout_exponent)),
+        };
+        match reading {
+            Ok(watts) => {
                 total_watts += watts;
                 rails_with_power += 1;
                 readings.push(PowerRailReading {
@@ -359,6 +399,7 @@ impl PowerAccumulator {
     pub fn status(&self) -> PowerStatus {
         PowerStatus {
             profile: self.config.profile.name().into(),
+            method: self.config.profile.method(),
             sample_interval_ms: self.config.sample_interval.as_millis() as u64,
             duration_seconds: self.started_at.elapsed().as_secs_f64(),
             valid_samples: self.valid_samples,
@@ -564,7 +605,7 @@ mod tests {
     #[derive(Default)]
     struct FakeBackend {
         current_pages: Mutex<HashMap<(i32, u8), u8>>,
-        registers: Mutex<HashMap<(i32, u8, u8, u8), u8>>,
+        registers: Mutex<HashMap<(i32, u8, u8, u8), u16>>,
         failures: Mutex<HashMap<(i32, u8, u8), String>>,
         calls: Mutex<Vec<String>>,
     }
@@ -590,6 +631,10 @@ mod tests {
             if let Some(error) = self.failures.lock().unwrap().get(&(bus, addr, register)) {
                 return Err(error.clone());
             }
+            self.read_word(bus, addr, register).map(|word| word as u8)
+        }
+
+        fn read_word(&self, bus: i32, addr: u8, register: u8) -> Result<u16, String> {
             let page = self.current_pages.lock().unwrap()[&(bus, addr)];
             self.registers
                 .lock()
@@ -640,15 +685,62 @@ mod tests {
     }
 
     #[test]
-    fn reads_pout_with_scaling_and_partial_failure() {
+    fn som_rails_are_the_script_rails() {
+        for rail in rails_for_profile(PowerProfile::ModalixSom) {
+            assert_eq!(rail.i2c_bus, som_power_share::I2C_BUS);
+            assert!(
+                som_power_share::find_rail(rail.i2c_addr, rail.page).is_some(),
+                "{}",
+                rail.key
+            );
+        }
+    }
+
+    #[test]
+    fn som_reads_use_the_script_method_with_partial_failure() {
         let mut config = som_config();
         config.rails.truncate(2);
+        let backend = FakeBackend::default();
+        // Core rail 0.75V: Pout = Vout x Iout = 196 * 2^-8 V x 37 * 2^-3 A.
+        backend.registers.lock().unwrap().extend([
+            ((3, 0x4f, 0, 0x20), 0x18),
+            ((3, 0x4f, 0, 0x8b), 196),
+            ((3, 0x4f, 0, 0x8c), 0xe825),
+            ((3, 0x4f, 0, POUT_REGISTER), 0xf00e),
+        ]);
+
+        let snapshot = read_power_snapshot(&config, &backend);
+        assert_eq!(snapshot.rails_with_power, 1);
+        assert_eq!(snapshot.total_watts, 3.541015625);
+        assert_eq!(snapshot.rails[0].watts, Some(3.541015625));
+        assert_eq!(
+            snapshot.rails[1].error.as_deref(),
+            Some("missing fake register")
+        );
+        let calls = backend.calls.lock().unwrap();
+        assert_eq!(calls[..2], ["page:3:4f:0", "read:3:4f:20"]);
+        assert_eq!(
+            calls.iter().filter(|call| *call == "page:3:4f:1").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dvt_reads_pout_with_scaling_and_partial_failure() {
+        let mut config = PowerConfig {
+            profile: PowerProfile::ModalixDvt,
+            sample_interval: Duration::from_millis(100),
+            rails: rails_for_profile(PowerProfile::ModalixDvt),
+        };
+        let mut second = config.rails[0].clone();
+        second.page = 1;
+        config.rails.push(second);
         let backend = FakeBackend::default();
         backend
             .registers
             .lock()
             .unwrap()
-            .insert((3, 0x4f, 0, POUT_REGISTER), 8);
+            .insert((4, 0x4d, 0, POUT_REGISTER), 8);
 
         let snapshot = read_power_snapshot(&config, &backend);
         assert_eq!(snapshot.rails_with_power, 1);
@@ -657,7 +749,7 @@ mod tests {
         assert!(snapshot.rails[1].error.is_some());
         assert_eq!(
             backend.calls.lock().unwrap().as_slice(),
-            ["page:3:4f:0", "read:3:4f:96", "page:3:4f:1", "read:3:4f:96"]
+            ["page:4:4d:0", "read:4:4d:96", "page:4:4d:1", "read:4:4d:96"]
         );
     }
 
@@ -714,6 +806,7 @@ mod tests {
         assert_eq!(values["power_average_watts"], 4.0);
         assert_eq!(values["power_peak_watts"], 5.0);
         let status = aggregate.status();
+        assert_eq!(status.method, "som_power_share@be3d3609012c");
         assert_eq!(status.valid_samples, 2);
         assert_eq!(status.failed_samples, 1);
         assert!(!status.last_sample_valid);

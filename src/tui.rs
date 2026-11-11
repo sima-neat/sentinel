@@ -2471,6 +2471,7 @@ mod tests {
             processes: Vec::new(),
             power: Some(PowerStatus {
                 profile: "modalix_som".into(),
+                method: "som_power_share@be3d3609012c".into(),
                 sample_interval_ms: 100,
                 duration_seconds: 12.0,
                 valid_samples: 120,

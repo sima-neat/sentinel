@@ -1,8 +1,10 @@
 # Power panel
 
-Sentinel samples PMBus `POUT` registers in a dedicated thread. The default
-interval is 100 ms. The normal cache interval is slower, so the UI publishes
-the latest accumulated state rather than displaying every raw PMBus sample.
+Sentinel samples PMBus power registers in a dedicated thread. On the Modalix
+SOM it follows the `SoM_Power_Share.py` reference method: each rail is
+averaged over 50 reads, so one pass over the eight rails takes about one
+second. The normal cache interval is slower, so the UI publishes the latest
+accumulated state rather than displaying every raw PMBus sample.
 
 ## Headline fields
 
@@ -37,7 +39,8 @@ totals as if they measured the same boundary.
 - **Power** is the most recent successful reading for that rail. If a later
   read fails, this value remains at the last success while Errors increments.
 - **Samples** counts successful readings for that rail since daemon start.
-- **Errors** counts failed page-select or PMBus-register reads for that rail.
+- **Errors** counts passes in which the rail returned no reading, because the
+  page select or every PMBus read failed.
 
 For a partially successful pass, the total uses only rails that succeeded in
 that pass while each rail row retains its last successful value. For a
@@ -58,13 +61,15 @@ partial failure, and neither value is fresh after a complete failure.
 | `SOM Platform 1.8V` | Shared 1.8 V SOM platform and peripheral circuitry. |
 | `SOM Platform 3.3V` | Shared 3.3 V SOM platform and peripheral circuitry. |
 
-`SoC and DDR VDD` and `MLA 0.68V` have a 0.25 W reporting step. The other
-standard SOM rails have a 0.03125 W step. Therefore, `0.00 W` with increasing
-Samples and zero Errors is a valid zero-valued register reading at the rail's
-resolution, not a sensor-read failure.
+`SoC and DDR VDD` and `MLA 0.68V` are computed as output voltage times output
+current, with a 0.125 A current step. The other standard SOM rails use the
+PMBus output-power reading, with a 0.03125 W step. Therefore, `0.00 W` with
+increasing Samples and zero Errors is a valid zero-valued register reading at
+the rail's resolution, not a sensor-read failure.
 
-The Modalix DVT profile exposes only `DVT PMIC 0x4d page0`. Its total is not
-directly comparable to the eight-rail SOM total.
+The Modalix DVT profile exposes only `DVT PMIC 0x4d page0`, read as a single
+`POUT` value every 250 ms. Its total is not directly comparable to the
+eight-rail SOM total.
 
 ## Measurement boundary
 
@@ -72,8 +77,12 @@ Current is monitored board-rail power, not AC wall power or complete system
 input power. It can exclude unmonitored rails, regulator losses, carrier-board
 components, storage, fans, and host-side devices.
 
-Every total is an estimate: it is the sum of the regulator POUT readings that the
-PMBus devices report, not a calibrated measurement of the SOM input power.
+Every total is an estimate: it is the sum of the per-rail output power derived
+from the regulator readings that the PMBus devices report, not a calibrated
+measurement of the SOM input power. On the Modalix SOM the registers, scaling,
+and averaging are defined by the `SoM_Power_Share.py` reference script.
+Sentinel reproduces that script and reports its version in the `method` field
+of the power status.
 
 Likewise, model energy is not represented by `MLA 0.68V` alone. Inference also
 uses DDR, SoC, and platform rails. Record the profile, rail health, Sentinel
