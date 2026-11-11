@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Regenerate golden.json from SoM_Power_Share.py.
+"""Regenerate som_power_share_golden.json from SoM_Power_Share.py.
 
-Each case in golden.json holds the PMBus transfers of one rail read: the
+Each case in the golden file holds the PMBus transfers of one rail read: the
 VOUT_MODE byte and SAMPLES rows of [POUT, VOUT, IOUT] words (null = failed
 read). This replays them through the script's own read_rail() and stores what
 the script reports. Sentinel's Rust port has to return the same values
-(`cargo test`), so run this whenever the hardware team sends a new script.
+(`cargo test`), so run this whenever the script is replaced.
 
-Usage: python3 hardware/som_power_share/make_golden.py
+Usage: python3 src/power/fixtures/make_som_power_share_golden.py
 """
 import hashlib
 import importlib.util
@@ -16,7 +16,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "SoM_Power_Share.py"
-GOLDEN = HERE / "golden.json"
+GOLDEN = HERE / "som_power_share_golden.json"
 
 spec = importlib.util.spec_from_file_location("som_power_share", SCRIPT)
 som = importlib.util.module_from_spec(spec)

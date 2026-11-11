@@ -2,10 +2,10 @@
 //!
 //! The built-in rail profiles intentionally mirror Neat Core's
 //! `PowerTelemetry` implementation, but Sentinel does not link to or otherwise
-//! depend on Neat Core. SoM rails are measured with the hardware team's
-//! method, ported in [`hw_som_power_share`].
+//! depend on Neat Core. SoM rails are measured with the `SoM_Power_Share.py`
+//! reference method, ported in [`som_power_share`].
 
-mod hw_som_power_share;
+mod som_power_share;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -43,13 +43,13 @@ impl PowerProfile {
         }
     }
 
-    /// How rail power is measured; SoM names the hardware script version.
+    /// How rail power is measured; SoM names the reference script version.
     pub fn method(self) -> String {
         match self {
             Self::ModalixSom => format!(
                 "{}@{}",
-                hw_som_power_share::METHOD,
-                &hw_som_power_share::SCRIPT_SHA256[..12]
+                som_power_share::METHOD,
+                &som_power_share::SCRIPT_SHA256[..12]
             ),
             Self::ModalixDvt => "pmbus_pout".into(),
         }
@@ -257,14 +257,13 @@ fn smbus_read_word_data(fd: i32, register: u8) -> Result<u16, std::io::Error> {
 }
 
 fn read_som_rail(backend: &dyn PowerI2cBackend, rail: &PowerRailConfig) -> Result<f64, String> {
-    let (pmic, name) =
-        hw_som_power_share::find_rail(rail.i2c_addr, rail.page).ok_or_else(|| {
-            format!(
-                "SoM_Power_Share has no rail at addr 0x{:x} page {}",
-                rail.i2c_addr, rail.page
-            )
-        })?;
-    let reading = hw_som_power_share::read_rail(backend, pmic, name);
+    let (pmic, name) = som_power_share::find_rail(rail.i2c_addr, rail.page).ok_or_else(|| {
+        format!(
+            "SoM_Power_Share has no rail at addr 0x{:x} page {}",
+            rail.i2c_addr, rail.page
+        )
+    })?;
+    let reading = som_power_share::read_rail(backend, pmic, name);
     reading
         .pout
         .ok_or_else(|| reading.error.unwrap_or_else(|| "no PMBus sample".into()))
@@ -686,11 +685,11 @@ mod tests {
     }
 
     #[test]
-    fn som_rails_are_the_hardware_script_rails() {
+    fn som_rails_are_the_script_rails() {
         for rail in rails_for_profile(PowerProfile::ModalixSom) {
-            assert_eq!(rail.i2c_bus, hw_som_power_share::I2C_BUS);
+            assert_eq!(rail.i2c_bus, som_power_share::I2C_BUS);
             assert!(
-                hw_som_power_share::find_rail(rail.i2c_addr, rail.page).is_some(),
+                som_power_share::find_rail(rail.i2c_addr, rail.page).is_some(),
                 "{}",
                 rail.key
             );
@@ -698,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn som_reads_use_the_hardware_method_with_partial_failure() {
+    fn som_reads_use_the_script_method_with_partial_failure() {
         let mut config = som_config();
         config.rails.truncate(2);
         let backend = FakeBackend::default();

@@ -1,7 +1,7 @@
 # Power panel
 
 Sentinel samples PMBus power registers in a dedicated thread. On the Modalix
-SOM it follows the hardware team's `SoM_Power_Share.py` method: each rail is
+SOM it follows the `SoM_Power_Share.py` reference method: each rail is
 averaged over 50 reads, so one pass over the eight rails takes about one
 second. The normal cache interval is slower, so the UI publishes the latest
 accumulated state rather than displaying every raw PMBus sample.
@@ -80,9 +80,9 @@ components, storage, fans, and host-side devices.
 Every total is an estimate: it is the sum of the per-rail output power derived
 from the regulator readings that the PMBus devices report, not a calibrated
 measurement of the SOM input power. On the Modalix SOM the registers, scaling,
-and averaging are defined by the hardware team's `SoM_Power_Share.py`. Sentinel
-reproduces that script and reports its version in the `method` field of the
-power status.
+and averaging are defined by the `SoM_Power_Share.py` reference script.
+Sentinel reproduces that script and reports its version in the `method` field
+of the power status.
 
 Likewise, model energy is not represented by `MLA 0.68V` alone. Inference also
 uses DDR, SoC, and platform rails. Record the profile, rail health, Sentinel

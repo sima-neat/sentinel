@@ -1,13 +1,14 @@
-//! Rust port of the hardware team's `SoM_Power_Share.py`.
+//! Rust port of the `SoM_Power_Share.py` reference script.
 //!
-//! The measurement method is the hardware team's: which registers are read,
-//! how they are decoded, the rail map and every constant below come from their
-//! script, kept unmodified at `hardware/som_power_share/SoM_Power_Share.py`.
-//! Names follow the script so the two read side by side. Sentinel only swaps
-//! the script's `i2cget`/`i2cset` subprocesses for in-process SMBus transfers.
+//! The measurement method comes from that script: which registers are read,
+//! how they are decoded, the rail map and every constant below. It is kept
+//! unmodified at `src/power/fixtures/SoM_Power_Share.py`, and names follow it
+//! so the two read side by side. Sentinel only swaps the script's
+//! `i2cget`/`i2cset` subprocesses for in-process SMBus transfers.
 //!
-//! Change this file only to follow a new script from the hardware team, then
-//! regenerate `hardware/som_power_share/golden.json` with `make_golden.py`.
+//! Change this file only to follow a new version of the script, then
+//! regenerate `fixtures/som_power_share_golden.json` with
+//! `fixtures/make_som_power_share_golden.py`.
 
 use std::thread;
 use std::time::Duration;
@@ -211,8 +212,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    const SCRIPT: &[u8] = include_bytes!("../../hardware/som_power_share/SoM_Power_Share.py");
-    const GOLDEN: &str = include_str!("../../hardware/som_power_share/golden.json");
+    const SCRIPT: &[u8] = include_bytes!("fixtures/SoM_Power_Share.py");
+    const GOLDEN: &str = include_str!("fixtures/som_power_share_golden.json");
 
     /// Plays back the transfers recorded in one golden case.
     struct Replay {
